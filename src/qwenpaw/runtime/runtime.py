@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """8-phase request orchestration.
 
-Replaces ``stream_query.py:Runner.stream_query`` (837 lines) with a
-≤200-line orchestrator that delegates to:
+Delegates to:
 
 * ``Envelope``       — SSE state machine
 * ``AgentBuilder``   — per-request agent assembly
@@ -11,9 +10,6 @@ Replaces ``stream_query.py:Runner.stream_query`` (837 lines) with a
 All insertable features live in ``LifecycleHook`` / ``AgentMode``
 instances registered in the per-Kernel ``HookRegistry``.  The two
 fixed steps (build + execute) are the only agent-touching code.
-
-Gated behind ``experimental_runtime_v2`` feature flag — the old
-``stream_query`` path remains for rollback.
 """
 
 from __future__ import annotations

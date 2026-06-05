@@ -243,14 +243,9 @@ class QwenPawACPAgent(Agent):
         return WORKING_DIR / "workspaces" / agent_id
 
     async def _ensure_workspace(self) -> Any:
-        """Boot a full ``Workspace`` (once) and return its runner."""
+        """Boot a full ``Workspace`` (once) and return it."""
         if self._workspace is not None and self._workspace_ready:
-            runner = self._workspace.runner
-            if runner is None:
-                raise RuntimeError(
-                    "Workspace runner is not available after startup",
-                )
-            return runner
+            return self._workspace
 
         from ...app.workspace.workspace import Workspace
 
@@ -263,14 +258,6 @@ class QwenPawACPAgent(Agent):
         )
         await workspace.start()
 
-        runner = workspace.runner
-        if runner is None:
-            raise RuntimeError(
-                "Workspace started but runner is not available. "
-                "Check agent configuration and workspace setup.",
-            )
-        await runner.init_handler()
-
         self._workspace = workspace
         self._workspace_ready = True
         logger.info(
@@ -278,7 +265,7 @@ class QwenPawACPAgent(Agent):
             agent_id,
             workspace_dir,
         )
-        return runner
+        return workspace
 
     async def _shutdown_workspace(self) -> None:
         """Gracefully stop the workspace."""
@@ -386,7 +373,7 @@ class QwenPawACPAgent(Agent):
         if not text:
             return PromptResponse(stop_reason="end_turn")
 
-        runner = await self._ensure_workspace()
+        workspace = await self._ensure_workspace()
         session_info = self._sessions.get(
             session_id,
             {},
@@ -421,7 +408,7 @@ class QwenPawACPAgent(Agent):
         tracker = _EnvelopeTracker()
 
         try:
-            async for event in runner.stream_query(request):
+            async for event in workspace.stream_query(request):
                 if cancel_event.is_set():
                     logger.info(
                         "ACP prompt cancelled: session=%s",

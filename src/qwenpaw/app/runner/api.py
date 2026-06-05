@@ -64,7 +64,7 @@ async def get_session(
         HTTPException: If session is not initialized
     """
     workspace = await get_workspace(request)
-    return workspace.runner.session
+    return workspace.session
 
 
 @router.get("", response_model=list[ChatSpec])

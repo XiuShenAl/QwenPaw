@@ -47,18 +47,18 @@ class CronManager(ManagerBase):
         self,
         *,
         repo: BaseJobRepository,
-        runner: Any,
+        workspace: Any,
         channel_manager: Any,
         timezone: str = "UTC",  # pylint: disable=redefined-outer-name
         agent_id: Optional[str] = None,
     ):
         self._repo = repo
-        self._runner = runner
+        self._workspace = workspace
         self._channel_manager = channel_manager
         self._agent_id = agent_id
         self._scheduler = AsyncIOScheduler(timezone=timezone)
         self._executor = CronExecutor(
-            runner=runner,
+            workspace=workspace,
             channel_manager=channel_manager,
         )
 
@@ -488,13 +488,14 @@ class CronManager(ManagerBase):
     async def _heartbeat_callback(self) -> None:
         """Run one heartbeat (HEARTBEAT.md as query, optional dispatch)."""
         try:
-            # Get workspace_dir from runner if available
-            workspace_dir = None
-            if hasattr(self._runner, "workspace_dir"):
-                workspace_dir = self._runner.workspace_dir
+            workspace_dir = getattr(
+                self._workspace,
+                "workspace_dir",
+                None,
+            )
 
             await run_heartbeat_once(
-                runner=self._runner,
+                workspace=self._workspace,
                 channel_manager=self._channel_manager,
                 agent_id=self._agent_id,
                 workspace_dir=workspace_dir,
@@ -508,8 +509,7 @@ class CronManager(ManagerBase):
     async def _dream_callback(self) -> None:
         """Run one dream-based memory optimization task."""
         try:
-            # Run dream task
-            await self._runner.memory_manager.dream()
+            await self._workspace.memory_manager.dream()
             logger.debug("Dream task executed successfully")
         except asyncio.CancelledError:
             logger.info("Dream task was cancelled")

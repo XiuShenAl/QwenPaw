@@ -1,16 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Built-in slash command adapters for Phase 4.
+"""Built-in slash command adapters.
 
 Wraps the four existing command mechanisms (daemon, control,
 conversation, skill) as :class:`CommandSpec` instances registered
-into a single :class:`SlashCommandRegistry`.  No business logic is
-rewritten — each adapter constructs the legacy context type and
-delegates to the original handler.
-
-Bridge-period convention: the ``ctx`` passed to each adapter is a
-lightweight :class:`~types.SimpleNamespace` with ``extras`` holding
-``runner``, ``agent``, ``request``, and ``msgs``.  Phase 5 will
-replace this with a proper ``HookContext``.
+into a single :class:`SlashCommandRegistry`.  Each adapter reads
+from :class:`HookContext` (``ctx.kernel``, ``ctx.agent``, etc.)
+and delegates to the original handler.
 """
 
 from __future__ import annotations
@@ -42,42 +37,35 @@ def _make_daemon_adapter(subcommand: str) -> CommandSpec:
         )
         from ..config.config import load_agent_config
 
-        extras = getattr(ctx, "extras", {}) or {}
-        runner = extras.get("runner")
-        agent_id = (
-            getattr(ctx, "agent_id", None)
-            or (getattr(runner, "agent_id", None) if runner else None)
-            or "default"
-        )
+        agent_id = getattr(ctx, "agent_id", None) or "default"
+        kernel = getattr(ctx, "kernel", None)
+
+        try:
+            cfg = load_agent_config(agent_id)
+            agent_name = cfg.name if cfg and cfg.name else "QwenPaw"
+        except Exception:
+            agent_name = "QwenPaw"
 
         daemon_ctx = DaemonContext(
             load_config_fn=lambda: load_agent_config(agent_id),
-            memory_manager=(
-                getattr(runner, "memory_manager", None) if runner else None
+            memory_manager=getattr(kernel, "memory_manager", None),
+            context_manager=getattr(
+                kernel,
+                "context_manager",
+                None,
             ),
-            context_manager=(
-                getattr(runner, "context_manager", None) if runner else None
-            ),
-            manager=getattr(runner, "_manager", None) if runner else None,
+            manager=getattr(kernel, "_manager", None),
             agent_id=agent_id,
             session_id=getattr(ctx, "session_id", "") or "",
-            agent_name=(
-                getattr(runner, "agent_name", "QwenPaw")
-                if runner
-                else "QwenPaw"
-            ),
+            agent_name=agent_name,
         )
 
         full_query = f"/{subcommand} {args}".strip()
         handler_mixin = DaemonCommandHandlerMixin()
-        msg = await handler_mixin.handle_daemon_command(full_query, daemon_ctx)
-
-        if subcommand in ("reload-config", "restart") and runner is not None:
-            invalidate = getattr(runner, "invalidate_agent_name_cache", None)
-            if callable(invalidate):
-                invalidate()
-
-        return msg
+        return await handler_mixin.handle_daemon_command(
+            full_query,
+            daemon_ctx,
+        )
 
     return CommandSpec(
         name=subcommand,
@@ -109,48 +97,51 @@ def _make_daemon_compound_adapter() -> CommandSpec:
                 name="assistant",
                 role="assistant",
                 content=[
-                    TextBlock(type="text", text="Unknown daemon command."),
+                    TextBlock(
+                        type="text",
+                        text="Unknown daemon command.",
+                    ),
                 ],
             )
 
-        extras = getattr(ctx, "extras", {}) or {}
-        runner = extras.get("runner")
-        agent_id = (
-            getattr(ctx, "agent_id", None)
-            or (getattr(runner, "agent_id", None) if runner else None)
-            or "default"
-        )
+        agent_id = getattr(ctx, "agent_id", None) or "default"
+        kernel = getattr(ctx, "kernel", None)
+
+        try:
+            cfg = load_agent_config(agent_id)
+            agent_name = cfg.name if cfg and cfg.name else "QwenPaw"
+        except Exception:
+            agent_name = "QwenPaw"
 
         daemon_ctx = DaemonContext(
             load_config_fn=lambda: load_agent_config(agent_id),
-            memory_manager=(
-                getattr(runner, "memory_manager", None) if runner else None
+            memory_manager=getattr(
+                kernel,
+                "memory_manager",
+                None,
             ),
-            context_manager=(
-                getattr(runner, "context_manager", None) if runner else None
+            context_manager=getattr(
+                kernel,
+                "context_manager",
+                None,
             ),
-            manager=getattr(runner, "_manager", None) if runner else None,
+            manager=getattr(kernel, "_manager", None),
             agent_id=agent_id,
             session_id=getattr(ctx, "session_id", "") or "",
-            agent_name=(
-                getattr(runner, "agent_name", "QwenPaw")
-                if runner
-                else "QwenPaw"
-            ),
+            agent_name=agent_name,
         )
 
         handler_mixin = DaemonCommandHandlerMixin()
-        msg = await handler_mixin.handle_daemon_command(full_query, daemon_ctx)
+        return await handler_mixin.handle_daemon_command(
+            full_query,
+            daemon_ctx,
+        )
 
-        sub = parsed[0]
-        if sub in ("reload-config", "restart") and runner is not None:
-            invalidate = getattr(runner, "invalidate_agent_name_cache", None)
-            if callable(invalidate):
-                invalidate()
-
-        return msg
-
-    return CommandSpec(name="daemon", handler=_handler, category="daemon")
+    return CommandSpec(
+        name="daemon",
+        handler=_handler,
+        category="daemon",
+    )
 
 
 def _collect_daemon_specs() -> list[CommandSpec]:
@@ -183,69 +174,71 @@ def _make_control_adapter(
     handler: Any,
     command_name: str,
 ) -> CommandSpec:
-    """Wrap a :class:`BaseControlCommandHandler` as a :class:`CommandSpec`."""
+    """Wrap a :class:`BaseControlCommandHandler` as
+    a :class:`CommandSpec`.
+    """
 
     async def _handler(ctx: Any, args: str) -> "Msg | None":
         from ..app.runner.control_commands import parse_args
         from ..app.runner.control_commands.base import ControlContext
         from agentscope.message import Msg, TextBlock
 
-        extras = getattr(ctx, "extras", {}) or {}
-        runner = extras.get("runner")
-        request = extras.get("request")
+        kernel = getattr(ctx, "kernel", None)
+        request = getattr(ctx, "request", None)
 
-        workspace = getattr(runner, "_workspace", None) if runner else None
-        if workspace is None:
+        if kernel is None:
             return Msg(
                 name="assistant",
                 role="assistant",
                 content=[
                     TextBlock(
                         type="text",
-                        text="**Error**\n\nControl command unavailable "
-                        "(workspace not initialized)",
+                        text="**Error**\n\nControl command "
+                        "unavailable (kernel not initialized)",
                     ),
                 ],
             )
 
         channel = None
-        channel_mgr = getattr(workspace, "channel_manager", None)
+        channel_mgr = getattr(kernel, "channel_manager", None)
         if channel_mgr is not None:
             channel_id = getattr(request, "channel", None) or "console"
             try:
-                channel = await channel_mgr.get_channel(channel_id)
+                channel = await channel_mgr.get_channel(
+                    channel_id,
+                )
             except Exception:
                 pass
 
         full_query = (
             f"/{command_name} {args}".strip() if args else f"/{command_name}"
         )
-        parsed_args = parse_args(full_query, f"/{command_name}")
+        parsed_args = parse_args(
+            full_query,
+            f"/{command_name}",
+        )
 
         ctrl_ctx = ControlContext(
-            workspace=workspace,
+            workspace=kernel,
             payload=request,
             channel=channel,
-            session_id=getattr(ctx, "session_id", "")
-            or (getattr(request, "session_id", "") if request else ""),
+            session_id=getattr(ctx, "session_id", "") or "",
             user_id=(getattr(request, "user_id", "") if request else "") or "",
-            agent_id=getattr(ctx, "agent_id", "")
-            or (getattr(runner, "agent_id", "") if runner else ""),
+            agent_id=getattr(ctx, "agent_id", "") or "",
             args=parsed_args,
         )
 
         try:
             text = await handler.handle(ctrl_ctx)
         except Exception as e:
-            logger.exception("Control command failed: /%s", command_name)
+            logger.exception(
+                "Control command failed: /%s",
+                command_name,
+            )
             text = f"**Command Failed**\n\n{e}"
 
         return Msg(
-            name=(
-                getattr(runner, "agent_name", "assistant")
-                if runner
-                else "assistant"
-            ),
+            name="assistant",
             role="assistant",
             content=[TextBlock(type="text", text=text)],
         )
@@ -296,8 +289,7 @@ def _make_conversation_adapter(name: str) -> CommandSpec:
     """Wrap one conversation command from :class:`CommandHandler`."""
 
     async def _handler(ctx: Any, args: str) -> "Msg | None":
-        extras = getattr(ctx, "extras", {}) or {}
-        agent = extras.get("agent")
+        agent = getattr(ctx, "agent", None)
         if agent is None:
             return None
 
@@ -356,16 +348,11 @@ async def _skill_fallback_handler(
     raw_text: str,
     ctx: Any,
 ) -> "Msg | None":
-    """Fallback handler for ``/<skill_name>`` dispatch.
-
-    Mirrors ``command_dispatch.py:_handle_skill`` — reads skill from
-    ``agent.toolkit._qp_skills``, returns info or rewrites msgs.
-    """
+    """Fallback handler for ``/<skill_name>`` dispatch."""
     from agentscope.message import Msg, TextBlock
 
-    extras = getattr(ctx, "extras", {}) or {}
-    agent = extras.get("agent")
-    msgs = extras.get("msgs")
+    agent = getattr(ctx, "agent", None)
+    msgs = getattr(ctx, "input_msgs", None)
 
     if agent is None:
         return None

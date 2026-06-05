@@ -95,7 +95,7 @@ class ChannelManager:
         """
         Create channels from env and inject unified process
         (AgentRequest -> Event stream).
-        process is typically runner.stream_query (POST /api/console/chat).
+        process is typically workspace.stream_query.
         on_last_dispatch: called when a user send+reply was sent.
         """
         available = get_available_channels()

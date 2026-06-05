@@ -72,17 +72,17 @@ mimetypes.add_type("image/svg+xml", ".svg")
 load_envs_into_environ()
 
 
-# Dynamic runner that selects the correct workspace runner based on request
+# Dynamic runner that selects the correct workspace based on request
 class DynamicMultiAgentRunner:
-    """Runner wrapper that dynamically routes to the correct workspace runner.
-
-    This allows the runner to work with multiple agents by inspecting
-    the X-Agent-Id header on each request.
+    """Routes each request to the correct Kernel/Workspace and runs it
+    through ``Runtime.run()``.
     """
 
     def __init__(self):
         self.framework_type = "agentscope"
         self._multi_agent_manager = None
+        self._kernel_registry = None
+        self._app_services = None
 
     def set_multi_agent_manager(self, manager):
         """Set the MultiAgentManager instance after initialization."""
@@ -93,36 +93,42 @@ class DynamicMultiAgentRunner:
         self._app_services = app_services
 
     def set_kernel_registry(self, kernel_registry):
-        """Set the KernelRegistry.
-
-        Replaces MultiAgentManager when v2 is active.
-        """
+        """Set the KernelRegistry (preferred over MultiAgentManager)."""
         self._kernel_registry = kernel_registry
 
     async def _get_workspace(self, request):
-        """Get the correct workspace based on request.
-
-        Returns:
-            Workspace: The workspace instance for the current agent.
-        """
+        """Get the correct workspace/kernel based on request."""
         from .agent_context import get_current_agent_id
 
-        # Get agent_id from context (set by middleware or header)
         agent_id = get_current_agent_id()
+        logger.debug("_get_workspace: agent_id=%s", agent_id)
 
-        logger.debug(f"_get_workspace: agent_id={agent_id}")
+        if self._kernel_registry is not None:
+            try:
+                kernel = await self._kernel_registry.get_agent(
+                    agent_id,
+                )
+                logger.debug(
+                    "Got kernel: %s",
+                    kernel.agent_id,
+                )
+                return kernel
+            except Exception:
+                logger.debug(
+                    "KernelRegistry lookup failed for %s, "
+                    "falling back to MultiAgentManager",
+                    agent_id,
+                    exc_info=True,
+                )
 
-        # Get the correct workspace
         if not self._multi_agent_manager:
             raise RuntimeError("MultiAgentManager not initialized")
 
         try:
-            workspace = await self._multi_agent_manager.get_agent(agent_id)
-            logger.debug(
-                "Got workspace: %s, runner: %s",
-                workspace.agent_id,
-                workspace.runner,
+            workspace = await self._multi_agent_manager.get_agent(
+                agent_id,
             )
+            logger.debug("Got workspace: %s", workspace.agent_id)
             return workspace
         except (ValueError, AppBaseException) as e:
             logger.error(f"Agent not found: {e}")
@@ -134,30 +140,12 @@ class DynamicMultiAgentRunner:
             )
             raise
 
-    async def _get_workspace_runner(self, request):
-        """Get the correct workspace runner based on request."""
-        workspace = await self._get_workspace(request)
-        return workspace.runner
-
-    def _is_runtime_v2(self, workspace) -> bool:
-        """Check whether the workspace opts into the new Runtime path."""
-        try:
-            from ..config.config import load_agent_config
-
-            cfg = load_agent_config(workspace.agent_id)
-            running = getattr(cfg, "running", None)
-            return bool(
-                running and getattr(running, "experimental_runtime_v2", False),
-            )
-        except Exception:
-            return False
-
     async def stream_query(self, request, *args, **kwargs):
-        """Dynamically route to the correct workspace runner.
+        """Route to the correct Kernel and run via Runtime.
 
         Registers the task with the workspace's TaskTracker so that
         graceful shutdown during agent reload can detect in-flight
-        background tasks (fixes #3275).
+        background tasks.
         """
         logger.debug("DynamicMultiAgentRunner.stream_query called")
         workspace = None
@@ -166,34 +154,18 @@ class DynamicMultiAgentRunner:
             workspace = await self._get_workspace(request)
 
             run_key = f"ext-{uuid.uuid4().hex}"
-            await workspace.task_tracker.register_external_task(run_key)
+            await workspace.task_tracker.register_external_task(
+                run_key,
+            )
 
-            if self._is_runtime_v2(workspace):
-                # --- v2 path: Runtime.run() ---
-                from ..runtime.runtime import Runtime
+            from ..runtime.runtime import Runtime
 
-                rt = Runtime(
-                    kernel=workspace,
-                    app_services=getattr(self, "_app_services", None),
-                )
-                async for item in rt.run(request):
-                    yield item
-            else:
-                # --- legacy path: Runner.stream_query() ---
-                runner = workspace.runner
-                logger.debug(f"Got runner: {runner}, type: {type(runner)}")
-                count = 0
-                async for item in runner.stream_query(
-                    request,
-                    *args,
-                    **kwargs,
-                ):
-                    count += 1
-                    logger.debug(f"Yielding item #{count}: {type(item)}")
-                    yield item
-                logger.debug(
-                    f"stream_query completed, yielded {count} items",
-                )
+            rt = Runtime(
+                kernel=workspace,
+                app_services=self._app_services,
+            )
+            async for item in rt.run(request):
+                yield item
         except Exception as e:
             logger.error(
                 f"Error in stream_query: {e}",
@@ -205,17 +177,16 @@ class DynamicMultiAgentRunner:
             }
         finally:
             if workspace is not None and run_key is not None:
-                await workspace.task_tracker.unregister_external_task(run_key)
+                await workspace.task_tracker.unregister_external_task(
+                    run_key,
+                )
 
-    # Async context manager support for lifecycle management
     async def __aenter__(self):
-        """
-        No-op context manager entry (workspaces manage their own runners).
-        """
+        """No-op context manager entry."""
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """No-op context manager exit (workspaces manage their own runners)."""
+        """No-op context manager exit."""
         return None
 
 

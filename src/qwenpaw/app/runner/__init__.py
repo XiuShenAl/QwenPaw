@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """Runner module with chat manager for coordinating repository."""
-from .runner import AgentRunner
 from .api import router
 from .manager import ChatManager
 from .models import (
@@ -15,16 +14,11 @@ from .repo import (
 
 
 __all__ = [
-    # Core classes
-    "AgentRunner",
     "ChatManager",
-    # API
     "router",
-    # Models
     "ChatSpec",
     "ChatHistory",
     "ChatsFile",
-    # Chat Repository
     "BaseChatRepository",
     "JsonChatRepository",
 ]

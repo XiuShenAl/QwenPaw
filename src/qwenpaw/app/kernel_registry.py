@@ -41,6 +41,8 @@ class KernelRegistry(MultiAgentManager):
         kernel = Kernel(agent_id=agent_id, workspace_dir=workspace_dir)
         if self._bootstrap_kwargs:
             kernel.bootstrap_plugins(**self._bootstrap_kwargs)
+        if self.app_services is not None:
+            kernel.set_app_services(self.app_services)
         return kernel
 
 

@@ -2,17 +2,16 @@
 """Workspace: Encapsulates a complete independent agent runtime.
 
 Each Workspace represents a standalone agent workspace with its own:
-- Runner (request processing)
 - ChannelManager (communication channels)
 - BaseMemoryManager (conversation memory)
 - MCPClientManager (MCP tool clients)
 - CronManager (scheduled tasks)
 
-All existing single-agent components are reused without modification.
+Request processing is handled by ``Runtime`` (see ``stream_query``).
 """
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Any, AsyncGenerator, Optional
 
 from qwenpaw.config.timezone import normalize_tz
 from qwenpaw.config.utils import load_config
@@ -25,8 +24,8 @@ from .service_factories import (
     create_agent_config_watcher,
     create_mcp_config_watcher,
 )
-from ..runner import AgentRunner
 from ..runner.task_tracker import TaskTracker
+from ..runner.session import SafeJSONSession
 from ..mcp import MCPClientManager
 from ..crons.manager import CronManager
 from ..crons.repo.json_repo import JsonJobRepository
@@ -39,13 +38,13 @@ class Workspace:
     """Single agent workspace with complete runtime components.
 
     Each Workspace is an independent agent instance with its own:
-    - Runner: Processes agent requests
     - ChannelManager: Manages communication channels
     - BaseMemoryManager: Manages conversation memory
     - MCPClientManager: Manages MCP tool clients
     - CronManager: Manages scheduled tasks
 
-    All components use existing single-agent code without modification.
+    Request processing goes through ``stream_query`` which delegates
+    to ``Runtime.run()``.
     """
 
     def __init__(self, agent_id: str, workspace_dir: str):
@@ -67,6 +66,7 @@ class Workspace:
         self._started = False
         self._manager = None  # Reference to MultiAgentManager
         self._task_tracker = TaskTracker()
+        self._app_services: Any = None
 
         # Register all services
         self._register_services()
@@ -77,9 +77,9 @@ class Workspace:
 
     # Service access via properties (delegates to ServiceManager)
     @property
-    def runner(self) -> Optional[AgentRunner]:
-        """Get runner instance from ServiceManager."""
-        return self._service_manager.services.get("runner")
+    def session(self) -> Optional[SafeJSONSession]:
+        """Get session instance from ServiceManager."""
+        return self._service_manager.services.get("session")
 
     @property
     def memory_manager(self):
@@ -130,9 +130,24 @@ class Workspace:
             manager: MultiAgentManager instance
         """
         self._manager = manager
-        # Pass to runner for /daemon restart command
-        if self.runner is not None:
-            self.runner._manager = manager  # pylint: disable=protected-access
+
+    def set_app_services(self, app_services: Any) -> None:
+        """Inject the cross-Kernel AppServiceManager reference."""
+        self._app_services = app_services
+
+    async def stream_query(
+        self,
+        request: Any,
+    ) -> AsyncGenerator[Any, None]:
+        """Process a request through Runtime 2.0.
+
+        Drop-in replacement for the old ``Runner.stream_query()``.
+        """
+        from ...runtime.runtime import Runtime
+
+        rt = Runtime(kernel=self, app_services=self._app_services)
+        async for item in rt.run(request):
+            yield item
 
     def _register_services(  # pylint: disable=too-many-statements
         self,
@@ -149,20 +164,20 @@ class Workspace:
         from ...agents.context.base_context_manager import (
             get_context_manager_backend,
         )
+        from ...constant import WORKING_DIR
 
         sm = self._service_manager
 
-        # Priority 10: Runner
+        # Priority 10: Session (replaces old Runner init)
         sm.register(
             ServiceDescriptor(
-                name="runner",
-                service_class=AgentRunner,
+                name="session",
+                service_class=SafeJSONSession,
                 init_args=lambda ws: {
-                    "agent_id": ws.agent_id,
-                    "workspace_dir": ws.workspace_dir,
-                    "task_tracker": ws._task_tracker,
+                    "save_dir": str(
+                        (ws.workspace_dir or WORKING_DIR) / "sessions",
+                    ),
                 },
-                stop_method="stop",
                 priority=10,
                 concurrent_init=False,
             ),
@@ -179,11 +194,6 @@ class Workspace:
                     "working_dir": str(ws.workspace_dir),
                     "agent_id": ws.agent_id,
                 },
-                post_init=lambda ws, mm: setattr(
-                    ws._service_manager.services["runner"],
-                    "memory_manager",
-                    mm,
-                ),
                 start_method="start",
                 stop_method="close",
                 reusable=True,
@@ -206,11 +216,6 @@ class Workspace:
                     "working_dir": str(ws.workspace_dir),
                     "agent_id": ws.agent_id,
                 },
-                post_init=lambda ws, cm: setattr(
-                    ws._service_manager.services["runner"],
-                    "context_manager",
-                    cm,
-                ),
                 start_method="start",
                 stop_method="close",
                 reusable=True,
@@ -241,19 +246,6 @@ class Workspace:
             ),
         )
 
-        # Priority 25: Runner start
-        sm.register(
-            ServiceDescriptor(
-                name="runner_start",
-                service_class=None,
-                post_init=lambda ws, _: ws._service_manager.services[
-                    "runner"
-                ].start(),
-                priority=25,
-                concurrent_init=False,
-            ),
-        )
-
         # Priority 30: Channel manager
         sm.register(
             ServiceDescriptor(
@@ -272,11 +264,11 @@ class Workspace:
             ServiceDescriptor(
                 name="cron_manager",
                 service_class=CronManager,
-                init_args=lambda ws: {  # pylint: disable=protected-access
+                init_args=lambda ws: {
                     "repo": JsonJobRepository(
                         str(ws.workspace_dir / "jobs.json"),
                     ),
-                    "runner": ws._service_manager.services["runner"],
+                    "workspace": ws,
                     "channel_manager": ws._service_manager.services.get(
                         "channel_manager",
                     ),

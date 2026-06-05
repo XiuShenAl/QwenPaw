@@ -35,7 +35,7 @@ async def test_workspace_components_none_before_start():
             workspace_dir=str(workspace_dir),
         )
 
-        assert workspace.runner is None
+        assert workspace.session is None
         assert workspace.channel_manager is None
         assert workspace.memory_manager is None
         assert workspace.mcp_manager is None

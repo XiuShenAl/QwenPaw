@@ -37,12 +37,10 @@ def _stub_ctx(
     return SimpleNamespace(
         agent_id="test-agent",
         session_id="test-session",
-        extras={
-            "runner": runner,
-            "agent": agent,
-            "request": request,
-            "msgs": msgs or [],
-        },
+        kernel=runner,
+        agent=agent,
+        request=request,
+        input_msgs=msgs or [],
     )
 
 

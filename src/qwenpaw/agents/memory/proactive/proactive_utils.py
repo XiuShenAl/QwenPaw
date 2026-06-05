@@ -125,7 +125,7 @@ async def _process_session_memory(
     from ....app.runner.utils import parse_legacy_memory_state
 
     try:
-        state = await workspace.runner.session.get_session_state_dict(
+        state = await workspace.session.get_session_state_dict(
             session_id,
             user_id,
             channel,

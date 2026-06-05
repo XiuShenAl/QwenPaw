@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, List, Optional, Tuple
+from typing import List, Optional, Tuple
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
@@ -256,18 +256,3 @@ def file_url_to_local_path(url: str) -> Optional[str]:
     ):
         return s
     return None
-
-
-def make_process_from_runner(runner: Any):
-    """
-    Use runner.stream_query as the channel's process.
-
-    Each channel does: native -> build_agent_request_from_native()
-        -> process(request) -> send on each completed message.
-    process is runner.stream_query (POST /api/console/chat).
-
-    Usage::
-        process = make_process_from_runner(runner)
-        manager = ChannelManager.from_env(process)
-    """
-    return runner.stream_query

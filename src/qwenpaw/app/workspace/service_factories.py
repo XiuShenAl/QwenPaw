@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 async def create_mcp_service(ws: "Workspace", mcp):
-    """Initialize MCP manager and attach to runner.
+    """Initialize MCP manager.
 
     Args:
         ws: Workspace instance
@@ -29,12 +29,11 @@ async def create_mcp_service(ws: "Workspace", mcp):
             logger.debug(f"MCP initialized for agent: {ws.agent_id}")
         except Exception as e:
             logger.warning(f"Failed to init MCP: {e}")
-    ws._service_manager.services["runner"].set_mcp_manager(mcp)
     # pylint: enable=protected-access
 
 
 async def create_chat_service(ws: "Workspace", service):
-    """Create and attach chat manager, or reuse existing one.
+    """Create chat manager, or reuse existing one.
 
     Args:
         ws: Workspace instance
@@ -45,19 +44,14 @@ async def create_chat_service(ws: "Workspace", service):
     from ..runner.repo.json_repo import JsonChatRepository
 
     if service is not None:
-        # Reused ChatManager - just wire to new runner
         cm = service
         logger.info(f"Reusing ChatManager for {ws.agent_id}")
     else:
-        # Create new ChatManager
         chats_path = str(ws.workspace_dir / "chats.json")
         chat_repo = JsonChatRepository(chats_path)
         cm = ChatManager(repo=chat_repo)
         ws._service_manager.services["chat_manager"] = cm
         logger.info(f"ChatManager created: {chats_path}")
-
-    # Always wire to new runner
-    ws._service_manager.services["runner"].set_chat_manager(cm)
     # pylint: enable=protected-access
 
 
@@ -77,15 +71,11 @@ async def create_channel_service(ws: "Workspace", _):
 
     from ...config import Config, update_last_dispatch
     from ..channels.manager import ChannelManager
-    from ..channels.utils import make_process_from_runner
     from ..channels.access_control import init_access_control_store
 
-    # Initialise the access-control store for this workspace so that
-    # each workspace maintains its own access_control.json.
     init_access_control_store(ws.workspace_dir)
 
     temp_config = Config(channels=ws._config.channels)
-    runner = ws._service_manager.services["runner"]
 
     def on_last_dispatch(channel, user_id, session_id):
         update_last_dispatch(
@@ -96,23 +86,18 @@ async def create_channel_service(ws: "Workspace", _):
         )
 
     cm = ChannelManager.from_config(
-        process=make_process_from_runner(runner),
+        process=ws.stream_query,
         config=temp_config,
         on_last_dispatch=on_last_dispatch,
         workspace_dir=ws.workspace_dir,
     )
     ws._service_manager.services["channel_manager"] = cm
 
-    # Inject workspace into ChannelManager and all channels
     cm.set_workspace(ws)
 
-    # Propagate agent language to channels for i18n deny messages
     agent_language = getattr(ws._config, "language", "zh") or "zh"
     for ch in cm.channels:
         ch._language = agent_language
-
-    # Inject workspace into runner for control command handlers
-    runner.set_workspace(ws)
 
     return cm
     # pylint: enable=protected-access

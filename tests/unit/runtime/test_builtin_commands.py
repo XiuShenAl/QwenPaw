@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """Unit tests for ``qwenpaw.runtime.builtin_commands``.
 
-Each adapter group is tested by constructing a stub ``ctx`` with the
-required ``extras`` and verifying delegation to the underlying handler.
+Each adapter group is tested by constructing a stub ``ctx`` that
+mimics ``HookContext`` and verifying delegation to the underlying
+handler.
 """
 
 from __future__ import annotations
@@ -26,12 +27,17 @@ from qwenpaw.runtime.builtin_commands import (
 # ---------------------------------------------------------------------------
 
 
-def _stub_ctx(**extras) -> SimpleNamespace:
-    return SimpleNamespace(
-        agent_id="test-agent",
-        session_id="test-session",
-        extras=extras,
-    )
+def _stub_ctx(**kwargs) -> SimpleNamespace:
+    defaults = {
+        "agent_id": "test-agent",
+        "session_id": "test-session",
+        "kernel": None,
+        "agent": None,
+        "request": None,
+        "input_msgs": [],
+    }
+    defaults.update(kwargs)
+    return SimpleNamespace(**defaults)
 
 
 # ---------------------------------------------------------------------------
@@ -237,14 +243,13 @@ async def test_daemon_adapter_delegates_to_handler() -> None:
         instance.handle_daemon_command = AsyncMock(return_value=mock_msg)
         MockMixin.return_value = instance
 
-        runner = SimpleNamespace(
+        kernel = SimpleNamespace(
             agent_id="test",
             memory_manager=None,
             context_manager=None,
             _manager=None,
-            agent_name="QwenPaw",
         )
-        ctx = _stub_ctx(runner=runner)
+        ctx = _stub_ctx(kernel=kernel)
         result = await version_spec.handler(ctx, "")
 
         assert result is mock_msg

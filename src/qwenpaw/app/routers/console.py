@@ -258,7 +258,7 @@ async def post_console_chat_stop(
             "[STOP API] chat_id not found in tracker, trying to resolve "
             "from session_id...",
         )
-        chat_manager = getattr(workspace.runner, "_chat_manager", None)
+        chat_manager = workspace.chat_manager
         if chat_manager:
             resolved_chat_id = await chat_manager.get_chat_id_by_session(
                 session_id=chat_id,
