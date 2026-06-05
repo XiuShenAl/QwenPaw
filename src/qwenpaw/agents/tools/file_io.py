@@ -19,6 +19,7 @@ from ...config.context import (
     get_current_recent_max_bytes,
 )
 from ...constant import WORKING_DIR, TRUNCATION_NOTICE_MARKER
+from ...runtime.tool_registry import tool_descriptor
 
 
 def _resolve_file_path(file_path: str) -> str:
@@ -64,6 +65,7 @@ def _get_encoding_for_file(file_path: str) -> str:
     return "utf-8"
 
 
+@tool_descriptor(requires_sandbox=("file_read",), async_execution=True)
 async def read_file(  # pylint: disable=too-many-return-statements
     file_path: str,
     start_line: Optional[int] = None,
@@ -222,6 +224,7 @@ async def read_file(  # pylint: disable=too-many-return-statements
         )
 
 
+@tool_descriptor(requires_sandbox=("file_write",), async_execution=True)
 async def write_file(
     file_path: str,
     content: str,
@@ -277,6 +280,7 @@ async def write_file(
 
 
 # pylint: disable=too-many-return-statements
+@tool_descriptor(requires_sandbox=("file_write",), async_execution=True)
 async def edit_file(
     file_path: str,
     old_text: str,
@@ -381,6 +385,11 @@ async def edit_file(
     )
 
 
+@tool_descriptor(
+    requires_sandbox=("file_write",),
+    async_execution=True,
+    enabled_by_default=False,
+)
 async def append_file(
     file_path: str,
     content: str,

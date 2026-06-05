@@ -7,9 +7,11 @@ from agentscope.message import TextBlock
 from agentscope.tool import ToolChunk
 from agentscope.message import ToolResultState
 
+from ...runtime.tool_registry import tool_descriptor
 from ...token_usage import get_token_usage_manager
 
 
+@tool_descriptor(async_execution=True)
 async def get_token_usage(
     days: int = 30,
     model_name: str | None = None,

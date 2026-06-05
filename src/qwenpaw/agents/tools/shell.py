@@ -24,6 +24,7 @@ from ...config.context import (
     get_current_shell_command_timeout,
     get_current_workspace_dir,
 )
+from ...runtime.tool_registry import tool_descriptor
 
 
 def _kill_process_tree_win32(pid: int) -> None:
@@ -360,6 +361,7 @@ def _execute_subprocess_sync(
 
 
 # pylint: disable=too-many-branches, too-many-statements
+@tool_descriptor(requires_sandbox=("shell_exec",), async_execution=True)
 async def execute_shell_command(
     command: str,
     timeout: float = 60.0,

@@ -2,6 +2,7 @@
 # pylint: disable=too-many-nested-blocks
 """Runner base class — drives an agentscope 2.0 Agent and translates
 events into the frontend's SSE envelope protocol."""
+
 from __future__ import annotations
 
 import json
@@ -22,6 +23,18 @@ from .message_convert import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Module-level lazy cache for the unified command registry (Phase 4).
+_DEFAULT_CMD_REGISTRY = None
+
+
+def _get_default_cmd_registry():
+    from .builtin_commands import build_default_command_registry
+
+    global _DEFAULT_CMD_REGISTRY  # noqa: PLW0603
+    if _DEFAULT_CMD_REGISTRY is None:
+        _DEFAULT_CMD_REGISTRY = build_default_command_registry()
+    return _DEFAULT_CMD_REGISTRY
 
 
 class Runner:
@@ -303,19 +316,26 @@ class Runner:
                         exc_info=True,
                     )
 
-            # Slash-command interception: conversation, daemon, control,
-            # and skill commands are all dispatched here before driving
-            # the model.
+            # Slash-command interception: all command categories
+            # (conversation, daemon, control, skill) are dispatched
+            # via SlashCommandRegistry before driving the model.
             _last_text = _get_last_user_text(msgs)
             if _last_text and _last_text.startswith("/"):
-                from ..app.runner.command_dispatch import dispatch_command
+                from types import SimpleNamespace as _NS
 
-                cmd_msg = await dispatch_command(
+                _cmd_ctx = _NS(
+                    agent_id=getattr(self, "agent_id", None),
+                    session_id=session_id,
+                    extras={
+                        "runner": self,
+                        "agent": agent,
+                        "request": request,
+                        "msgs": msgs,
+                    },
+                )
+                cmd_msg = await _get_default_cmd_registry().dispatch(
                     _last_text,
-                    agent=agent,
-                    runner=self,
-                    request=request,
-                    msgs=msgs,
+                    _cmd_ctx,
                 )
                 if cmd_msg is not None:
                     cmd_text = cmd_msg.get_text_content() or ""

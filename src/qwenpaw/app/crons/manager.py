@@ -26,6 +26,7 @@ from .heartbeat import (
 )
 from .models import CronExecutionRecord, CronJobSpec, CronJobState
 from .repo.base import BaseJobRepository
+from ...api_action import ManagerBase, api_action
 
 HEARTBEAT_JOB_ID = "_heartbeat"
 DREAM_JOB_ID = "_dream"
@@ -39,7 +40,9 @@ class _Runtime:
     sem: asyncio.Semaphore
 
 
-class CronManager:
+class CronManager(ManagerBase):
+    endpoint_prefix = "crons"
+
     def __init__(
         self,
         *,
@@ -154,6 +157,12 @@ class CronManager:
 
     # ----- read/state -----
 
+    @api_action(
+        methods={"http", "cli", "slash"},
+        http_method="GET",
+        http_path="/crons/jobs",
+        slash_command="cron-list",
+    )
     async def list_jobs(self) -> list[CronJobSpec]:
         return await self._repo.list_jobs()
 
@@ -170,12 +179,25 @@ class CronManager:
 
     # ----- write/control -----
 
+    @api_action(
+        methods={"http", "cli", "slash"},
+        http_method="POST",
+        http_path="/crons/jobs",
+        request_model=CronJobSpec,
+        slash_command="cron-create",
+    )
     async def create_or_replace_job(self, spec: CronJobSpec) -> None:
         async with self._lock:
             await self._repo.upsert_job(spec)
             if self._started:
                 await self._register_or_update(spec)
 
+    @api_action(
+        methods={"http", "cli", "slash"},
+        http_method="DELETE",
+        http_path="/crons/jobs/{job_id}",
+        slash_command="cron-delete",
+    )
     async def delete_job(self, job_id: str) -> bool:
         async with self._lock:
             if self._started and self._scheduler.get_job(job_id):

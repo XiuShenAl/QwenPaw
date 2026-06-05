@@ -14,6 +14,8 @@ from agentscope.message import DataBlock, TextBlock, URLSource
 from agentscope.tool import ToolChunk
 from agentscope.message import ToolResultState
 
+from ...runtime.tool_registry import tool_descriptor
+
 logger = logging.getLogger(__name__)
 
 
@@ -318,6 +320,7 @@ def _get_multimodal_fallback_hint(media_type: str, path: str) -> str:
     )
 
 
+@tool_descriptor(requires_sandbox=("file_read",), async_execution=True)
 async def view_image(image_path: str) -> ToolChunk:
     """Load an image file into the LLM context so the model can see it.
 
@@ -390,6 +393,7 @@ async def view_image(image_path: str) -> ToolChunk:
     )
 
 
+@tool_descriptor(requires_sandbox=("file_read",), async_execution=True)
 async def view_video(video_path: str) -> ToolChunk:
     """Load a video file into the LLM context so the model can see it.
 

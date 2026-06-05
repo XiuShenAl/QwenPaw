@@ -24,38 +24,16 @@ from .middlewares import (
 )
 from .model_factory import create_model_and_formatter
 from ..runtime import GuardedFunctionTool
-from .prompt import (
-    build_multimodal_hint,
-    build_system_prompt_from_working_dir,
-)
+from ..runtime.builder import AgentBuilder
+from ..runtime.prompt_contributors import build_default_prompt_manager
+from ..runtime.tool_registry import ToolRegistry
 from .skill_system import (
     ensure_skills_initialized,
     get_workspace_skills_dir,
     resolve_effective_skills,
 )
 from .coding_mode_mixin import CodingModeMixin
-from .tools import (
-    browser_use,
-    delegate_external_agent,
-    chat_with_agent,
-    check_agent_task,
-    submit_to_agent,
-    desktop_screenshot,
-    edit_file,
-    execute_shell_command,
-    get_current_time,
-    get_token_usage,
-    glob_search,
-    grep_search,
-    list_agents,
-    materialize_skill,
-    read_file,
-    send_file_to_user,
-    set_user_timezone,
-    view_image,
-    view_video,
-    write_file,
-)
+from .tools import discover_builtin_tool_funcs
 from ..constant import (
     MEDIA_UNSUPPORTED_PLACEHOLDER,
     WORKING_DIR,
@@ -68,6 +46,27 @@ if TYPE_CHECKING:
     from ..config.config import AgentProfileConfig
 
 logger = logging.getLogger(__name__)
+
+
+_DEFAULT_TOOL_REGISTRY: ToolRegistry | None = None
+
+
+def _get_default_tool_registry() -> ToolRegistry:
+    """Lazy-build a process-wide :class:`ToolRegistry`.
+
+    The legacy ``_create_toolkit`` rebuilt the tool list per request;
+    here we cache one registry — descriptors are immutable, so a single
+    instance is safe to share. Phase 5 will replace this with a
+    per-Kernel registry populated during lifespan startup.
+    """
+    global _DEFAULT_TOOL_REGISTRY  # noqa: PLW0603
+    if _DEFAULT_TOOL_REGISTRY is None:
+        reg = ToolRegistry()
+        for fn in discover_builtin_tool_funcs():
+            desc = fn._tool_descriptor  # pylint: disable=protected-access
+            reg.register(desc)
+        _DEFAULT_TOOL_REGISTRY = reg
+    return _DEFAULT_TOOL_REGISTRY
 
 
 class QwenPawAgent(CodingModeMixin, Agent):
@@ -93,6 +92,7 @@ class QwenPawAgent(CodingModeMixin, Agent):
         request_context: Optional[dict[str, str]] = None,
         workspace_dir: Path | None = None,
         task_tracker: Any | None = None,
+        toolkit: Toolkit | None = None,
     ):
         """Initialize QwenPawAgent.
 
@@ -136,10 +136,12 @@ class QwenPawAgent(CodingModeMixin, Agent):
         except Exception:  # pylint: disable=broad-except
             effective_skills = []
 
-        # Initialize toolkit with built-in tools
-        toolkit = self._create_toolkit(
-            effective_skills=effective_skills,
-        )
+        # Initialize toolkit — either use the externally-built one or
+        # construct via AgentBuilder + the per-process ToolRegistry.
+        if toolkit is None:
+            toolkit = self._build_toolkit_via_registry(
+                effective_skills=effective_skills,
+            )
 
         # Load and register skills
         self._register_skills(toolkit, effective_skills=effective_skills)
@@ -149,7 +151,8 @@ class QwenPawAgent(CodingModeMixin, Agent):
         self.memory_manager = memory_manager
         self.context_manager = context_manager
 
-        # Build system prompt
+        # Build prompt manager and system prompt
+        self._prompt_manager = build_default_prompt_manager()
         sys_prompt = self._build_sys_prompt()
 
         # Create model and formatter using factory method
@@ -281,119 +284,43 @@ class QwenPawAgent(CodingModeMixin, Agent):
                 "state_dict has neither 'state' nor 'memory' key",
             )
 
-    def _create_toolkit(
+    def _build_toolkit_via_registry(
         self,
         effective_skills: list[str] | None = None,
     ) -> Toolkit:
-        """Create and populate toolkit with built-in tools.
+        """Build the toolkit through :class:`AgentBuilder`.
 
-        Collects all enabled tool functions, wraps them in ``FunctionTool``
-        (or ``GuardedFunctionTool`` when ``agent_id`` is set), and passes
-        the list to ``Toolkit(tools=[...])`` at construction time.
+        Used when the caller did not pre-build a toolkit. The per-Kernel
+        path that Phase 5 introduces will construct the registry inside
+        the lifespan and pre-build the toolkit before reaching here,
+        avoiding the per-request ``discover_builtin_tool_funcs()`` cost.
         """
         effective_skills = effective_skills or []
         agent_id = self._agent_config.id
 
-        # Check which tools are enabled from agent config
-        enabled_tools: dict[str, bool] = {}
+        registry = _get_default_tool_registry()
+        active_modes: set[str] = (
+            {"coding"} if self._coding_mode_enabled() else set()
+        )
         try:
-            if hasattr(self._agent_config, "tools") and hasattr(
-                self._agent_config.tools,
-                "builtin_tools",
-            ):
-                builtin_tools = self._agent_config.tools.builtin_tools
-                enabled_tools = {
-                    name: tool.enabled for name, tool in builtin_tools.items()
-                }
-        except Exception as e:
-            logger.warning(
-                f"Failed to load agent tools config: {e}, "
-                "all tools will be disabled",
-            )
-
-        # Map of tool functions (hardcoded builtin tools)
-        tool_functions: dict[str, Any] = {
-            "execute_shell_command": execute_shell_command,
-            "read_file": read_file,
-            "write_file": write_file,
-            "edit_file": edit_file,
-            "grep_search": grep_search,
-            "glob_search": glob_search,
-            "browser_use": browser_use,
-            "desktop_screenshot": desktop_screenshot,
-            "view_image": view_image,
-            "view_video": view_video,
-            "send_file_to_user": send_file_to_user,
-            "get_current_time": get_current_time,
-            "set_user_timezone": set_user_timezone,
-            "get_token_usage": get_token_usage,
-            "delegate_external_agent": delegate_external_agent,
-            "list_agents": list_agents,
-            "chat_with_agent": chat_with_agent,
-            "submit_to_agent": submit_to_agent,
-            "check_agent_task": check_agent_task,
-            **(
-                {"materialize_skill": materialize_skill}
-                if "make-skill" in effective_skills
-                else {}
-            ),
-        }
-
-        hardcoded_builtin_tools = set(tool_functions.keys())
-
-        # Dynamically load plugin-registered tools
-        from . import tools as tools_module
-
-        plugin_tools = set()
-        for tool_name in getattr(tools_module, "__all__", []):
-            if tool_name not in tool_functions:
-                tool_func = getattr(tools_module, tool_name, None)
-                if callable(tool_func):
-                    tool_functions[tool_name] = tool_func
-                    plugin_tools.add(tool_name)
-                    logger.debug(
-                        "Discovered plugin tool: %s",
-                        tool_name,
-                    )
-
-        # Build FunctionTool / GuardedFunctionTool instances
-        tool_instances = []
-        for tool_name, tool_func in tool_functions.items():
-            if tool_name in plugin_tools:
-                if tool_name not in enabled_tools:
-                    logger.debug(
-                        "Skipped unconfigured plugin tool: %s",
-                        tool_name,
-                    )
-                    continue
-
-            if not enabled_tools.get(
-                tool_name,
-                tool_name in hardcoded_builtin_tools,
-            ):
-                logger.debug("Skipped disabled tool: %s", tool_name)
-                continue
-
-            tool_instances.append(
-                GuardedFunctionTool(
-                    tool_func,
-                    agent_id=agent_id,
-                    request_context=self._request_context,
-                ),
-            )
-            logger.debug("Registered tool: %s", tool_name)
-
-        # Coding Mode tools (lsp, ast_search)
-        try:
-            coding_tools = self._collect_coding_mode_tools(
+            extra_tools = self._collect_coding_mode_tools(
                 agent_id=agent_id,
                 request_context=self._request_context,
             )
-            tool_instances.extend(coding_tools)
-        except Exception as e:  # pylint: disable=broad-except
-            logger.warning(f"Failed to register Coding Mode tools: {e}")
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("Failed to collect Coding Mode tools: %s", exc)
+            extra_tools = []
 
-        return Toolkit(tools=tool_instances, mcps=self._mcp_clients or None)
+        builder = AgentBuilder(tool_registry=registry)
+        return builder.build_toolkit(
+            self._agent_config,
+            agent_id=agent_id,
+            request_context=self._request_context,
+            active_modes=active_modes,
+            effective_skills=effective_skills,
+            extra_tools=extra_tools,
+            mcp_clients=self._mcp_clients or None,
+        )
 
     def _register_skills(
         self,
@@ -427,44 +354,42 @@ class QwenPawAgent(CodingModeMixin, Agent):
                     )
 
     def _build_sys_prompt(self) -> str:
-        """Build system prompt from working dir files and env context.
+        """Build system prompt via :class:`PromptManager`.
 
-        Returns:
-            Complete system prompt string
+        Constructs a lightweight context stub and delegates to
+        ``self._prompt_manager.build_sync(ctx)``.
         """
-        # Get agent_id from request_context
+        ctx = self._make_prompt_context()
+        prompt = self._prompt_manager.build_sync(ctx)
+        logger.debug("System prompt:\n%s...", prompt[:100])
+        return prompt
+
+    def _make_prompt_context(self) -> Any:
+        """Build the stub context object that contributors read."""
+        from types import SimpleNamespace
+
+        heartbeat_enabled = False
+        hb = getattr(self._agent_config, "heartbeat", None)
+        if hb is not None:
+            heartbeat_enabled = getattr(hb, "enabled", False)
+
         agent_id = (
             self._request_context.get("agent_id")
             if self._request_context
             else None
         )
 
-        # Check if heartbeat is enabled in agent config
-        heartbeat_enabled = False
-        if (
-            hasattr(self._agent_config, "heartbeat")
-            and self._agent_config.heartbeat is not None
-        ):
-            heartbeat_enabled = self._agent_config.heartbeat.enabled
-
-        sys_prompt = build_system_prompt_from_working_dir(
-            working_dir=self._workspace_dir,
+        return SimpleNamespace(
+            workspace_dir=self._workspace_dir or WORKING_DIR,
             agent_id=agent_id,
-            heartbeat_enabled=heartbeat_enabled,
-            language=self._language,
-            memory_manager=self.memory_manager,
+            extras={
+                "language": self._language,
+                "heartbeat_enabled": heartbeat_enabled,
+                "memory_manager": self.memory_manager,
+                "env_context": self._env_context,
+                "agent_config": self._agent_config,
+            },
         )
-        logger.debug("System prompt:\n%s...", sys_prompt[:100])
-
-        # Inject multimodal capability awareness
-        multimodal_hint = build_multimodal_hint()
-        if multimodal_hint:
-            sys_prompt = sys_prompt + "\n\n" + multimodal_hint
-
-        if self._env_context is not None:
-            sys_prompt = sys_prompt + "\n\n" + self._env_context
-
-        return sys_prompt
 
     def _build_middlewares(self) -> list:
         """Build the middleware list for the agent constructor."""

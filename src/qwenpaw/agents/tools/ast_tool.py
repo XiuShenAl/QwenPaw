@@ -10,6 +10,7 @@ apply a rewrite it must read matches first and then call ``edit_file``
 for each location.  This keeps the diff / approval / undo path on a
 single ``edit_file`` entry-point (see PROPOSAL §四 of the design doc).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -26,6 +27,7 @@ from agentscope.message import ToolResultState
 
 from ...config.context import get_current_workspace_dir
 from ...constant import WORKING_DIR
+from ...runtime.tool_registry import tool_descriptor
 from .file_io import _resolve_file_path
 
 # ---------------------------------------------------------------------
@@ -214,6 +216,11 @@ def _format_matches(
 # ---------------------------------------------------------------------
 
 
+@tool_descriptor(
+    requires_modes=("coding",),
+    requires_sandbox=("file_read",),
+    async_execution=True,
+)
 async def ast_search(  # pylint: disable=too-many-return-statements
     pattern: str,
     language: str,

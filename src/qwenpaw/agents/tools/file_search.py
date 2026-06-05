@@ -18,6 +18,7 @@ from agentscope.message import ToolResultState
 
 from ...constant import WORKING_DIR
 from ...config.context import get_current_workspace_dir
+from ...runtime.tool_registry import tool_descriptor
 from .file_io import _resolve_file_path
 
 # ---------------------------------------------------------------------------
@@ -480,6 +481,7 @@ def _walk_and_glob(
 # ---------------------------------------------------------------------------
 
 
+@tool_descriptor(requires_sandbox=("file_read",), async_execution=True)
 async def grep_search(
     pattern: str,
     path: Optional[str] = None,
@@ -581,6 +583,7 @@ async def grep_search(
     return _make_response(result)
 
 
+@tool_descriptor(requires_sandbox=("file_read",), async_execution=True)
 async def glob_search(
     pattern: str,
     path: Optional[str] = None,

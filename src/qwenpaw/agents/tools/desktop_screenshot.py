@@ -13,6 +13,7 @@ from agentscope.message import ToolResultState
 
 from ...config.context import get_current_workspace_dir
 from ...constant import WORKING_DIR
+from ...runtime.tool_registry import tool_descriptor
 
 
 def _tool_error(msg: str) -> ToolChunk:
@@ -105,6 +106,7 @@ def _capture_macos_screencapture(
         return _tool_error(f"desktop_screenshot failed: {e!s}")
 
 
+@tool_descriptor(requires_sandbox=("file_write",), async_execution=True)
 async def desktop_screenshot(
     path: str = "",
     capture_window: bool = False,

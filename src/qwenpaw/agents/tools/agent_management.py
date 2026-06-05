@@ -14,8 +14,8 @@ from agentscope.tool import ToolChunk
 from agentscope.message import ToolResultState
 
 from ...config.utils import read_last_api
+from ...runtime.tool_registry import tool_descriptor
 from ...utils.http import trust_env_for_url
-
 
 DEFAULT_AGENT_API_BASE_URL = "http://127.0.0.1:8088"
 DEFAULT_AGENT_API_TIMEOUT = 30.0
@@ -424,6 +424,7 @@ def format_background_status_text(
     return "\n".join(parts)
 
 
+@tool_descriptor(async_execution=True)
 async def list_agents(
     base_url: Optional[str] = None,
 ) -> ToolChunk:
@@ -438,6 +439,7 @@ async def list_agents(
     return _tool_text_response(_json_text(result))
 
 
+@tool_descriptor(async_execution=True)
 async def chat_with_agent(
     to_agent: str,
     text: str,
@@ -521,6 +523,7 @@ async def chat_with_agent(
     )
 
 
+@tool_descriptor(async_execution=True)
 async def submit_to_agent(
     to_agent: str,
     text: str,
@@ -604,6 +607,7 @@ async def submit_to_agent(
     )
 
 
+@tool_descriptor(async_execution=True)
 async def check_agent_task(
     task_id: str,
 ) -> ToolChunk:

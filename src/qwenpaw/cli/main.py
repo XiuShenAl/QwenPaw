@@ -143,6 +143,7 @@ class LazyGroup(click.Group):
         ),
         "task": ("qwenpaw.cli.task_cmd", "task_cmd", ".task_cmd"),
         "doctor": ("qwenpaw.cli.doctor_cmd", "doctor_cmd", ".doctor_cmd"),
+        "auto": ("qwenpaw.cli.auto", "auto_group", ".auto"),
     },
 )
 @click.version_option(version=__version__, prog_name="QwenPaw")

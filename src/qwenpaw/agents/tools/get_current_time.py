@@ -10,10 +10,12 @@ from agentscope.tool import ToolChunk
 from agentscope.message import ToolResultState
 
 from ...config import load_config, save_config
+from ...runtime.tool_registry import tool_descriptor
 
 logger = logging.getLogger(__name__)
 
 
+@tool_descriptor(async_execution=True)
 async def get_current_time() -> ToolChunk:
     """Get the current time in format `%Y-%m-%d %H:%M:%S TZ (Day)`,
     e.g. "2026-02-13 19:30:45 Asia/Shanghai (Friday)".
@@ -50,6 +52,7 @@ async def get_current_time() -> ToolChunk:
     )
 
 
+@tool_descriptor(async_execution=True)
 async def set_user_timezone(timezone_name: str) -> ToolChunk:
     """Set the user timezone.
     Only call this tool when the user explicitly asks to change their timezone.

@@ -38,6 +38,7 @@ from ...config import (
 )
 from ...config.context import get_current_workspace_dir
 from ...constant import WORKING_DIR, EnvVarLoader
+from ...runtime.tool_registry import tool_descriptor
 
 from .browser_snapshot import build_role_snapshot_from_aria
 
@@ -4159,6 +4160,7 @@ def _workspace_dir_key(workspace_dir: str | Path) -> str:
         return str(path.absolute())
 
 
+@tool_descriptor(async_execution=True)
 async def browser_use(  # pylint: disable=R0911,R0912
     action: str,
     url: str = "",

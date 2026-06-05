@@ -9,6 +9,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -87,6 +88,17 @@ class DynamicMultiAgentRunner:
         """Set the MultiAgentManager instance after initialization."""
         self._multi_agent_manager = manager
 
+    def set_app_services(self, app_services):
+        """Set the cross-Kernel AppServiceManager reference."""
+        self._app_services = app_services
+
+    def set_kernel_registry(self, kernel_registry):
+        """Set the KernelRegistry.
+
+        Replaces MultiAgentManager when v2 is active.
+        """
+        self._kernel_registry = kernel_registry
+
     async def _get_workspace(self, request):
         """Get the correct workspace based on request.
 
@@ -127,6 +139,19 @@ class DynamicMultiAgentRunner:
         workspace = await self._get_workspace(request)
         return workspace.runner
 
+    def _is_runtime_v2(self, workspace) -> bool:
+        """Check whether the workspace opts into the new Runtime path."""
+        try:
+            from ..config.config import load_agent_config
+
+            cfg = load_agent_config(workspace.agent_id)
+            running = getattr(cfg, "running", None)
+            return bool(
+                running and getattr(running, "experimental_runtime_v2", False),
+            )
+        except Exception:
+            return False
+
     async def stream_query(self, request, *args, **kwargs):
         """Dynamically route to the correct workspace runner.
 
@@ -139,34 +164,46 @@ class DynamicMultiAgentRunner:
         run_key = None
         try:
             workspace = await self._get_workspace(request)
-            runner = workspace.runner
-            logger.debug(f"Got runner: {runner}, type: {type(runner)}")
 
-            # Register this task with the workspace's TaskTracker so
-            # _graceful_stop_old_instance() can see it during reload.
             run_key = f"ext-{uuid.uuid4().hex}"
             await workspace.task_tracker.register_external_task(run_key)
 
-            # Delegate to the actual runner's stream_query generator
-            count = 0
-            async for item in runner.stream_query(request, *args, **kwargs):
-                count += 1
-                logger.debug(f"Yielding item #{count}: {type(item)}")
-                yield item
-            logger.debug(f"stream_query completed, yielded {count} items")
+            if self._is_runtime_v2(workspace):
+                # --- v2 path: Runtime.run() ---
+                from ..runtime.runtime import Runtime
+
+                rt = Runtime(
+                    kernel=workspace,
+                    app_services=getattr(self, "_app_services", None),
+                )
+                async for item in rt.run(request):
+                    yield item
+            else:
+                # --- legacy path: Runner.stream_query() ---
+                runner = workspace.runner
+                logger.debug(f"Got runner: {runner}, type: {type(runner)}")
+                count = 0
+                async for item in runner.stream_query(
+                    request,
+                    *args,
+                    **kwargs,
+                ):
+                    count += 1
+                    logger.debug(f"Yielding item #{count}: {type(item)}")
+                    yield item
+                logger.debug(
+                    f"stream_query completed, yielded {count} items",
+                )
         except Exception as e:
             logger.error(
                 f"Error in stream_query: {e}",
                 exc_info=True,
             )
-            # Yield error message to client
             yield {
                 "error": str(e),
                 "type": "error",
             }
         finally:
-            # Always unregister the task when done (success, error,
-            # or cancellation).
             if workspace is not None and run_key is not None:
                 await workspace.task_tracker.unregister_external_task(run_key)
 
@@ -242,6 +279,90 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
     provider_manager = ProviderManager.get_instance()
     local_model_manager = LocalModelManager.get_instance()
 
+    # --- Runtime v2: AppServiceManager + KernelRegistry ---
+    app_services = None
+    kernel_registry = None
+    try:
+        from .app_services import AppServiceManager
+        from .kernel_registry import KernelRegistry
+
+        app_services = AppServiceManager()
+        await app_services.start()
+        app.state.app_services = app_services
+
+        kernel_registry = KernelRegistry(
+            app_services=app_services,
+        )
+        app.state.kernel_registry = kernel_registry
+        logger.debug("Runtime v2 infrastructure initialized")
+
+        # --- Phase 6: @api_action auto-registration ---
+        _phase6_command_specs: list[Any] = []
+        try:
+            from ..api_action import ManagerRegistry
+            from ._api_action_routes import (
+                collect_slash_specs_from_api_actions,
+                register_http_routes,
+            )
+            from .crons.manager import CronManager
+
+            manager_registry = ManagerRegistry()
+
+            def _get_default_cron_mgr(app_inst: Any) -> Any:
+                mam = getattr(app_inst.state, "multi_agent_manager", None)
+                if mam is None:
+                    return None
+                # pylint: disable-next=protected-access
+                ws = mam._workspaces.get("default")
+                return getattr(ws, "cron_manager", None) if ws else None
+
+            manager_registry.register(CronManager, _get_default_cron_mgr)
+            app.state.manager_registry = manager_registry
+
+            n_routes = register_http_routes(app, manager_registry)
+            logger.debug("Phase 6: auto-registered %d HTTP routes", n_routes)
+
+            _phase6_command_specs.extend(
+                collect_slash_specs_from_api_actions(manager_registry),
+            )
+            logger.debug(
+                "Phase 6: collected %d slash specs from @api_action",
+                len(_phase6_command_specs),
+            )
+        except Exception:
+            logger.debug(
+                "Phase 6 @api_action auto-registration skipped",
+                exc_info=True,
+            )
+
+        # --- HITL slash commands ---
+        try:
+            from .app_services._builtin_tool_commands import (
+                build_tool_command_specs,
+            )
+
+            _phase6_command_specs.extend(
+                build_tool_command_specs(app_services.tool_coordinator),
+            )
+            logger.debug("HITL tool commands registered")
+        except Exception:
+            logger.debug(
+                "HITL tool command registration skipped",
+                exc_info=True,
+            )
+
+        if _phase6_command_specs:
+            # pylint: disable-next=protected-access
+            kernel_registry._bootstrap_kwargs[
+                "builtin_command_specs"
+            ] = _phase6_command_specs
+
+    except Exception:
+        logger.debug(
+            "Runtime v2 infrastructure init skipped",
+            exc_info=True,
+        )
+
     # Start token usage manager background tasks
     logger.debug("Starting TokenUsageManager background tasks...")
     from ..token_usage import get_token_usage_manager
@@ -258,6 +379,10 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
 
     if isinstance(runner, DynamicMultiAgentRunner):
         runner.set_multi_agent_manager(multi_agent_manager)
+        if app_services is not None:
+            runner.set_app_services(app_services)
+        if kernel_registry is not None:
+            runner.set_kernel_registry(kernel_registry)
 
     async def _get_agent_by_id(agent_id: str = None):
         """Get agent instance by ID, or active agent if not specified."""
@@ -486,6 +611,14 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
                 )
                 with suppress(OSError, RuntimeError, ValueError):
                     local_model_mgr.shutdown_server_sync()
+
+        # Stop AppServiceManager (ToolCoordinator shutdown, etc.)
+        _app_svc = getattr(app.state, "app_services", None)
+        if _app_svc is not None:
+            try:
+                await _app_svc.stop()
+            except Exception as e:
+                logger.error(f"Error stopping AppServiceManager: {e}")
 
         # Stop multi-agent manager (stops all agents and their components)
         multi_agent_mgr = getattr(app.state, "multi_agent_manager", None)

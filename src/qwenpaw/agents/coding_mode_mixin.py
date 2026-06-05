@@ -7,6 +7,7 @@ Provides one behaviour activated when ``coding_mode.enabled`` is
 1. **System Prompt Injection** — appends a coding-focused persona
    and workflow guidelines to the agent system prompt.
 """
+
 from __future__ import annotations
 
 import logging
@@ -133,27 +134,10 @@ class CodingModeMixin:
     """Mixin that adds Coding Mode features to a ReActAgent.
 
     At runtime this class is mixed into ``QwenPawAgent`` and combined
-    with ``Agent`` via MRO. Currently only overrides ``_build_sys_prompt``
-    to inject a coding persona block.
+    with ``Agent`` via MRO. Coding Mode prompt injection is handled by
+    :class:`~qwenpaw.runtime.prompt_contributors.CodingModeContributor`
+    (Phase 3).
     """
-
-    # ------------------------------------------------------------------
-    # System prompt injection
-    # ------------------------------------------------------------------
-
-    def _build_sys_prompt(self) -> str:
-        """Append the Coding Mode persona block to the base system prompt."""
-        base: str = super()._build_sys_prompt()  # type: ignore[misc]
-        if not self._coding_mode_enabled():
-            return base
-        workspace_dir = str(getattr(self, "_workspace_dir", "") or "(unknown)")
-        # Resolve the active coding project dir from agent config
-        project_dir = self._get_coding_project_dir() or workspace_dir
-        coding_block = _CODING_SYSTEM_PROMPT_TEMPLATE.format(
-            project_dir=project_dir,
-            workspace_dir=workspace_dir,
-        )
-        return base + "\n\n" + coding_block
 
     def _get_coding_project_dir(self) -> str | None:
         """Return the active coding project dir.

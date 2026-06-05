@@ -10,6 +10,7 @@ from agentscope.tool import ToolChunk
 from agentscope.message import ToolResultState
 from agentscope.message import TextBlock, DataBlock, URLSource
 
+from ...runtime.tool_registry import tool_descriptor
 from .file_io import _resolve_file_path
 
 
@@ -32,6 +33,7 @@ def _path_to_file_url(path: str) -> str:
     return f"file://{abs_path}"
 
 
+@tool_descriptor(requires_sandbox=("file_read",), async_execution=True)
 async def send_file_to_user(
     file_path: str,
 ) -> ToolChunk:

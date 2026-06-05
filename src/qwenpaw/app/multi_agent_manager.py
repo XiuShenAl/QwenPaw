@@ -4,6 +4,7 @@
 Provides centralized management for multiple Workspace objects,
 including lazy loading, lifecycle management, and hot reloading.
 """
+
 import asyncio
 import logging
 import time
@@ -38,6 +39,17 @@ class MultiAgentManager:
         self._pending_starts: Dict[str, asyncio.Event] = {}
         self._cleanup_tasks: Set[asyncio.Task] = set()
         logger.debug("MultiAgentManager initialized")
+
+    def _create_workspace(
+        self,
+        agent_id: str,
+        workspace_dir: str,
+    ) -> Workspace:
+        """Factory method for workspace creation.
+
+        Overridden by KernelRegistry.
+        """
+        return Workspace(agent_id=agent_id, workspace_dir=workspace_dir)
 
     async def get_agent(self, agent_id: str) -> Workspace:
         """Get agent workspace by ID (lazy loading with dedup).
@@ -107,7 +119,7 @@ class MultiAgentManager:
         # We are the starter — create outside the lock for parallelism
         t0 = time.perf_counter()
         logger.debug(f"Creating new workspace: {agent_id}")
-        instance = Workspace(
+        instance = self._create_workspace(
             agent_id=agent_id,
             workspace_dir=agent_ref.workspace_dir,
         )
@@ -320,7 +332,7 @@ class MultiAgentManager:
         # Step 3: Create and start new workspace instance (outside lock)
         # This is the slow part, but doesn't block other agents
         logger.info(f"Creating new workspace instance: {agent_id}")
-        new_instance = Workspace(
+        new_instance = self._create_workspace(
             agent_id=agent_id,
             workspace_dir=agent_ref.workspace_dir,
         )

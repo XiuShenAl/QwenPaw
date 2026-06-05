@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Tool backing the ``/make-skill`` flow."""
+
 from __future__ import annotations
 
 import logging
@@ -10,6 +11,7 @@ from agentscope.message import ToolResultState
 
 from ...config.context import get_current_workspace_dir
 from ...exceptions import SkillsError
+from ...runtime.tool_registry import tool_descriptor
 from ...security.skill_scanner import SkillScanError
 from ..skill_system.store import (
     normalize_skill_dir_name,
@@ -30,6 +32,11 @@ def _tool_text_response(text: str) -> ToolChunk:
     )
 
 
+@tool_descriptor(
+    requires_skills=("make-skill",),
+    requires_sandbox=("file_write",),
+    async_execution=True,
+)
 async def materialize_skill(
     name: str,
     description: str,
