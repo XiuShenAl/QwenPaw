@@ -21,6 +21,7 @@ from ..exceptions import SystemCommandException
 
 if TYPE_CHECKING:
     from agentscope.agent import Agent
+    from agentscope.state import AgentState
     from .memory import BaseMemoryManager
     from .context import BaseContextManager
 
@@ -85,50 +86,56 @@ class CommandHandler(ConversationCommandHandlerMixin):
     def __init__(
         self,
         agent_name: str,
-        agent: "Agent",
+        agent: "Agent | None" = None,
         memory_manager: "BaseMemoryManager | None" = None,
         context_manager: "BaseContextManager | None" = None,
+        *,
+        state: "AgentState | None" = None,
+        agent_id: str = "default",
     ):
         """Initialize command handler.
 
+        Can be constructed in two modes:
+
+        1. **Agent-backed** (legacy): pass ``agent`` — state is read from
+           ``agent.state``.
+        2. **Standalone** (Runtime 2.0): pass ``state`` directly — no
+           agent instance required.  Used by slash command adapters that
+           load state from session before agent construction.
+
         Args:
             agent_name: Name of the agent for message creation.
-            agent: The owning agent.  All short-term context reads/writes
-                go through ``agent.state.context`` and
-                ``agent.state.summary`` directly.
+            agent: The owning agent (optional in standalone mode).
             memory_manager: Optional long-term memory manager (ReMe).
-                Currently always ``None`` — ``/compact``, ``/load_history``
-                and similar paths gate on this and silently refuse when
-                missing.
-            context_manager: Optional context manager.  Required for the
-                ``/new`` JSONL-persist path (we need the dialog directory).
+            context_manager: Optional context manager.
+            state: Direct AgentState (standalone mode). Mutually
+                exclusive with ``agent``.
+            agent_id: Agent ID for config loading (standalone mode).
         """
         self.agent_name = agent_name
         self._agent = agent
+        self._state_direct: "AgentState | None" = state
+        self._agent_id = agent_id
         self.memory_manager: "BaseMemoryManager" = memory_manager
         self.context_manager: "BaseContextManager" = context_manager
 
     def _get_agent_config(self):
-        """Get hot-reloaded agent config.
-
-        Falls back to ``context_manager.agent_id`` when ``memory_manager``
-        is ``None``.
-        """
+        """Get hot-reloaded agent config."""
         source = self.memory_manager or self.context_manager
-        if source is None:
-            raise RuntimeError(
-                "CommandHandler._get_agent_config: no memory_manager or "
-                "context_manager bound; cannot resolve agent_id",
-            )
-        return load_agent_config(source.agent_id)
+        if source is not None:
+            return load_agent_config(source.agent_id)
+        return load_agent_config(self._agent_id)
 
     # ------------------------------------------------------------------
-    # State accessors — short-term memory lives on ``agent.state``.
+    # State accessors — short-term memory lives on ``agent.state``
+    # or the directly-provided ``_state_direct``.
     # ------------------------------------------------------------------
 
     @property
     def _state(self):
-        """The owning agent's :class:`agentscope.state.AgentState`."""
+        """AgentState — from direct reference or agent.state."""
+        if self._state_direct is not None:
+            return self._state_direct
         return self._agent.state
 
     def _get_summary(self) -> str:

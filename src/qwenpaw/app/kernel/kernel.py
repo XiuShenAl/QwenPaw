@@ -37,6 +37,7 @@ class Kernel(Workspace):
         builtin_mode_clses: Iterable[type] | None = None,
         builtin_hook_clses: Iterable[type] | None = None,
         builtin_command_specs: Iterable[Any] | None = None,
+        builtin_fallback_handler: Any | None = None,
     ) -> None:
         """Populate per-Kernel registries with built-in classes.
 
@@ -93,6 +94,18 @@ class Kernel(Workspace):
                         getattr(spec, "name", spec),
                         exc_info=True,
                     )
+
+        # Skill fallback → SlashCommandRegistry (lives in plugins)
+        if builtin_fallback_handler is not None:
+            try:
+                self.plugins.slash_command_registry.register_fallback(
+                    builtin_fallback_handler,
+                )
+            except Exception:
+                logger.debug(
+                    "bootstrap: fallback handler register failed",
+                    exc_info=True,
+                )
 
         # Modes → KernelPlugins.register_mode (runs mode.setup(kernel))
         if builtin_mode_clses:

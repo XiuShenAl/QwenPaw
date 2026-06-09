@@ -14,7 +14,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .slash_command_registry import CommandSpec, SlashCommandRegistry
+from .slash_command_registry import CommandSpec, FallbackHandler
 
 if TYPE_CHECKING:
     from agentscope.message import Msg
@@ -285,24 +285,120 @@ _CONVERSATION_COMMANDS = frozenset(
 )
 
 
+class _StateProxy:
+    """Minimal proxy satisfying SafeJSONSession's state_module protocol."""
+
+    def __init__(self) -> None:
+        self.data: dict = {}
+
+    def state_dict(self) -> dict:
+        return self.data
+
+    def load_state_dict(self, d: dict) -> None:
+        self.data = d
+
+
+async def _load_agent_state(ctx: Any) -> "Any":
+    """Load AgentState from kernel.session without building the agent."""
+    from agentscope.state import AgentState
+
+    kernel = getattr(ctx, "kernel", None)
+    if kernel is None:
+        return None
+    session = getattr(kernel, "session", None)
+    if session is None:
+        return None
+
+    request = getattr(ctx, "request", None)
+    user_id = (getattr(request, "user_id", "") if request else "") or ""
+    channel = (getattr(request, "channel", "") if request else "") or ""
+
+    proxy = _StateProxy()
+    await session.load_session_state(
+        session_id=ctx.session_id,
+        user_id=user_id or ctx.session_id,
+        channel=channel,
+        agent=proxy,
+    )
+    if not proxy.data:
+        return AgentState()
+
+    raw = proxy.data.get("state")
+    if raw is not None:
+        return AgentState.model_validate(raw)
+
+    # Legacy 1.x format
+    memory_raw = proxy.data.get("memory")
+    if isinstance(memory_raw, dict):
+        from ..app.runner.utils import parse_legacy_memory_state
+
+        msgs, summary = parse_legacy_memory_state(memory_raw)
+        state = AgentState()
+        state.context.extend(msgs)
+        state.summary = summary
+        return state
+
+    return AgentState()
+
+
+async def _save_agent_state(ctx: Any, state: "Any") -> None:
+    """Save AgentState back to kernel.session."""
+    kernel = getattr(ctx, "kernel", None)
+    if kernel is None:
+        return
+    session = getattr(kernel, "session", None)
+    if session is None:
+        return
+
+    request = getattr(ctx, "request", None)
+    user_id = (getattr(request, "user_id", "") if request else "") or ""
+    channel = (getattr(request, "channel", "") if request else "") or ""
+
+    proxy = _StateProxy()
+    proxy.data = {"state": state.model_dump(mode="json")}
+    await session.save_session_state(
+        session_id=ctx.session_id,
+        user_id=user_id or ctx.session_id,
+        channel=channel,
+        agent=proxy,
+    )
+
+
 def _make_conversation_adapter(name: str) -> CommandSpec:
-    """Wrap one conversation command from :class:`CommandHandler`."""
+    """Wrap one conversation command via standalone CommandHandler.
+
+    Loads AgentState directly from session — no agent instance required.
+    """
 
     async def _handler(ctx: Any, args: str) -> "Msg | None":
-        agent = getattr(ctx, "agent", None)
-        if agent is None:
-            return None
-
-        cmd_handler = getattr(agent, "command_handler", None)
-        if cmd_handler is None:
-            return None
+        from ..agents.command_handler import CommandHandler
 
         # /plan with arguments is NOT a command — fall through to model
         if name == "plan" and args.strip():
             return None
 
+        kernel = getattr(ctx, "kernel", None)
+        if kernel is None:
+            return None
+
+        state = await _load_agent_state(ctx)
+        if state is None:
+            return None
+
+        agent_id = getattr(ctx, "agent_id", None) or "default"
+        cmd_handler = CommandHandler(
+            agent_name="QwenPaw",
+            state=state,
+            agent_id=agent_id,
+            memory_manager=getattr(kernel, "memory_manager", None),
+            context_manager=getattr(kernel, "context_manager", None),
+        )
+
         full_query = f"/{name} {args}".strip() if args else f"/{name}"
-        return await cmd_handler.handle_command(full_query)
+        result = await cmd_handler.handle_command(full_query)
+
+        await _save_agent_state(ctx, state)
+        return result
 
     return CommandSpec(
         name=name,
@@ -348,18 +444,19 @@ async def _skill_fallback_handler(
     raw_text: str,
     ctx: Any,
 ) -> "Msg | None":
-    """Fallback handler for ``/<skill_name>`` dispatch."""
+    """Fallback handler for ``/<skill_name>`` dispatch.
+
+    Resolves skills directly from the filesystem (workspace/skills/
+    directory) — no agent or toolkit required.
+    """
     from agentscope.message import Msg, TextBlock
 
-    agent = getattr(ctx, "agent", None)
-    msgs = getattr(ctx, "input_msgs", None)
-
-    if agent is None:
+    kernel = getattr(ctx, "kernel", None)
+    if kernel is None:
         return None
 
-    toolkit = getattr(agent, "toolkit", None)
-    skills = getattr(toolkit, "_qp_skills", None) if toolkit else None
-    if not skills:
+    workspace_dir = getattr(kernel, "workspace_dir", None)
+    if not workspace_dir:
         return None
 
     parsed = _parse_skill_query(raw_text)
@@ -367,18 +464,34 @@ async def _skill_fallback_handler(
         return None
     skill_name, user_input = parsed
 
-    skill = next(
+    from ..agents.skill_system.registry import (
+        get_workspace_skills_dir,
+        resolve_effective_skills,
+    )
+
+    request = getattr(ctx, "request", None)
+    channel = (getattr(request, "channel", "") if request else "") or "console"
+
+    try:
+        effective_skills = resolve_effective_skills(
+            Path(workspace_dir),
+            channel,
+        )
+    except Exception:
+        return None
+
+    skills_dir = get_workspace_skills_dir(Path(workspace_dir))
+    skill_dir = next(
         (
-            s
-            for s in skills.values()
-            if Path(s["dir"]).name.lower() == skill_name
+            skills_dir / sn
+            for sn in effective_skills
+            if sn.lower() == skill_name
         ),
         None,
     )
-    if not skill:
+    if skill_dir is None or not skill_dir.exists():
         return None
 
-    skill_dir = Path(skill["dir"])
     skill_md = skill_dir / "SKILL.md"
     if not skill_md.exists():
         return None
@@ -396,7 +509,7 @@ async def _skill_fallback_handler(
     if not user_input:
         desc = post.get("description") or "No description."
         return Msg(
-            name=getattr(agent, "name", "assistant"),
+            name="assistant",
             role="assistant",
             content=[
                 TextBlock(
@@ -412,13 +525,14 @@ async def _skill_fallback_handler(
             ],
         )
 
-    # Rewrite last message with skill body
+    # Rewrite last message with skill body — agent will execute with it
     merged = (
         f"Use the [{display_name}] skill in "
         f"`{skill_dir}` to fulfill "
         f"user's task: {user_input}\n\n"
         f"{post.content}"
     )
+    msgs = getattr(ctx, "input_msgs", None)
     if msgs:
         last = msgs[-1]
         content = getattr(last, "content", None)
@@ -443,25 +557,25 @@ async def _skill_fallback_handler(
 # ======================================================================
 
 
-def build_default_command_registry() -> SlashCommandRegistry:
-    """Create a :class:`SlashCommandRegistry` with all built-in commands.
+def collect_builtin_command_specs() -> list[CommandSpec]:
+    """Return all built-in command specs (daemon, control, conversation).
 
-    Returns a fully populated registry covering daemon, control,
-    conversation, and skill-fallback dispatch.
+    These are registered into each Kernel's :class:`SlashCommandRegistry`
+    via ``bootstrap_plugins(builtin_command_specs=...)``.
     """
-    reg = SlashCommandRegistry()
+    specs: list[CommandSpec] = []
+    specs.extend(_collect_daemon_specs())
+    specs.extend(_collect_control_specs())
+    specs.extend(_collect_conversation_specs())
+    return specs
 
-    for spec in _collect_conversation_specs():
-        reg.register(spec)
-    for spec in _collect_daemon_specs():
-        reg.register(spec)
-    for spec in _collect_control_specs():
-        reg.register(spec)
 
-    reg.register_fallback(_skill_fallback_handler)
-    return reg
+def get_skill_fallback_handler() -> FallbackHandler:
+    """Return the ``/<skill_name>`` fallback dispatch handler."""
+    return _skill_fallback_handler
 
 
 __all__ = [
-    "build_default_command_registry",
+    "collect_builtin_command_specs",
+    "get_skill_fallback_handler",
 ]

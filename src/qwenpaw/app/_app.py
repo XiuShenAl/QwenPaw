@@ -322,6 +322,25 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
                 exc_info=True,
             )
 
+        # --- Built-in slash commands (daemon, control, conversation) ---
+        try:
+            from ..runtime.builtin_commands import (
+                collect_builtin_command_specs,
+                get_skill_fallback_handler,
+            )
+
+            _phase6_command_specs.extend(collect_builtin_command_specs())
+            # pylint: disable-next=protected-access
+            kernel_registry._bootstrap_kwargs[
+                "builtin_fallback_handler"
+            ] = get_skill_fallback_handler()
+            logger.debug("Built-in slash commands collected")
+        except Exception:
+            logger.debug(
+                "Built-in slash command collection skipped",
+                exc_info=True,
+            )
+
         if _phase6_command_specs:
             # pylint: disable-next=protected-access
             kernel_registry._bootstrap_kwargs[
