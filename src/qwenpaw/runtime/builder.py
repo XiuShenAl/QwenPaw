@@ -403,30 +403,14 @@ class AgentBuilder:
         agent_id: str,
         request_context: dict[str, str],
     ) -> list[Any]:
-        import logging
+        from ..agents.coding_mode_mixin import collect_coding_tools
 
-        _logger = logging.getLogger(__name__)
-
-        cm = getattr(agent_config, "coding_mode", None)
-        if cm is None or not getattr(cm, "enabled", False):
-            return []
-
-        from ..agents.coding_mode_mixin import CodingModeMixin
-
-        # Reuse the mixin's static tool-collection logic.
-        mixin = CodingModeMixin.__new__(CodingModeMixin)
-        mixin._agent_config = agent_config  # pylint: disable=protected-access
-        # pylint: disable=protected-access
-        mixin._workspace_dir = workspace_dir
-        try:
-            return mixin._collect_coding_mode_tools(
-                agent_id=agent_id,
-                request_context=request_context,
-            )
-            # pylint: enable=protected-access
-        except Exception as exc:
-            _logger.warning("Failed to collect Coding Mode tools: %s", exc)
-            return []
+        return collect_coding_tools(
+            agent_config,
+            workspace_dir,
+            agent_id=agent_id,
+            request_context=request_context,
+        )
 
     @staticmethod
     def _get_memory_manager(ctx: Any) -> Any:

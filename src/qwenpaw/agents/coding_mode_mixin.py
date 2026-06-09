@@ -262,3 +262,56 @@ class CodingModeMixin:
             logger.warning(f"Failed to register ast_search tool: {exc}")
 
         return result
+
+
+def collect_coding_tools(
+    agent_config: object,
+    workspace_dir: object,
+    agent_id: str | None = None,
+    request_context: dict[str, str] | None = None,
+) -> list:
+    """Collect Coding Mode tools without requiring a mixin instance.
+
+    Standalone replacement for the ``CodingModeMixin.__new__()`` hack
+    that ``AgentBuilder`` previously used.
+    """
+    cm = getattr(agent_config, "coding_mode", None)
+    if cm is None or not getattr(cm, "enabled", False):
+        return []
+
+    project_dir = Path(
+        getattr(cm, "project_dir", None) or str(workspace_dir or WORKING_DIR),
+    )
+    result: list = []
+
+    try:
+        available = detect_available_lsp_languages(project_dir)
+        if available:
+            result.append(
+                GuardedFunctionTool(
+                    make_lsp_tool(available),
+                    agent_id=agent_id,
+                    request_context=request_context,
+                ),
+            )
+            logger.info(
+                "Registered Coding Mode lsp tool with languages: %s",
+                sorted(available.keys()),
+            )
+    except Exception as exc:
+        logger.warning("Failed to register lsp tool: %s", exc)
+
+    try:
+        if ast_tool.is_ast_grep_available():
+            result.append(
+                GuardedFunctionTool(
+                    ast_tool.ast_search,
+                    agent_id=agent_id,
+                    request_context=request_context,
+                ),
+            )
+            logger.info("Registered Coding Mode ast_search tool")
+    except Exception as exc:
+        logger.warning("Failed to register ast_search tool: %s", exc)
+
+    return result

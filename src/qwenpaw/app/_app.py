@@ -16,10 +16,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, ORJSONResponse
 
-from qwenpaw.exceptions import (
-    AppBaseException,
-)
-
 from ..config import load_config  # pylint: disable=no-name-in-module
 from ..config.utils import get_config_path
 from ..constant import (
@@ -46,7 +42,6 @@ from .routers.voice import voice_router
 from ..envs import load_envs_into_environ
 from ..providers.provider_manager import ProviderManager
 from ..local_models.manager import LocalModelManager
-from .multi_agent_manager import MultiAgentManager
 from .migration import (
     migrate_legacy_workspace_to_default_agent,
     migrate_legacy_skills_to_skill_pool,
@@ -80,65 +75,30 @@ class DynamicMultiAgentRunner:
 
     def __init__(self):
         self.framework_type = "agentscope"
-        self._multi_agent_manager = None
         self._kernel_registry = None
         self._app_services = None
-
-    def set_multi_agent_manager(self, manager):
-        """Set the MultiAgentManager instance after initialization."""
-        self._multi_agent_manager = manager
 
     def set_app_services(self, app_services):
         """Set the cross-Kernel AppServiceManager reference."""
         self._app_services = app_services
 
     def set_kernel_registry(self, kernel_registry):
-        """Set the KernelRegistry (preferred over MultiAgentManager)."""
+        """Set the KernelRegistry (sole workspace manager)."""
         self._kernel_registry = kernel_registry
 
-    async def _get_workspace(self, request):
-        """Get the correct workspace/kernel based on request."""
+    async def _get_kernel(self, request):
+        """Get the correct Kernel based on request."""
         from .agent_context import get_current_agent_id
 
         agent_id = get_current_agent_id()
-        logger.debug("_get_workspace: agent_id=%s", agent_id)
+        logger.debug("_get_kernel: agent_id=%s", agent_id)
 
-        if self._kernel_registry is not None:
-            try:
-                kernel = await self._kernel_registry.get_agent(
-                    agent_id,
-                )
-                logger.debug(
-                    "Got kernel: %s",
-                    kernel.agent_id,
-                )
-                return kernel
-            except Exception:
-                logger.debug(
-                    "KernelRegistry lookup failed for %s, "
-                    "falling back to MultiAgentManager",
-                    agent_id,
-                    exc_info=True,
-                )
+        if self._kernel_registry is None:
+            raise RuntimeError("KernelRegistry not initialized")
 
-        if not self._multi_agent_manager:
-            raise RuntimeError("MultiAgentManager not initialized")
-
-        try:
-            workspace = await self._multi_agent_manager.get_agent(
-                agent_id,
-            )
-            logger.debug("Got workspace: %s", workspace.agent_id)
-            return workspace
-        except (ValueError, AppBaseException) as e:
-            logger.error(f"Agent not found: {e}")
-            raise
-        except Exception as e:
-            logger.error(
-                f"Error getting workspace: {e}",
-                exc_info=True,
-            )
-            raise
+        kernel = await self._kernel_registry.get_agent(agent_id)
+        logger.debug("Got kernel: %s", kernel.agent_id)
+        return kernel
 
     async def stream_query(self, request, *args, **kwargs):
         """Route to the correct Kernel and run via Runtime.
@@ -148,20 +108,20 @@ class DynamicMultiAgentRunner:
         background tasks.
         """
         logger.debug("DynamicMultiAgentRunner.stream_query called")
-        workspace = None
+        kernel = None
         run_key = None
         try:
-            workspace = await self._get_workspace(request)
+            kernel = await self._get_kernel(request)
 
             run_key = f"ext-{uuid.uuid4().hex}"
-            await workspace.task_tracker.register_external_task(
+            await kernel.task_tracker.register_external_task(
                 run_key,
             )
 
             from ..runtime.runtime import Runtime
 
             rt = Runtime(
-                kernel=workspace,
+                kernel=kernel,
                 app_services=self._app_services,
             )
             async for item in rt.run(request):
@@ -176,8 +136,8 @@ class DynamicMultiAgentRunner:
                 "type": "error",
             }
         finally:
-            if workspace is not None and run_key is not None:
-                await workspace.task_tracker.unregister_external_task(
+            if kernel is not None and run_key is not None:
+                await kernel.task_tracker.unregister_external_task(
                     run_key,
                 )
 
@@ -245,8 +205,6 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
     ensure_qa_agent_exists()
 
     # Create core managers (instant — no I/O)
-    logger.debug("Initializing MultiAgentManager...")
-    multi_agent_manager = MultiAgentManager()
     provider_manager = ProviderManager.get_instance()
     local_model_manager = LocalModelManager.get_instance()
 
@@ -367,6 +325,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
                 SkillEnvHook,
                 SkillEnvCleanupHook,
             )
+            from ..hooks.cron.cron_hook import CronContextHook
             from ..hooks.request_setup.contextvars_hook import (
                 ContextVarsSetupHook,
             )
@@ -378,6 +337,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
 
             # pylint: disable-next=protected-access
             kernel_registry._bootstrap_kwargs["builtin_hook_clses"] = [
+                CronContextHook,
                 SessionLoadHook,
                 SessionSaveHook,
                 BootstrapHook,
@@ -446,15 +406,16 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
     token_usage_manager = get_token_usage_manager()
     token_usage_manager.start(flush_interval=10)
 
-    # Expose to endpoints (must be set before first request arrives)
-    app.state.multi_agent_manager = multi_agent_manager
+    # Expose to endpoints (must be set before first request arrives).
+    # KernelRegistry IS-A MultiAgentManager — backward compat for
+    # routers / agent_context that read app.state.multi_agent_manager.
+    app.state.multi_agent_manager = kernel_registry
     app.state.provider_manager = provider_manager
     app.state.local_model_manager = local_model_manager
     app.state.plugin_loader = None
     app.state.plugin_registry = None
 
     if isinstance(runner, DynamicMultiAgentRunner):
-        runner.set_multi_agent_manager(multi_agent_manager)
         if app_services is not None:
             runner.set_app_services(app_services)
         if kernel_registry is not None:
@@ -465,7 +426,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
         if agent_id is None:
             config = load_config(get_config_path())
             agent_id = config.agents.active_agent or "default"
-        return await multi_agent_manager.get_agent(agent_id)
+        return await kernel_registry.get_agent(agent_id)
 
     app.state.get_agent_by_id = _get_agent_by_id
 
@@ -486,7 +447,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
     async def _background_startup():  # pylint: disable=too-many-statements
         try:
             # Start all configured agents (truly parallel now)
-            await multi_agent_manager.start_all_configured_agents()
+            await kernel_registry.start_all_configured_agents()
 
             provider_manager.start_local_model_resume(local_model_manager)
 
@@ -603,7 +564,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
 
             # ---- Approval Service ----
             try:
-                default_agent = await multi_agent_manager.get_agent(
+                default_agent = await kernel_registry.get_agent(
                     "default",
                 )
                 if default_agent.channel_manager:

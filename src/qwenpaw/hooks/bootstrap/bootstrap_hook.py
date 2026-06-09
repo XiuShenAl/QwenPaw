@@ -26,6 +26,9 @@ class BootstrapHook(LifecycleHook):
     priority = 20
 
     async def run(self, ctx: HookContext) -> HookResult:
+        if ctx.extras.get("is_cron"):
+            return HookResult()
+
         wd = ctx.workspace_dir
         if not wd:
             return HookResult()
