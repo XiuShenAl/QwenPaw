@@ -47,7 +47,7 @@ class TestSessionLoadHook:
         from qwenpaw.hooks.session.session_hook import SessionLoadHook
 
         hook = SessionLoadHook()
-        kernel = SimpleNamespace(runner=SimpleNamespace(session=None))
+        kernel = SimpleNamespace(session=None)
         ctx = _make_ctx(kernel=kernel)
         r = await hook.run(ctx)
         assert r.action.value == "continue"
@@ -59,7 +59,7 @@ class TestSessionSaveHook:
         from qwenpaw.hooks.session.session_hook import SessionSaveHook
 
         hook = SessionSaveHook()
-        kernel = SimpleNamespace(runner=SimpleNamespace(session=MagicMock()))
+        kernel = SimpleNamespace(session=MagicMock())
         ctx = _make_ctx(kernel=kernel)
         ctx.agent = None
         r = await hook.run(ctx)
@@ -89,50 +89,6 @@ class TestContextVarsSetupHook:
 
         hook = ContextVarsSetupHook()
         ctx = _make_ctx(workspace_dir=None)
-        r = await hook.run(ctx)
-        assert r.action.value == "continue"
-
-
-class TestContextVarsCleanupHook:
-    @pytest.mark.asyncio
-    async def test_cleanup_is_noop_without_prior_setup(self):
-        from qwenpaw.hooks.request_setup.contextvars_hook import (
-            ContextVarsCleanupHook,
-        )
-
-        hook = ContextVarsCleanupHook()
-        ctx = _make_ctx()
-        r = await hook.run(ctx)
-        assert r.action.value == "continue"
-
-
-# ---------------------------------------------------- PromptRefreshHook
-
-
-class TestPromptRefreshHook:
-    @pytest.mark.asyncio
-    async def test_calls_rebuild_sys_prompt(self):
-        from qwenpaw.hooks.prompt_refresh.prompt_refresh_hook import (
-            PromptRefreshHook,
-        )
-
-        rebuild = MagicMock()
-        agent = SimpleNamespace(rebuild_sys_prompt=rebuild)
-        hook = PromptRefreshHook()
-        ctx = _make_ctx()
-        ctx.agent = agent
-        await hook.run(ctx)
-        rebuild.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_skips_when_no_agent(self):
-        from qwenpaw.hooks.prompt_refresh.prompt_refresh_hook import (
-            PromptRefreshHook,
-        )
-
-        hook = PromptRefreshHook()
-        ctx = _make_ctx()
-        ctx.agent = None
         r = await hook.run(ctx)
         assert r.action.value == "continue"
 

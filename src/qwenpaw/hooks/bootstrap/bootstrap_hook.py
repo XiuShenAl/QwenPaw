@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """Bootstrap guidance hook.
 
-Migrates ``agents/middlewares.py:BootstrapMiddleware`` logic — reads
-``BOOTSTRAP.md`` from the workspace and injects guidance into the
-first user message.
+Checks for BOOTSTRAP.md in the workspace and injects guidance into
+the first user message before agent execution.  Operates directly on
+``ctx.input_msgs`` — does not require an agent instance.
 """
 
 from __future__ import annotations
@@ -29,29 +29,39 @@ class BootstrapHook(LifecycleHook):
         wd = ctx.workspace_dir
         if not wd:
             return HookResult()
-        bootstrap_file = Path(wd) / "BOOTSTRAP.md"
-        if not bootstrap_file.exists():
+
+        bootstrap_path = Path(wd) / "BOOTSTRAP.md"
+        bootstrap_completed_flag = Path(wd) / ".bootstrap_completed"
+
+        if bootstrap_completed_flag.exists():
             return HookResult()
+        if not bootstrap_path.exists():
+            return HookResult()
+
+        if not ctx.input_msgs:
+            return HookResult()
+
         try:
-            from ...agents.utils.file_handling import (
-                read_text_file_with_encoding_fallback,
-            )
+            from ...agents.prompt import build_bootstrap_guidance
+            from ...agents.utils import prepend_to_message_content
 
-            guidance = read_text_file_with_encoding_fallback(bootstrap_file)
-            if guidance and ctx.input_msgs:
-                from ...agents.hooks import BootstrapHook as _LegacyHook
+            language = "zh"
+            agent_config = ctx.agent_config
+            if agent_config is not None:
+                language = getattr(agent_config, "language", "zh") or "zh"
 
-                _hook = _LegacyHook(
-                    working_dir=wd,
-                    language=getattr(
-                        getattr(ctx, "agent_config", None),
-                        "language",
-                        "zh",
-                    ),
-                )
-                await _hook(ctx.agent, {"inputs": ctx.input_msgs})
+            bootstrap_guidance = build_bootstrap_guidance(language)
+
+            for msg in ctx.input_msgs:
+                if msg.role == "user":
+                    prepend_to_message_content(msg, bootstrap_guidance)
+                    break
+
+            bootstrap_completed_flag.touch()
+            logger.debug("Bootstrap guidance injected into input_msgs")
         except Exception:
             logger.debug("bootstrap: injection failed", exc_info=True)
+
         return HookResult()
 
 

@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """Per-request agent assembly.
 
-Phase 2 ships exactly one method — :meth:`AgentBuilder.build_toolkit` —
-which replaces ``QwenPawAgent._create_toolkit``'s hardcoded ``tool_functions``
-dict with a :class:`~qwenpaw.runtime.tool_registry.ToolRegistry` lookup.
-The remaining ``build_*`` methods are stubs that Phase 5 fills in when
-the builder takes over the whole ``QwenPawAgent`` constructor.
+:class:`AgentBuilder` fully constructs a :class:`QwenPawAgent` for each
+request.  It draws from the per-Kernel :class:`ToolRegistry`,
+:class:`PromptManager`, and model factory to produce all dependencies
+(toolkit, system prompt, model, middlewares) and injects them into the
+agent constructor.
 """
 
 from __future__ import annotations
@@ -20,8 +20,8 @@ class AgentBuilder:
     """Compose an agent from a per-Kernel :class:`ToolRegistry`.
 
     ``tool_registry`` is the per-Kernel registry that lifespan startup
-    populated via ``discover_builtin_tool_funcs``. ``app_services`` is
-    held for Phase 5 — currently unused.
+    populated via ``discover_builtin_tool_funcs``.  ``app_services``
+    provides cross-Kernel shared services (TaskTracker, etc.).
     """
 
     def __init__(
@@ -131,14 +131,18 @@ class AgentBuilder:
             return defaults | explicit_enabled, denied
         return None, denied
 
-    # ----------------------------------------------------------------- Phase 5
+    # ----------------------------------------------------------------- build
 
-    def build(self, ctx: Any) -> Any:
+    async def build(self, ctx: Any) -> Any:
         """Construct a fully-wired :class:`QwenPawAgent` for one request.
 
-        Integrates ``agent_factory.py:build_agent`` logic with the
-        per-Kernel registries (Phase 2 toolkit + Phase 3 prompt).
+        Integrates all per-Kernel registries: ToolRegistry (toolkit),
+        PromptManager (system prompt), model factory, and middlewares.
+        The agent receives all dependencies externally — it does not
+        build any of them internally.
         """
+        from agentscope.agent import ReActConfig
+
         from ..agents.react_agent import QwenPawAgent
         from ..agents.skill_system import (
             ensure_skills_initialized,
@@ -187,7 +191,10 @@ class AgentBuilder:
             if plugins is not None:
                 active_modes = plugins.active_mode_names(ctx)
 
-        # Toolkit (Phase 2).
+        # MCP clients (async).
+        mcp_clients = await self._get_mcp_clients_async(ctx)
+
+        # Toolkit.
         extra_tools = self._collect_coding_mode_tools(
             agent_config,
             workspace_dir,
@@ -201,28 +208,39 @@ class AgentBuilder:
             active_modes=active_modes,
             effective_skills=effective_skills,
             extra_tools=extra_tools,
-            mcp_clients=self._get_mcp_clients(ctx),
+            mcp_clients=mcp_clients,
         )
 
-        # System prompt (Phase 3).
-        _sys_prompt = self.build_prompt(ctx, agent_config)  # noqa: F841
+        # System prompt.
+        sys_prompt = self.build_prompt(ctx, agent_config)
 
         # Model + formatter.
-        _model, _formatter = self.build_model(agent_config)  # noqa: F841
+        model, _formatter = self.build_model(agent_config)
 
-        # Middlewares.
-        _middlewares = self._build_middlewares(ctx, agent_config)  # noqa: F841
+        # Middlewares (only context_manager).
+        middlewares = self._build_middlewares(ctx, agent_config)
+
+        running_config = agent_config.running
 
         agent = QwenPawAgent(
+            name=agent_config.name or "QwenPaw",
+            model=model,
+            system_prompt=sys_prompt,
+            toolkit=toolkit,
+            react_config=ReActConfig(max_iters=running_config.max_iters),
+            middlewares=middlewares,
             agent_config=agent_config,
-            env_context=None,
             workspace_dir=workspace_dir,
             request_context=request_context,
             memory_manager=self._get_memory_manager(ctx),
             context_manager=self._get_context_manager(ctx),
-            mcp_clients=self._get_mcp_clients(ctx),
-            toolkit=toolkit,
+            mcp_clients=mcp_clients,
+            effective_skills=effective_skills,
         )
+
+        # Load session state if SessionLoadHook populated it.
+        if ctx.session_state:
+            agent.load_state_dict(ctx.session_state)
 
         _logger.info(
             "builder: built agent for session=%s agent=%s"
@@ -270,9 +288,9 @@ class AgentBuilder:
 
         kernel = getattr(ctx, "kernel", None)
         if kernel is not None:
-            sm = getattr(kernel, "service_manager", None)
-            pm = getattr(sm, "prompt_manager", None) if sm else None
-            if pm is not None:
+            plugins = getattr(kernel, "plugins", None)
+            pm = getattr(plugins, "prompt_manager", None) if plugins else None
+            if pm is not None and len(pm) > 0:
                 return pm.build_sync(prompt_ctx)
 
         from .prompt_contributors import build_default_prompt_manager
@@ -298,7 +316,7 @@ class AgentBuilder:
                 innermost.formatter = formatter
         return model, formatter
 
-    # ------------------------------------------------------- helpers (Phase 5)
+    # ------------------------------------------------------- helpers
 
     @staticmethod
     def _build_request_context(ctx: Any) -> dict[str, str]:
@@ -393,12 +411,7 @@ class AgentBuilder:
         if cm is None or not getattr(cm, "enabled", False):
             return []
 
-        from ..constant import WORKING_DIR
         from ..agents.coding_mode_mixin import CodingModeMixin
-
-        _project_dir = getattr(cm, "project_dir", None) or str(  # noqa: F841
-            workspace_dir or WORKING_DIR,
-        )
 
         # Reuse the mixin's static tool-collection logic.
         mixin = CodingModeMixin.__new__(CodingModeMixin)
@@ -430,38 +443,34 @@ class AgentBuilder:
         return None
 
     @staticmethod
-    def _get_mcp_clients(ctx: Any) -> list[Any] | None:
+    async def _get_mcp_clients_async(ctx: Any) -> list[Any] | None:
         kernel = getattr(ctx, "kernel", None)
-        if kernel is not None:
-            mcp_mgr = getattr(kernel, "mcp_manager", None)
-            if mcp_mgr is not None:
-                try:
-                    import asyncio
-
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        return None
-                    return loop.run_until_complete(mcp_mgr.get_clients())
-                except Exception:
-                    return None
-        return None
+        if kernel is None:
+            return None
+        mcp_mgr = getattr(kernel, "mcp_manager", None)
+        if mcp_mgr is None:
+            return None
+        try:
+            return await mcp_mgr.get_clients()
+        except Exception:
+            return None
 
     @staticmethod
-    def _build_middlewares(ctx: Any, agent_config: Any) -> list[Any]:
-        from ..agents.middlewares import RequestSetupMiddleware
+    def _build_middlewares(
+        ctx: Any,
+        agent_config: Any,
+    ) -> list[Any]:  # noqa: ARG004
+        """Build middleware list — only context_manager remains.
 
-        workspace_dir = getattr(ctx, "workspace_dir", None)
-        agent_id = getattr(ctx, "agent_id", "default")
-        request_context = AgentBuilder._build_request_context(ctx)
-
-        return [
-            RequestSetupMiddleware(
-                workspace_dir=workspace_dir,
-                agent_id=agent_id,
-                agent_config=agent_config,
-                request_context=request_context,
-            ),
-        ]
+        ContextVars, bootstrap injection, skill env, and file/media
+        processing are now handled by lifecycle hooks.
+        """
+        del agent_config  # reserved for future mode-specific middleware
+        mws: list[Any] = []
+        context_manager = AgentBuilder._get_context_manager(ctx)
+        if context_manager is not None:
+            mws.append(context_manager)
+        return mws
 
 
 __all__ = ["AgentBuilder"]

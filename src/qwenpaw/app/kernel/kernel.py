@@ -43,33 +43,37 @@ class Kernel(Workspace):
 
         Called once by ``KernelRegistry`` immediately after Kernel creation.
         """
-        # Tools → ToolRegistry (lives in service_manager)
+        # Tools → ToolRegistry (lives in plugins)
         if builtin_tool_funcs:
-            tr = getattr(self._service_manager, "tool_registry", None)
-            if tr is not None:
-                for func in builtin_tool_funcs:
-                    try:
-                        tr.register_func(func)
-                    except Exception:
+            tr = self.plugins.tool_registry
+            for func in builtin_tool_funcs:
+                try:
+                    desc = getattr(func, "_tool_descriptor", None)
+                    if desc is not None:
+                        tr.register(desc)
+                    else:
                         logger.debug(
-                            "bootstrap: tool register failed for %s",
+                            "bootstrap: %s has no _tool_descriptor, skipped",
                             getattr(func, "__name__", func),
-                            exc_info=True,
                         )
+                except Exception:
+                    logger.debug(
+                        "bootstrap: tool register failed for %s",
+                        getattr(func, "__name__", func),
+                        exc_info=True,
+                    )
 
-        # Prompt contributors → PromptManager (lives in service_manager)
+        # Prompt contributors → PromptManager (lives in plugins)
         if builtin_contributor_clses:
-            pm = getattr(self._service_manager, "prompt_manager", None)
-            if pm is not None:
-                for cls in builtin_contributor_clses:
-                    try:
-                        pm.register(cls())
-                    except Exception:
-                        logger.debug(
-                            "bootstrap: contributor register failed for %s",
-                            cls,
-                            exc_info=True,
-                        )
+            for cls in builtin_contributor_clses:
+                try:
+                    self.plugins.prompt_manager.register(cls())
+                except Exception:
+                    logger.debug(
+                        "bootstrap: contributor register failed for %s",
+                        cls,
+                        exc_info=True,
+                    )
 
         # Lifecycle hooks → HookRegistry (lives in plugins)
         if builtin_hook_clses:

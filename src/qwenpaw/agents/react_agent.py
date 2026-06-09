@@ -3,6 +3,10 @@
 
 This module provides the main QwenPawAgent class built on ReActAgent,
 with integrated tools, skills, and memory management.
+
+Agent construction is fully delegated to :class:`AgentBuilder` — the
+agent accepts all dependencies (model, prompt, toolkit, middlewares)
+as constructor parameters and does not build them internally.
 """
 
 from __future__ import annotations
@@ -17,23 +21,9 @@ from agentscope.state import AgentState
 from agentscope.tool import Toolkit
 
 from .command_handler import CommandHandler
-from .hooks import BootstrapHook
-from .middlewares import (
-    BootstrapMiddleware,
-    RequestSetupMiddleware,
-)
-from .model_factory import create_model_and_formatter
 from ..runtime import GuardedFunctionTool
-from ..runtime.builder import AgentBuilder
-from ..runtime.prompt_contributors import build_default_prompt_manager
-from ..runtime.tool_registry import ToolRegistry
-from .skill_system import (
-    ensure_skills_initialized,
-    get_workspace_skills_dir,
-    resolve_effective_skills,
-)
+from .skill_system import get_workspace_skills_dir
 from .coding_mode_mixin import CodingModeMixin
-from .tools import discover_builtin_tool_funcs
 from ..constant import (
     MEDIA_UNSUPPORTED_PLACEHOLDER,
     WORKING_DIR,
@@ -46,27 +36,6 @@ if TYPE_CHECKING:
     from ..config.config import AgentProfileConfig
 
 logger = logging.getLogger(__name__)
-
-
-_DEFAULT_TOOL_REGISTRY: ToolRegistry | None = None
-
-
-def _get_default_tool_registry() -> ToolRegistry:
-    """Lazy-build a process-wide :class:`ToolRegistry`.
-
-    The legacy ``_create_toolkit`` rebuilt the tool list per request;
-    here we cache one registry — descriptors are immutable, so a single
-    instance is safe to share. Phase 5 will replace this with a
-    per-Kernel registry populated during lifespan startup.
-    """
-    global _DEFAULT_TOOL_REGISTRY  # noqa: PLW0603
-    if _DEFAULT_TOOL_REGISTRY is None:
-        reg = ToolRegistry()
-        for fn in discover_builtin_tool_funcs():
-            desc = fn._tool_descriptor  # pylint: disable=protected-access
-            reg.register(desc)
-        _DEFAULT_TOOL_REGISTRY = reg
-    return _DEFAULT_TOOL_REGISTRY
 
 
 class QwenPawAgent(CodingModeMixin, Agent):
@@ -84,122 +53,44 @@ class QwenPawAgent(CodingModeMixin, Agent):
 
     def __init__(
         self,
+        *,
+        name: str,
+        model: Any,
+        system_prompt: str,
+        toolkit: Toolkit,
+        react_config: ReActConfig,
+        middlewares: list,
         agent_config: "AgentProfileConfig",
-        env_context: Optional[str] = None,
-        mcp_clients: Optional[List[Any]] = None,
-        memory_manager: BaseMemoryManager | None = None,
-        context_manager: BaseContextManager | None = None,
-        request_context: Optional[dict[str, str]] = None,
         workspace_dir: Path | None = None,
-        task_tracker: Any | None = None,
-        toolkit: Toolkit | None = None,
+        request_context: Optional[dict[str, str]] = None,
+        memory_manager: "BaseMemoryManager | None" = None,
+        context_manager: "BaseContextManager | None" = None,
+        mcp_clients: Optional[List[Any]] = None,
+        effective_skills: Optional[List[str]] = None,
     ):
         """Initialize QwenPawAgent.
 
-        Args:
-            agent_config: Agent profile configuration containing all settings
-                including running config (max_iters, max_input_length,
-                memory_compact_threshold, etc.) and language setting.
-            env_context: Optional environment context to prepend to
-                system prompt
-            mcp_clients: Optional list of MCP clients for tool
-                integration
-            memory_manager: Optional memory manager instance. Pass ``None``
-                to disable the memory manager entirely.
-            context_manager: Optional context manager instance
-            request_context: Optional request context with session_id,
-                user_id, channel, agent_id
-            workspace_dir: Workspace directory for reading prompt files
-                (if None, uses global WORKING_DIR)
+        All construction dependencies (model, prompt, toolkit, middlewares)
+        are provided externally by :class:`AgentBuilder`. The agent does
+        not build any of these internally.
         """
         self._agent_config = agent_config
-        self._env_context = env_context
         self._request_context = dict(request_context or {})
         self._mcp_clients = mcp_clients or []
         self._workspace_dir = workspace_dir
-        self._task_tracker = task_tracker
-
-        # Extract configuration from agent_config
-        running_config = agent_config.running
         self._language = agent_config.language
 
-        # Resolve effective skills once and share across toolkit /
-        # skill registration.
-        workspace_dir = self._workspace_dir or WORKING_DIR
-        ensure_skills_initialized(workspace_dir)
-        channel_name = self._request_context.get("channel", "console")
-        try:
-            effective_skills = resolve_effective_skills(
-                workspace_dir,
-                channel_name,
-            )
-        except Exception:  # pylint: disable=broad-except
-            effective_skills = []
+        # Register skills metadata on toolkit
+        self._register_skills(toolkit, effective_skills=effective_skills or [])
 
-        # Initialize toolkit — either use the externally-built one or
-        # construct via AgentBuilder + the per-process ToolRegistry.
-        if toolkit is None:
-            toolkit = self._build_toolkit_via_registry(
-                effective_skills=effective_skills,
-            )
-
-        # Load and register skills
-        self._register_skills(toolkit, effective_skills=effective_skills)
-
-        # Initialize memory_manager and context_manager for use
-        # in _build_sys_prompt
+        # Store managers for use by command_handler and downstream
         self.memory_manager = memory_manager
         self.context_manager = context_manager
 
-        # Build prompt manager and system prompt
-        self._prompt_manager = build_default_prompt_manager()
-        sys_prompt = self._build_sys_prompt()
-
-        # Create model and formatter using factory method
-        model, formatter = create_model_and_formatter(agent_id=agent_config.id)
-        model_info = (
-            f"{agent_config.active_model.provider_id}/"
-            f"{agent_config.active_model.model}"
-            if agent_config.active_model
-            else "global-fallback"
-        )
-        logger.info(
-            f"Agent '{agent_config.id}' initialized with model: "
-            f"{model_info} (class: {model.__class__.__name__})",
-        )
-        # Attach the custom formatter to the innermost model so it
-        # overrides agentscope's default formatter.
-        if formatter is not None:
-            innermost = model
-            while hasattr(innermost, "_inner"):
-                innermost = innermost._inner
-            while hasattr(innermost, "_model"):
-                innermost = innermost._model
-            if hasattr(innermost, "formatter"):
-                innermost.formatter = formatter
-        middlewares = self._build_middlewares()
-        init_kwargs: dict[str, Any] = {
-            "name": agent_config.name or "QwenPaw",
-            "model": model,
-            "system_prompt": sys_prompt,
-            "toolkit": toolkit,
-            "react_config": ReActConfig(max_iters=running_config.max_iters),
-            "middlewares": middlewares,
-        }
-        super().__init__(**init_kwargs)
-
-        # Bypass agentscope's built-in permission engine — qwenpaw uses
-        # its own GuardedFunctionTool.check_permissions for tool-guard.
-        # Without this, MCP tools (which have no check_permissions override)
-        # fall through to the default "ask" behavior, blocking execution.
-        from agentscope.permission import PermissionMode
-
-        self.state.permission_context.mode = PermissionMode.BYPASS
-
-        # Register memory tools provided by the memory manager
+        # Register memory tools into toolkit
         if self.memory_manager is not None:
             memory_tools = self.memory_manager.list_memory_tools()
-            basic_group = self.toolkit.tool_groups[0]
+            basic_group = toolkit.tool_groups[0]
             for tool_fn in memory_tools:
                 basic_group.tools.append(
                     GuardedFunctionTool(
@@ -213,12 +104,25 @@ class QwenPawAgent(CodingModeMixin, Agent):
                 [fn.__name__ for fn in memory_tools],
             )
 
-        # Tombstone for legacy ``getattr(agent, "memory", None)`` callers;
-        # short-term memory itself lives on ``self.state.context``.
+        super().__init__(
+            name=name,
+            model=model,
+            system_prompt=system_prompt,
+            toolkit=toolkit,
+            react_config=react_config,
+            middlewares=middlewares,
+        )
+
+        # Bypass agentscope's built-in permission engine — qwenpaw uses
+        # its own GuardedFunctionTool.check_permissions for tool-guard.
+        from agentscope.permission import PermissionMode
+
+        self.state.permission_context.mode = PermissionMode.BYPASS
+
+        # Tombstone for legacy ``getattr(agent, "memory", None)`` callers
         self.memory = None  # type: ignore[assignment]
 
-        # ``context_manager`` is required: it owns the dialog-path
-        # resolution and the post_acting tool-result pruning hook.
+        # CommandHandler for /compact, /new, etc.
         if self.context_manager is not None:
             self.command_handler = CommandHandler(
                 agent_name=self.name,
@@ -284,44 +188,6 @@ class QwenPawAgent(CodingModeMixin, Agent):
                 "state_dict has neither 'state' nor 'memory' key",
             )
 
-    def _build_toolkit_via_registry(
-        self,
-        effective_skills: list[str] | None = None,
-    ) -> Toolkit:
-        """Build the toolkit through :class:`AgentBuilder`.
-
-        Used when the caller did not pre-build a toolkit. The per-Kernel
-        path that Phase 5 introduces will construct the registry inside
-        the lifespan and pre-build the toolkit before reaching here,
-        avoiding the per-request ``discover_builtin_tool_funcs()`` cost.
-        """
-        effective_skills = effective_skills or []
-        agent_id = self._agent_config.id
-
-        registry = _get_default_tool_registry()
-        active_modes: set[str] = (
-            {"coding"} if self._coding_mode_enabled() else set()
-        )
-        try:
-            extra_tools = self._collect_coding_mode_tools(
-                agent_id=agent_id,
-                request_context=self._request_context,
-            )
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.warning("Failed to collect Coding Mode tools: %s", exc)
-            extra_tools = []
-
-        builder = AgentBuilder(tool_registry=registry)
-        return builder.build_toolkit(
-            self._agent_config,
-            agent_id=agent_id,
-            request_context=self._request_context,
-            active_modes=active_modes,
-            effective_skills=effective_skills,
-            extra_tools=extra_tools,
-            mcp_clients=self._mcp_clients or None,
-        )
-
     def _register_skills(
         self,
         toolkit: Toolkit,
@@ -352,92 +218,6 @@ class QwenPawAgent(CodingModeMixin, Agent):
                         skill_name,
                         e,
                     )
-
-    def _build_sys_prompt(self) -> str:
-        """Build system prompt via :class:`PromptManager`.
-
-        Constructs a lightweight context stub and delegates to
-        ``self._prompt_manager.build_sync(ctx)``.
-        """
-        ctx = self._make_prompt_context()
-        prompt = self._prompt_manager.build_sync(ctx)
-        logger.debug("System prompt:\n%s...", prompt[:100])
-        return prompt
-
-    def _make_prompt_context(self) -> Any:
-        """Build the stub context object that contributors read."""
-        from types import SimpleNamespace
-
-        heartbeat_enabled = False
-        hb = getattr(self._agent_config, "heartbeat", None)
-        if hb is not None:
-            heartbeat_enabled = getattr(hb, "enabled", False)
-
-        agent_id = (
-            self._request_context.get("agent_id")
-            if self._request_context
-            else None
-        )
-
-        return SimpleNamespace(
-            workspace_dir=self._workspace_dir or WORKING_DIR,
-            agent_id=agent_id,
-            extras={
-                "language": self._language,
-                "heartbeat_enabled": heartbeat_enabled,
-                "memory_manager": self.memory_manager,
-                "env_context": self._env_context,
-                "agent_config": self._agent_config,
-            },
-        )
-
-    def _build_middlewares(self) -> list:
-        """Build the middleware list for the agent constructor."""
-        working_dir = (
-            self._workspace_dir if self._workspace_dir else WORKING_DIR
-        )
-        bootstrap_hook = BootstrapHook(
-            working_dir=working_dir,
-            language=self._language,
-        )
-        mws: list = [
-            # First: per-reply ContextVars + file/media block download +
-            # skill env wrap.  Replaces ``QwenPawAgent.reply()`` pre-
-            # processing so both ``reply()`` and ``reply_stream()`` get
-            # the same setup (5 ContextVars + process_file_and_media_blocks +
-            # apply_skill_config_env_overrides).
-            RequestSetupMiddleware(
-                workspace_dir=self._workspace_dir,
-                agent_id=self._agent_config.id,
-                agent_config=self._agent_config,
-                request_context=self._request_context,
-            ),
-            BootstrapMiddleware(bootstrap_hook),
-        ]
-        if self.context_manager is not None:
-            # ``BaseContextManager`` itself inherits from
-            # ``MiddlewareBase`` — no wrapper needed.
-            mws.append(self.context_manager)
-        logger.debug("Built %d middleware(s)", len(mws))
-        return mws
-
-    def rebuild_sys_prompt(self) -> None:
-        """Rebuild and replace the system prompt.
-
-        Useful after load_session_state to ensure the prompt reflects
-        the latest AGENTS.md / SOUL.md / PROFILE.md on disk.
-
-        Updates both self._system_prompt and the first system-role
-        message stored in ``self.state.context`` (if one exists).
-        """
-        self._system_prompt = self._build_sys_prompt()
-
-        for msg in self.state.context:
-            if msg.role == "system":
-                msg.content = [
-                    TextBlock(type="text", text=self._system_prompt),
-                ]
-            break
 
     # ------------------------------------------------------------------
     # Media-block fallback: strip unsupported media blocks (image, audio,

@@ -103,7 +103,7 @@ class Runtime:
                     self.kernel.plugins.tool_registry,
                     app_services=self.app_services,
                 )
-                ctx.agent = builder.build(ctx)
+                ctx.agent = await builder.build(ctx)
 
                 # --- [phase 4] POST_AGENT_BUILD ---
                 await hooks.run(Phase.POST_AGENT_BUILD, ctx)

@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Business-layer hook base class (Phase 1 skeleton).
+"""Business-layer lifecycle hooks.
 
-Concrete hooks (session load/save, bootstrap, skill env, cron triggers
-…) arrive in Phase 5. This package exists in Phase 1 so future authors
-have a stable import path (``qwenpaw.hooks.LifecycleHook``).
+Concrete hooks registered at startup via ``builtin_hook_clses``:
+- SessionLoadHook / SessionSaveHook — session persistence
+- BootstrapHook — BOOTSTRAP.md first-interaction guidance
+- SkillEnvHook / SkillEnvCleanupHook — skill env-var overrides
+- ContextVarsSetupHook — per-request ContextVar injection
+- MediaProcessHook — file/media block processing
+- ErrorNormalizeHook / CancelCleanupHook — error handling
 """
 
 from __future__ import annotations

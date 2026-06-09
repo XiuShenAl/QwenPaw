@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """Session load/save lifecycle hooks.
 
-Migrates ``stream_query.py:L282-304`` (session load) and
-``stream_query.py:L803-837`` (session save) into hook form.
+Loads persisted session state into ``ctx.session_state`` (PRE_AGENT_BUILD)
+so the builder can inject it into the newly-constructed agent. Saves
+agent state back to session storage after the response completes.
 """
 
 from __future__ import annotations
@@ -16,6 +17,19 @@ from ...runtime.phases import Phase
 logger = logging.getLogger(__name__)
 
 
+class _StateProxy:
+    """Minimal proxy satisfying SafeJSONSession's state_module protocol."""
+
+    def __init__(self) -> None:
+        self.data: dict = {}
+
+    def state_dict(self) -> dict:
+        return self.data
+
+    def load_state_dict(self, d: dict) -> None:
+        self.data = d
+
+
 class SessionLoadHook(LifecycleHook):
     """Load persisted session state before agent construction."""
 
@@ -24,22 +38,25 @@ class SessionLoadHook(LifecycleHook):
     priority = 10
 
     async def run(self, ctx: HookContext) -> HookResult:
-        runner = getattr(ctx.kernel, "runner", None) if ctx.kernel else None
-        if runner is None:
+        if ctx.kernel is None:
             return HookResult()
-        session = getattr(runner, "session", None)
+        session = getattr(ctx.kernel, "session", None)
         if session is None:
             return HookResult()
         try:
             request = ctx.request
             user_id = getattr(request, "user_id", "") or ctx.session_id
             channel = getattr(request, "channel", "") or ""
+
+            proxy = _StateProxy()
             await session.load_session_state(
                 session_id=ctx.session_id,
                 user_id=user_id,
                 channel=channel,
-                agent=ctx.agent,
+                agent=proxy,
             )
+            if proxy.data:
+                ctx.session_state = proxy.data
         except KeyError as e:
             logger.debug(
                 "session_load: skipped (schema mismatch): %s",
@@ -58,21 +75,23 @@ class SessionSaveHook(LifecycleHook):
     priority = 90
 
     async def run(self, ctx: HookContext) -> HookResult:
-        runner = getattr(ctx.kernel, "runner", None) if ctx.kernel else None
-        if runner is None:
+        if ctx.kernel is None or ctx.agent is None:
             return HookResult()
-        session = getattr(runner, "session", None)
-        if session is None or ctx.agent is None:
+        session = getattr(ctx.kernel, "session", None)
+        if session is None:
             return HookResult()
         try:
             request = ctx.request
             user_id = getattr(request, "user_id", "") or ctx.session_id
             channel = getattr(request, "channel", "") or ""
+
+            proxy = _StateProxy()
+            proxy.data = ctx.agent.state_dict()
             await session.save_session_state(
                 session_id=ctx.session_id,
                 user_id=user_id,
                 channel=channel,
-                agent=ctx.agent,
+                agent=proxy,
             )
         except Exception:
             logger.debug("session_save: failed", exc_info=True)

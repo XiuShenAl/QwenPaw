@@ -322,6 +322,21 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
                 exc_info=True,
             )
 
+        # --- Built-in tools ---
+        try:
+            from ..agents.tools import discover_builtin_tool_funcs
+
+            # pylint: disable-next=protected-access
+            kernel_registry._bootstrap_kwargs[
+                "builtin_tool_funcs"
+            ] = discover_builtin_tool_funcs()
+            logger.debug("Built-in tool funcs collected")
+        except Exception:
+            logger.debug(
+                "Built-in tool func collection skipped",
+                exc_info=True,
+            )
+
         # --- Built-in slash commands (daemon, control, conversation) ---
         try:
             from ..runtime.builtin_commands import (
@@ -338,6 +353,77 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
         except Exception:
             logger.debug(
                 "Built-in slash command collection skipped",
+                exc_info=True,
+            )
+
+        # --- Built-in lifecycle hooks ---
+        try:
+            from ..hooks.session.session_hook import (
+                SessionLoadHook,
+                SessionSaveHook,
+            )
+            from ..hooks.bootstrap.bootstrap_hook import BootstrapHook
+            from ..hooks.skill_env.skill_env_hook import (
+                SkillEnvHook,
+                SkillEnvCleanupHook,
+            )
+            from ..hooks.request_setup.contextvars_hook import (
+                ContextVarsSetupHook,
+            )
+            from ..hooks.request_setup.media_hook import MediaProcessHook
+            from ..hooks.error.error_hook import (
+                ErrorNormalizeHook,
+                CancelCleanupHook,
+            )
+
+            # pylint: disable-next=protected-access
+            kernel_registry._bootstrap_kwargs["builtin_hook_clses"] = [
+                SessionLoadHook,
+                SessionSaveHook,
+                BootstrapHook,
+                SkillEnvHook,
+                SkillEnvCleanupHook,
+                ContextVarsSetupHook,
+                MediaProcessHook,
+                ErrorNormalizeHook,
+                CancelCleanupHook,
+            ]
+            logger.debug("Built-in lifecycle hooks collected")
+        except Exception:
+            logger.debug(
+                "Built-in lifecycle hook collection skipped",
+                exc_info=True,
+            )
+
+        # --- Built-in prompt contributors ---
+        try:
+            from ..runtime.prompt_contributors import _ALL_CONTRIBUTORS
+
+            # pylint: disable-next=protected-access
+            kernel_registry._bootstrap_kwargs[
+                "builtin_contributor_clses"
+            ] = _ALL_CONTRIBUTORS
+            logger.debug("Built-in prompt contributors collected")
+        except Exception:
+            logger.debug(
+                "Built-in prompt contributor collection skipped",
+                exc_info=True,
+            )
+
+        # --- Built-in modes (CodingMode, MissionMode) ---
+        try:
+            from ..modes.coding import CodingMode
+            from ..modes.mission import MissionMode
+
+            # pylint: disable-next=protected-access
+            kernel_registry._bootstrap_kwargs["builtin_mode_clses"] = [
+                CodingMode,
+                MissionMode,
+            ]
+            logger.debug("Built-in modes collected")
+        except Exception:
+            logger.debug(
+                "Built-in mode collection skipped",
                 exc_info=True,
             )
 

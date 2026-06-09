@@ -20,7 +20,9 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ...runtime.hooks import HookRegistry
+from ...runtime.prompt_manager import PromptManager
 from ...runtime.slash_command_registry import SlashCommandRegistry
+from ...runtime.tool_registry import ToolRegistry
 
 if TYPE_CHECKING:
     from ...modes.base import AgentMode
@@ -29,12 +31,14 @@ if TYPE_CHECKING:
 
 @dataclass
 class KernelPlugins:
-    """Three per-Kernel pluggable registries packed into one container."""
+    """Per-Kernel pluggable registries."""
 
     slash_command_registry: SlashCommandRegistry = field(
         default_factory=SlashCommandRegistry,
     )
     hook_registry: HookRegistry = field(default_factory=HookRegistry)
+    tool_registry: ToolRegistry = field(default_factory=ToolRegistry)
+    prompt_manager: PromptManager = field(default_factory=PromptManager)
     modes: list["AgentMode"] = field(default_factory=list)
 
     def register_mode(self, mode: "AgentMode", kernel: object) -> None:

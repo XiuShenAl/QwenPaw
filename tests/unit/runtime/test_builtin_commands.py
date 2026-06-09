@@ -19,8 +19,10 @@ from qwenpaw.runtime.builtin_commands import (
     _collect_daemon_specs,
     _parse_skill_query,
     _skill_fallback_handler,
-    build_default_command_registry,
+    collect_builtin_command_specs,
+    get_skill_fallback_handler,
 )
+from qwenpaw.runtime.slash_command_registry import SlashCommandRegistry
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -40,14 +42,23 @@ def _stub_ctx(**kwargs) -> SimpleNamespace:
     return SimpleNamespace(**defaults)
 
 
+def _build_registry() -> SlashCommandRegistry:
+    """Build a fully populated SlashCommandRegistry."""
+    reg = SlashCommandRegistry()
+    for spec in collect_builtin_command_specs():
+        reg.register(spec)
+    reg.register_fallback(get_skill_fallback_handler())
+    return reg
+
+
 # ---------------------------------------------------------------------------
-# build_default_command_registry
+# collect_builtin_command_specs
 # ---------------------------------------------------------------------------
 
 
 def test_registry_has_all_command_names() -> None:
     """Registry contains all command names."""
-    reg = build_default_command_registry()
+    reg = _build_registry()
     names = reg.names()
 
     # Conversation commands (11)
@@ -84,11 +95,10 @@ def test_registry_has_all_command_names() -> None:
 
 
 def test_registry_command_count() -> None:
-    reg = build_default_command_registry()
+    reg = _build_registry()
     names = reg.names()
-    # 11 conversation + 6 daemon (restart, status, version, logs,
-    # reload-config, reload_config, daemon) = 7 daemon names
-    # + 6 control = 24 total names
+    # 11 conversation + 7 daemon (restart, status, version, logs,
+    # reload-config, reload_config, daemon) + 6 control = 24+ total
     assert len(names) >= 24
 
 
@@ -123,90 +133,20 @@ def test_conversation_specs_have_correct_category() -> None:
 
 
 @pytest.mark.asyncio
-async def test_conversation_adapter_delegates_to_command_handler() -> None:
-    specs = _collect_conversation_specs()
-    clear_spec = next(s for s in specs if s.name == "clear")
-
-    mock_msg = MagicMock()
-    mock_handler = AsyncMock(return_value=mock_msg)
-
-    agent = SimpleNamespace(
-        command_handler=SimpleNamespace(handle_command=mock_handler),
-    )
-    ctx = _stub_ctx(agent=agent)
-    result = await clear_spec.handler(ctx, "")
-
-    assert result is mock_msg
-    mock_handler.assert_awaited_once_with("/clear")
-
-
-@pytest.mark.asyncio
-async def test_conversation_adapter_passes_args() -> None:
-    specs = _collect_conversation_specs()
-    message_spec = next(s for s in specs if s.name == "message")
-
-    mock_msg = MagicMock()
-    mock_handler = AsyncMock(return_value=mock_msg)
-
-    agent = SimpleNamespace(
-        command_handler=SimpleNamespace(handle_command=mock_handler),
-    )
-    ctx = _stub_ctx(agent=agent)
-    await message_spec.handler(ctx, "5")
-
-    mock_handler.assert_awaited_once_with("/message 5")
-
-
-@pytest.mark.asyncio
 async def test_plan_with_args_returns_none() -> None:
     """``/plan description`` is NOT a command — should fall through."""
     specs = _collect_conversation_specs()
     plan_spec = next(s for s in specs if s.name == "plan")
-
-    agent = SimpleNamespace(
-        command_handler=SimpleNamespace(
-            handle_command=AsyncMock(return_value=MagicMock()),
-        ),
-    )
-    ctx = _stub_ctx(agent=agent)
+    ctx = _stub_ctx(kernel=SimpleNamespace(session=None))
     result = await plan_spec.handler(ctx, "implement auth flow")
-
     assert result is None
 
 
 @pytest.mark.asyncio
-async def test_plan_bare_is_a_command() -> None:
-    """Bare ``/plan`` IS a command."""
-    specs = _collect_conversation_specs()
-    plan_spec = next(s for s in specs if s.name == "plan")
-
-    mock_msg = MagicMock()
-    agent = SimpleNamespace(
-        command_handler=SimpleNamespace(
-            handle_command=AsyncMock(return_value=mock_msg),
-        ),
-    )
-    ctx = _stub_ctx(agent=agent)
-    result = await plan_spec.handler(ctx, "")
-
-    assert result is mock_msg
-
-
-@pytest.mark.asyncio
-async def test_conversation_adapter_no_agent_returns_none() -> None:
+async def test_conversation_adapter_no_kernel_returns_none() -> None:
     specs = _collect_conversation_specs()
     clear_spec = next(s for s in specs if s.name == "clear")
     ctx = _stub_ctx()
-    result = await clear_spec.handler(ctx, "")
-    assert result is None
-
-
-@pytest.mark.asyncio
-async def test_conversation_adapter_no_command_handler_returns_none() -> None:
-    specs = _collect_conversation_specs()
-    clear_spec = next(s for s in specs if s.name == "clear")
-    agent = SimpleNamespace(command_handler=None)
-    ctx = _stub_ctx(agent=agent)
     result = await clear_spec.handler(ctx, "")
     assert result is None
 
@@ -305,16 +245,8 @@ def test_parse_skill_bracket_no_close_returns_none() -> None:
 
 
 @pytest.mark.asyncio
-async def test_skill_fallback_no_agent_returns_none() -> None:
+async def test_skill_fallback_no_kernel_returns_none() -> None:
     ctx = _stub_ctx()
-    result = await _skill_fallback_handler("/someskill test", ctx)
-    assert result is None
-
-
-@pytest.mark.asyncio
-async def test_skill_fallback_no_skills_returns_none() -> None:
-    agent = SimpleNamespace(toolkit=None)
-    ctx = _stub_ctx(agent=agent)
     result = await _skill_fallback_handler("/someskill test", ctx)
     assert result is None
 
@@ -326,7 +258,7 @@ async def test_skill_fallback_no_skills_returns_none() -> None:
 
 @pytest.mark.asyncio
 async def test_registry_dispatch_unknown_returns_none() -> None:
-    reg = build_default_command_registry()
+    reg = _build_registry()
     ctx = _stub_ctx()
     result = await reg.dispatch("plain text", ctx)
     assert result is None
@@ -334,7 +266,7 @@ async def test_registry_dispatch_unknown_returns_none() -> None:
 
 @pytest.mark.asyncio
 async def test_registry_resolves_conversation_command() -> None:
-    reg = build_default_command_registry()
+    reg = _build_registry()
     match = reg.resolve("/clear")
     assert match is not None
     spec, _args = match
@@ -344,7 +276,7 @@ async def test_registry_resolves_conversation_command() -> None:
 
 @pytest.mark.asyncio
 async def test_registry_resolves_daemon_command() -> None:
-    reg = build_default_command_registry()
+    reg = _build_registry()
     match = reg.resolve("/version")
     assert match is not None
     spec, _args = match
@@ -354,7 +286,7 @@ async def test_registry_resolves_daemon_command() -> None:
 
 @pytest.mark.asyncio
 async def test_registry_resolves_control_command() -> None:
-    reg = build_default_command_registry()
+    reg = _build_registry()
     match = reg.resolve("/stop session=123")
     assert match is not None
     spec, args = match
@@ -365,7 +297,7 @@ async def test_registry_resolves_control_command() -> None:
 
 @pytest.mark.asyncio
 async def test_registry_resolves_daemon_alias() -> None:
-    reg = build_default_command_registry()
+    reg = _build_registry()
     match = reg.resolve("/reload_config")
     assert match is not None
     spec, _ = match

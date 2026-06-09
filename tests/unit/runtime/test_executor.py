@@ -18,7 +18,10 @@ class _FakeAgent:
     def __init__(self, events):
         self._events = events
 
-    async def reply_stream(self, _inputs):
+    async def reply_stream(
+        self,
+        inputs=None,
+    ):  # pylint: disable=unused-argument
         for ev in self._events:
             yield ev
 

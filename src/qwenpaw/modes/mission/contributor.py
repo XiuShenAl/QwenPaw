@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from ...runtime.prompt_manager import PromptContributor
+from ...runtime.prompt_manager import SyncPromptContributor
 
 if TYPE_CHECKING:
     from ..base import AgentMode
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class MissionPromptContributor(PromptContributor):
+class MissionPromptContributor(SyncPromptContributor):
     """Inject mission guidance into the system prompt.
 
     Used when mission is active.
@@ -29,7 +29,7 @@ class MissionPromptContributor(PromptContributor):
     def __init__(self, owner_mode: "AgentMode") -> None:
         self.owner_mode = owner_mode
 
-    async def contribute(self, ctx: object) -> str | None:
+    def contribute_sync(self, ctx: object) -> str | None:
         from ...runtime.hooks import HookContext
 
         if not isinstance(ctx, HookContext):

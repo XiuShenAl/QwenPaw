@@ -38,22 +38,20 @@ class AgentMode:
     name: str
 
     def setup(self, kernel: object) -> None:
-        """Register every contribution into ``kernel``'s plugins / services.
+        """Register every contribution into ``kernel``'s plugins.
 
-        ``kernel`` is typed as ``object`` for Phase 1 because the
-        concrete ``Kernel`` class arrives in Phase 5 — by then this
-        method's signature stays identical and subclasses don't need to
-        change. The lookups below (``kernel.plugins.*`` /
-        ``kernel.service_manager.*``) are the stable contract.
+        ``kernel`` is typed as ``object`` because the concrete
+        ``Kernel`` class is defined in a higher layer — by duck-typing
+        on ``kernel.plugins`` subclasses stay stable.
         """
         for spec in self.commands():
             kernel.plugins.slash_command_registry.register(spec)
         for desc in self.tools():
-            kernel.service_manager.tool_registry.register(desc)
+            kernel.plugins.tool_registry.register(desc)
         for hook in self.hooks():
             kernel.plugins.hook_registry.register(hook)
         for contributor in self.prompt_contributors():
-            kernel.service_manager.prompt_manager.register(contributor)
+            kernel.plugins.prompt_manager.register(contributor)
 
     def commands(self) -> list["CommandSpec"]:
         return []

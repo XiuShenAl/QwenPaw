@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""ContextVar setup and cleanup hooks.
+"""ContextVar setup hook.
 
-Migrates ``RequestSetupMiddleware`` steps 1-5 (ContextVar injection)
-into hook form with token-based LIFO reset in FINALLY.
+Injects per-request ContextVars before agent execution so that tools
+(shell, file_io, etc.) see correct workspace_dir, session_id, etc.
 """
 
 from __future__ import annotations
@@ -14,8 +14,6 @@ from ...runtime.hooks import HookContext, HookResult
 from ...runtime.phases import Phase
 
 logger = logging.getLogger(__name__)
-
-CTXVAR_TOKENS_KEY = "_qp_ctxvar_tokens"
 
 
 class ContextVarsSetupHook(LifecycleHook):
@@ -70,19 +68,4 @@ class ContextVarsSetupHook(LifecycleHook):
         return HookResult()
 
 
-class ContextVarsCleanupHook(LifecycleHook):
-    """Reset ContextVars in FINALLY (idempotent cleanup)."""
-
-    phase = Phase.FINALLY
-    name = "contextvars_cleanup"
-    priority = 90
-
-    async def run(self, ctx: HookContext) -> HookResult:  # noqa: ARG002
-        # Currently ContextVars are reset per-task in agentscope's
-        # middleware chain. This hook is a placeholder for future
-        # token-based reset when the setter APIs return tokens.
-        del ctx
-        return HookResult()
-
-
-__all__ = ["ContextVarsSetupHook", "ContextVarsCleanupHook"]
+__all__ = ["ContextVarsSetupHook"]

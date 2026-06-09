@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# pylint: disable=protected-access
 """Unit tests for ``qwenpaw.runtime.builder.AgentBuilder``.
 
 The builder's job is to translate an ``agent_config`` + per-request
@@ -12,6 +13,8 @@ can't accidentally make them green.
 from __future__ import annotations
 
 from types import SimpleNamespace
+
+import pytest
 
 from qwenpaw.runtime.builder import AgentBuilder
 from qwenpaw.runtime.tool_registry import ToolDescriptor, ToolRegistry
@@ -192,3 +195,64 @@ def test_build_methods_are_implemented() -> None:
     builder = AgentBuilder(tool_registry=ToolRegistry())
     for method_name in ("build", "build_prompt", "build_model"):
         assert callable(getattr(builder, method_name))
+
+
+# ---------------------------------------------------------------------------
+# _get_mcp_clients_async
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mcp_clients_async_no_kernel() -> None:
+    ctx = SimpleNamespace()
+    result = await AgentBuilder._get_mcp_clients_async(ctx)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_mcp_clients_async_no_mcp_manager() -> None:
+    ctx = SimpleNamespace(kernel=SimpleNamespace())
+    result = await AgentBuilder._get_mcp_clients_async(ctx)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_mcp_clients_async_success() -> None:
+    from unittest.mock import AsyncMock
+
+    mock_mgr = SimpleNamespace(get_clients=AsyncMock(return_value=["c1"]))
+    ctx = SimpleNamespace(kernel=SimpleNamespace(mcp_manager=mock_mgr))
+    result = await AgentBuilder._get_mcp_clients_async(ctx)
+    assert result == ["c1"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_clients_async_exception_returns_none() -> None:
+    from unittest.mock import AsyncMock
+
+    mock_mgr = SimpleNamespace(
+        get_clients=AsyncMock(side_effect=RuntimeError("fail")),
+    )
+    ctx = SimpleNamespace(kernel=SimpleNamespace(mcp_manager=mock_mgr))
+    result = await AgentBuilder._get_mcp_clients_async(ctx)
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _build_middlewares
+# ---------------------------------------------------------------------------
+
+
+def test_build_middlewares_empty_when_no_context_manager() -> None:
+    ctx = SimpleNamespace(kernel=None)
+    result = AgentBuilder._build_middlewares(ctx, None)
+    assert not result
+
+
+def test_build_middlewares_includes_context_manager() -> None:
+    sentinel = object()
+    ctx = SimpleNamespace(
+        kernel=SimpleNamespace(context_manager=sentinel),
+    )
+    result = AgentBuilder._build_middlewares(ctx, None)
+    assert result == [sentinel]
