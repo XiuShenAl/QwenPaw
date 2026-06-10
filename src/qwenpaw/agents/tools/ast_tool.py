@@ -282,11 +282,13 @@ async def ast_search(  # pylint: disable=too-many-return-statements
     ]
 
     try:
-        returncode, stdout, stderr = await asyncio.wait_for(
+        from qwenpaw.tool_calls import cancellable_wait
+
+        returncode, stdout, stderr = await cancellable_wait(
             asyncio.to_thread(_run_ast_grep_sync, args, root),
-            timeout=_AST_GREP_TIMEOUT + 5,
+            fallback_secs=_AST_GREP_TIMEOUT + 5,
         )
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, asyncio.CancelledError):
         return _make_response(
             f"Error: ast_search timed out after {_AST_GREP_TIMEOUT}s. "
             f"Try a narrower `path` or a more specific pattern.",

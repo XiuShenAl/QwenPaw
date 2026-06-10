@@ -1,120 +1,51 @@
 # -*- coding: utf-8 -*-
-# pylint: disable=protected-access
-"""Unit tests for ``qwenpaw.app.app_services.tool_coordinator``."""
+"""Unit tests for ToolCoordinator re-export from app_services.
+
+The old ``qwenpaw.app.app_services.tool_coordinator`` module was replaced by
+``qwenpaw.tool_calls``.  These tests verify the re-export path still works
+and the new coordinator is constructable.  Detailed behavioural tests live in
+``tests/unit/tool_calls/test_coordinator.py``.
+"""
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock
-
 import pytest
 
-from qwenpaw.app.app_services.tool_coordinator import (
-    ToolCall,
-    ToolCallState,
-    ToolCoordinator,
-)
+from qwenpaw.app.app_services import ToolCallEntry, ToolCoordinator
+from qwenpaw.tool_calls import ToolCallStatus
 
 
-def _make_coordinator() -> ToolCoordinator:
-    tracker = MagicMock(name="TaskTracker")
-    tracker.register_external_task = AsyncMock()
-    tracker.unregister_external_task = AsyncMock()
-    return ToolCoordinator(task_tracker=tracker)
+def test_coordinator_importable_from_app_services() -> None:
+    assert ToolCoordinator is not None
+    assert ToolCallEntry is not None
 
 
-def _make_call(call_id: str = "c1", **kwargs) -> ToolCall:
-    defaults = {"agent_id": "a1", "tool_name": "shell", "session_id": "s1"}
-    defaults.update(kwargs)
-    return ToolCall(call_id=call_id, **defaults)
+def test_coordinator_constructable() -> None:
+    tc = ToolCoordinator()
+    assert tc.list() == []
 
 
-@pytest.mark.asyncio
-async def test_register_and_list_active() -> None:
-    tc = _make_coordinator()
-    c1 = _make_call("c1")
-    await tc.register(c1)
-    assert len(tc.list_active()) == 1
-    assert tc.list_active()[0].call_id == "c1"
+def test_tool_call_status_values() -> None:
+    assert ToolCallStatus.RUNNING == "running"
+    assert ToolCallStatus.OFFLOADED == "offloaded"
+    assert ToolCallStatus.COMPLETED == "completed"
 
 
 @pytest.mark.asyncio
-async def test_state_transitions_pending_to_running_to_done() -> None:
-    tc = _make_coordinator()
-    c1 = _make_call("c1")
-    await tc.register(c1)
-    assert c1.state == ToolCallState.PENDING
-
-    await tc.mark_running("c1")
-    assert c1.state == ToolCallState.RUNNING
-
-    await tc.mark_done("c1")
-    assert c1.state == ToolCallState.DONE
-    assert tc.list_active() == []
+async def test_cancel_nonexistent_returns_false() -> None:
+    tc = ToolCoordinator()
+    ok = await tc.cancel("nonexistent")
+    assert ok is False
 
 
 @pytest.mark.asyncio
-async def test_cancel_sets_state_and_rejects_future() -> None:
-    tc = _make_coordinator()
-    loop = asyncio.get_event_loop()
-    fut: asyncio.Future = loop.create_future()
-    c1 = _make_call("c1", future=fut)
-    await tc.register(c1)
-    await tc.mark_running("c1")
-
-    await tc.cancel("c1")
-    assert c1.state == ToolCallState.CANCELLED
-    assert fut.done()
-    with pytest.raises(asyncio.CancelledError):
-        fut.result()
+async def test_pop_pending_hints_empty() -> None:
+    tc = ToolCoordinator()
+    hints = await tc.pop_pending_hints("s-1")
+    assert hints == []
 
 
 @pytest.mark.asyncio
-async def test_cancel_noop_on_done() -> None:
-    tc = _make_coordinator()
-    c1 = _make_call("c1")
-    await tc.register(c1)
-    await tc.mark_done("c1")
-    await tc.cancel("c1")
-    assert c1.state == ToolCallState.DONE
-
-
-@pytest.mark.asyncio
-async def test_move_to_background_calls_task_tracker() -> None:
-    tc = _make_coordinator()
-    c1 = _make_call("c1")
-    await tc.register(c1)
-    await tc.mark_running("c1")
-
-    await tc.move_to_background("c1")
-    assert c1.state == ToolCallState.BACKGROUND
-
-    tc._task_tracker.register_external_task.assert_awaited_once_with(
-        "toolcall-c1",
-    )
-
-
-@pytest.mark.asyncio
-async def test_list_active_filters_by_root_session() -> None:
-    tc = _make_coordinator()
-    c1 = _make_call("c1", root_session_id="r1")
-    c2 = _make_call("c2", root_session_id="r2")
-    await tc.register(c1)
-    await tc.register(c2)
-
-    r1_calls = tc.list_active(root_session_id="r1")
-    assert len(r1_calls) == 1
-    assert r1_calls[0].call_id == "c1"
-
-
-@pytest.mark.asyncio
-async def test_shutdown_cancels_futures_and_clears() -> None:
-    tc = _make_coordinator()
-    loop = asyncio.get_event_loop()
-    fut: asyncio.Future = loop.create_future()
-    c1 = _make_call("c1", future=fut)
-    await tc.register(c1)
-
+async def test_shutdown_noop_when_empty() -> None:
+    tc = ToolCoordinator()
     await tc.shutdown()
-    assert fut.cancelled()
-    assert tc.list_active() == []

@@ -4014,9 +4014,11 @@ async def _action_connect_cdp(state: dict, cdp_url: str) -> ToolChunk:
     try:
         async_playwright = _ensure_playwright_async()
         pw = await async_playwright().start()
-        browser = await asyncio.wait_for(
+        from qwenpaw.tool_calls import cancellable_wait
+
+        browser = await cancellable_wait(
             pw.chromium.connect_over_cdp(cdp_url),
-            timeout=_CDP_CONNECT_TIMEOUT_SECONDS,
+            fallback_secs=_CDP_CONNECT_TIMEOUT_SECONDS,
         )
         contexts = browser.contexts
         if contexts:

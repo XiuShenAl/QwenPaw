@@ -254,11 +254,13 @@ def make_lsp_tool(  # noqa: C901  pylint: disable=too-many-statements
             )
 
         try:
-            result = await asyncio.wait_for(
+            from qwenpaw.tool_calls import cancellable_wait
+
+            result = await cancellable_wait(
                 asyncio.to_thread(_run),
-                timeout=_REQUEST_TIMEOUT,
+                fallback_secs=_REQUEST_TIMEOUT,
             )
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, asyncio.CancelledError):
             return _make_response(
                 f"Error: LSP {operation} timed out after "
                 f"{_REQUEST_TIMEOUT}s.",

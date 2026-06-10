@@ -541,11 +541,13 @@ async def grep_search(
             return [], f"error: {exc}"
 
     try:
-        match_lines, status = await asyncio.wait_for(
+        from qwenpaw.tool_calls import cancellable_wait
+
+        match_lines, status = await cancellable_wait(
             asyncio.to_thread(_worker),
-            timeout=_GREP_TIMEOUT,
+            fallback_secs=_GREP_TIMEOUT,
         )
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, asyncio.CancelledError):
         cancel.set()
         await asyncio.sleep(0.05)
         return _make_response(
@@ -614,11 +616,13 @@ async def glob_search(
             return [], False
 
     try:
-        results, truncated = await asyncio.wait_for(
+        from qwenpaw.tool_calls import cancellable_wait
+
+        results, truncated = await cancellable_wait(
             asyncio.to_thread(_worker),
-            timeout=_GLOB_TIMEOUT,
+            fallback_secs=_GLOB_TIMEOUT,
         )
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, asyncio.CancelledError):
         cancel.set()
         await asyncio.sleep(0.05)
         return _make_response(

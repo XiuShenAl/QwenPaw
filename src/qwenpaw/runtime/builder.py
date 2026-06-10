@@ -444,13 +444,29 @@ class AgentBuilder:
         ctx: Any,
         agent_config: Any,
     ) -> list[Any]:  # noqa: ARG004
-        """Build middleware list — only context_manager remains.
+        """Build middleware list.
 
-        ContextVars, bootstrap injection, skill env, and file/media
-        processing are now handled by lifecycle hooks.
+        Order (onion model, outermost first):
+        1. ToolCoordinatorMiddleware — tool call lifecycle management
+        2. context_manager (LightContextManager) — context pruning
         """
         del agent_config  # reserved for future mode-specific middleware
         mws: list[Any] = []
+
+        app_services = getattr(ctx, "app_services", None)
+        if app_services is not None:
+            tool_coordinator = getattr(
+                app_services,
+                "tool_coordinator",
+                None,
+            )
+            if tool_coordinator is not None:
+                from qwenpaw.tool_calls import ToolCoordinatorMiddleware
+
+                mws.append(
+                    ToolCoordinatorMiddleware(coordinator=tool_coordinator),
+                )
+
         context_manager = AgentBuilder._get_context_manager(ctx)
         if context_manager is not None:
             mws.append(context_manager)

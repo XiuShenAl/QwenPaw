@@ -4,7 +4,6 @@
 import json
 import os
 import platform
-import subprocess
 import time
 
 from agentscope.message import TextBlock
@@ -74,31 +73,37 @@ def _capture_mss(path: str) -> ToolChunk:
         return _tool_error(f"desktop_screenshot (mss) failed: {e!s}")
 
 
-def _capture_macos_screencapture(
+async def _capture_macos_screencapture(
     path: str,
     capture_window: bool,
 ) -> ToolChunk:
     """macOS: screencapture (supports window selection with -w)."""
+    import asyncio
+
+    from qwenpaw.tool_calls import cancellable_wait
+
     cmd = ["screencapture", "-x", path]
     if capture_window:
         cmd.insert(-1, "-w")
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        if result.returncode != 0:
-            stderr = (result.stderr or "").strip() or "Unknown error"
-            return _tool_error(f"screencapture failed: {stderr}")
+        _, stderr = await cancellable_wait(
+            proc.communicate(),
+            fallback_secs=30,
+        )
+        if proc.returncode != 0:
+            stderr_str = (stderr or b"").decode().strip() or "Unknown error"
+            return _tool_error(f"screencapture failed: {stderr_str}")
         if not os.path.isfile(path):
             return _tool_error(
                 "screencapture reported success but file was not created",
             )
         return _tool_ok(path, f"Desktop screenshot saved to {path}")
-    except subprocess.TimeoutExpired:
+    except (asyncio.TimeoutError, asyncio.CancelledError):
         return _tool_error(
             "screencapture timed out (e.g. window selection cancelled)",
         )
@@ -144,7 +149,7 @@ async def desktop_screenshot(
 
     # macOS: optional window selection via screencapture -w
     if system == "Darwin" and capture_window:
-        return _capture_macos_screencapture(path, capture_window=True)
+        return await _capture_macos_screencapture(path, capture_window=True)
 
     # Full-screen on all platforms (macOS, Linux, Windows) via mss
     return _capture_mss(path)

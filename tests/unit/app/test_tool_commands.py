@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -11,18 +12,40 @@ import pytest
 from qwenpaw.app.app_services._builtin_tool_commands import (
     build_tool_command_specs,
 )
-from qwenpaw.app.app_services.tool_coordinator import (
-    ToolCall,
-    ToolCallState,
-)
+from qwenpaw.tool_calls import ToolCallEntry, ToolCallStatus
+from qwenpaw.tool_calls._context import ToolCallContext
+from qwenpaw.tool_calls._stream import ToolStream
 
 
 def _stub_coordinator() -> MagicMock:
     tc = MagicMock()
-    tc.list_active = MagicMock(return_value=[])
-    tc.move_to_background = AsyncMock()
-    tc.cancel = AsyncMock()
+    tc.list = MagicMock(return_value=[])
+    tc.request_offload = AsyncMock(return_value=True)
+    tc.cancel = AsyncMock(return_value=True)
     return tc
+
+
+def _make_entry(
+    tool_call_id: str = "abc12345",
+    tool_name: str = "shell",
+    status: ToolCallStatus = ToolCallStatus.RUNNING,
+) -> ToolCallEntry:
+    ctx = ToolCallContext(
+        tool_call_id=tool_call_id,
+        tool_name=tool_name,
+        session_id="s1",
+        agent_id="a1",
+        root_session_id="rs1",
+        started_at=asyncio.get_event_loop().time(),
+        deadline=None,
+        cancel_event=asyncio.Event(),
+    )
+    return ToolCallEntry(
+        ctx=ctx,
+        stream=ToolStream(tool_call_id=tool_call_id, session_id="s1"),
+        final_response=None,
+        status=status,
+    )
 
 
 def test_builds_three_command_specs() -> None:
@@ -45,14 +68,7 @@ async def test_tools_command_no_active() -> None:
 @pytest.mark.asyncio
 async def test_tools_command_with_active() -> None:
     tc = _stub_coordinator()
-    tc.list_active.return_value = [
-        ToolCall(
-            call_id="abc12345",
-            agent_id="a1",
-            tool_name="shell",
-            state=ToolCallState.RUNNING,
-        ),
-    ]
+    tc.list.return_value = [_make_entry()]
     specs = build_tool_command_specs(tc)
     tools_spec = next(s for s in specs if s.name == "tools")
 
@@ -63,14 +79,14 @@ async def test_tools_command_with_active() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tool_bg_calls_move_to_background() -> None:
+async def test_tool_bg_calls_request_offload() -> None:
     tc = _stub_coordinator()
     specs = build_tool_command_specs(tc)
     bg_spec = next(s for s in specs if s.name == "tool-bg")
 
     ctx = SimpleNamespace()
     msg = await bg_spec.handler(ctx, "abc123")
-    tc.move_to_background.assert_awaited_once_with("abc123")
+    tc.request_offload.assert_awaited_once()
     assert "background" in msg.content[0].text.lower()
 
 
@@ -93,5 +109,5 @@ async def test_tool_cancel_calls_cancel() -> None:
 
     ctx = SimpleNamespace()
     msg = await cancel_spec.handler(ctx, "xyz789")
-    tc.cancel.assert_awaited_once_with("xyz789")
+    tc.cancel.assert_awaited_once()
     assert "cancelled" in msg.content[0].text.lower()

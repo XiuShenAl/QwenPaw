@@ -133,6 +133,8 @@ class QwenPawAgent(CodingModeMixin, Agent):
         else:
             self.command_handler = None
 
+        self._register_tool_call_hooks()
+
     # Session persistence calls state_dict/load_state_dict on the agent;
     # these round-trip through self.state (AgentState pydantic model).
     def state_dict(self) -> dict:
@@ -489,6 +491,86 @@ class QwenPawAgent(CodingModeMixin, Agent):
             mt = getattr(source, "media_type", "") or ""
             return mt.startswith(self._MEDIA_MIME_PREFIXES)
         return False
+
+    # ------------------------------------------------------------------
+    # Tool call enhancement: hint injection + hook registration
+    # ------------------------------------------------------------------
+
+    def _get_tool_coordinator(self) -> Any:
+        """Return the ToolCoordinator from request_context, or None."""
+        return (self._request_context or {}).get("tool_coordinator")
+
+    async def _inject_pending_hints(self) -> None:
+        """Pop background-tool hints and append them to agent context."""
+        mgr = self._get_tool_coordinator()
+        if mgr is None:
+            return
+        session_id = (self._request_context or {}).get("session_id", "")
+        if not session_id:
+            return
+        hints = await mgr.pop_pending_hints(session_id)
+        for hint in hints:
+            self.state.context.append(hint)
+
+    async def _reply(self, **kwargs: Any) -> Any:
+        """Override to inject pending background-tool hints before reply."""
+        await self._inject_pending_hints()
+        async for evt in super()._reply(**kwargs):
+            yield evt
+
+    def _register_tool_call_hooks(self) -> None:
+        """Register per-tool default timeouts on the ToolCoordinator."""
+        mgr = self._get_tool_coordinator()
+        if mgr is None:
+            return
+
+        mgr.hooks.register(
+            "execute_shell_command",
+            default_timeout_secs=60.0,
+        )
+        mgr.hooks.register("chat_with_agent", default_timeout_secs=300.0)
+        mgr.hooks.register("check_agent_task", default_timeout_secs=30.0)
+        mgr.hooks.register("grep_search", default_timeout_secs=30.0)
+        mgr.hooks.register("glob_search", default_timeout_secs=15.0)
+        mgr.hooks.register("ast_search", default_timeout_secs=35.0)
+        mgr.hooks.register(
+            "desktop_screenshot",
+            default_timeout_secs=30.0,
+        )
+        for name in (
+            "lsp_definition",
+            "lsp_references",
+            "lsp_rename",
+            "lsp_hover",
+            "lsp_diagnostics",
+        ):
+            mgr.hooks.register(name, default_timeout_secs=20.0)
+        mgr.hooks.register(
+            "browser_use",
+            max_internal_timeout_secs=3600.0,
+        )
+
+        agent_id = (self._request_context or {}).get(
+            "agent_id",
+            self.name,
+        )
+        mgr.clear_agent_tool_timeouts(agent_id)
+        builtin_tools = (
+            getattr(
+                getattr(self._agent_config, "tools", None),
+                "builtin_tools",
+                None,
+            )
+            or {}
+        )
+        for tool_name, cfg in builtin_tools.items():
+            t = getattr(cfg, "timeout_seconds", None)
+            if t is not None and t > 0:
+                mgr.set_agent_tool_timeout(
+                    agent_id,
+                    tool_name,
+                    float(t),
+                )
 
     # pylint: disable=too-many-nested-blocks
     def _strip_media_blocks_from_memory(self) -> int:

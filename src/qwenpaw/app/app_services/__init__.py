@@ -17,11 +17,11 @@ from __future__ import annotations
 
 from .app_service_manager import AppServiceManager
 from .approval_coordinator import ApprovalCoordinator
-from .tool_coordinator import ToolCall, ToolCoordinator
+from ...tool_calls import ToolCallEntry, ToolCoordinator
 
 __all__ = [
     "AppServiceManager",
     "ApprovalCoordinator",
-    "ToolCall",
+    "ToolCallEntry",
     "ToolCoordinator",
 ]

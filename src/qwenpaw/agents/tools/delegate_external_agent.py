@@ -587,11 +587,15 @@ async def _stream_action_responses(
         ),
     )
     loop = asyncio.get_running_loop()
-    deadline = (
-        loop.time() + max_runtime
-        if max_runtime is not None and max_runtime > 0
-        else None
-    )
+    from qwenpaw.tool_calls import get_call_context
+
+    _tc_ctx = get_call_context()
+    if _tc_ctx is not None and _tc_ctx.remaining() is not None:
+        deadline = _tc_ctx.deadline
+    elif max_runtime is not None and max_runtime > 0:
+        deadline = loop.time() + max_runtime
+    else:
+        deadline = None
 
     try:
         while True:

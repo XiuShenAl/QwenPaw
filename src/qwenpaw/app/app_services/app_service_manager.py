@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .approval_coordinator import ApprovalCoordinator
-from .tool_coordinator import ToolCoordinator
+from ...tool_calls import ToolCoordinator
 
 if TYPE_CHECKING:
     from ..approvals.service import ApprovalService
@@ -53,7 +53,7 @@ class AppServiceManager:
 
             task_tracker = TaskTracker()
         self.task_tracker = task_tracker
-        self.tool_coordinator = ToolCoordinator(task_tracker=self.task_tracker)
+        self.tool_coordinator = ToolCoordinator()
         self.approval_coordinator = ApprovalCoordinator(
             service=approval_service,
         )

@@ -4,8 +4,6 @@
 Provides ``/tools``, ``/tool-bg``, and ``/tool-cancel`` as
 :class:`CommandSpec` instances registered into the per-Kernel
 :class:`SlashCommandRegistry` via lifespan bootstrap.
-
-See ``RUNTIME_REFACTOR_PSEUDOCODE.md`` §8.3.
 """
 
 from __future__ import annotations
@@ -15,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 from ...runtime.slash_command_registry import CommandSpec
 
 if TYPE_CHECKING:
-    from .tool_coordinator import ToolCoordinator
+    from ...tool_calls import ToolCoordinator
 
 
 def build_tool_command_specs(
@@ -28,14 +26,25 @@ def build_tool_command_specs(
         from agentscope.message._block import TextBlock
 
         root_sid = getattr(ctx, "root_session_id", None)
-        active = tool_coordinator.list_active(root_session_id=root_sid)
+        active = tool_coordinator.list(session_id=root_sid)
         if not active:
             text = "No active tool calls."
         else:
             lines = [f"Active tool calls ({len(active)}):"]
-            for c in active:
+            for e in active:
+                elapsed = ""
+                try:
+                    import asyncio
+
+                    elapsed_s = (
+                        asyncio.get_event_loop().time() - e.ctx.started_at
+                    )
+                    elapsed = f" {elapsed_s:.1f}s"
+                except Exception:
+                    pass
                 lines.append(
-                    f"- `{c.call_id[:8]}` **{c.tool_name}** [{c.state.value}]",
+                    f"- `{e.ctx.tool_call_id[:8]}` "
+                    f"**{e.ctx.tool_name}** [{e.status.value}]{elapsed}",
                 )
             text = "\n".join(lines)
         return Msg(
@@ -60,16 +69,21 @@ def build_tool_command_specs(
                     ),
                 ],
             )
-        await tool_coordinator.move_to_background(call_id)
+        from ...tool_calls import OffloadReason
+
+        ok = await tool_coordinator.request_offload(
+            call_id,
+            reason=OffloadReason.USER,
+        )
+        text = (
+            f"Tool call `{call_id[:8]}` moved to background."
+            if ok
+            else f"Tool call `{call_id[:8]}` not found or already offloaded."
+        )
         return Msg(
             name="assistant",
             role="assistant",
-            content=[
-                TextBlock(
-                    type="text",
-                    text=f"Tool call `{call_id[:8]}` moved to background.",
-                ),
-            ],
+            content=[TextBlock(type="text", text=text)],
         )
 
     async def _tool_cancel_handler(_ctx: Any, args: str) -> Any:
@@ -88,16 +102,21 @@ def build_tool_command_specs(
                     ),
                 ],
             )
-        await tool_coordinator.cancel(call_id)
+        from ...tool_calls import CancelReason
+
+        ok = await tool_coordinator.cancel(
+            call_id,
+            reason=CancelReason.USER,
+        )
+        text = (
+            f"Tool call `{call_id[:8]}` cancelled."
+            if ok
+            else f"Tool call `{call_id[:8]}` not found."
+        )
         return Msg(
             name="assistant",
             role="assistant",
-            content=[
-                TextBlock(
-                    type="text",
-                    text=f"Tool call `{call_id[:8]}` cancelled.",
-                ),
-            ],
+            content=[TextBlock(type="text", text=text)],
         )
 
     return [

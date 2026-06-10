@@ -456,15 +456,17 @@ async def execute_shell_command(
             try:
                 # Apply timeout to communicate directly; wait()+communicate()
                 # can hang if descendants keep stdout/stderr pipes open.
-                stdout, stderr = await asyncio.wait_for(
+                from qwenpaw.tool_calls import cancellable_wait
+
+                stdout, stderr = await cancellable_wait(
                     proc.communicate(),
-                    timeout=timeout,
+                    fallback_secs=timeout,
                 )
                 stdout_str = smart_decode(stdout)
                 stderr_str = smart_decode(stderr)
                 returncode = proc.returncode
 
-            except asyncio.TimeoutError:
+            except (asyncio.TimeoutError, asyncio.CancelledError):
                 stderr_suffix = (
                     f"⚠️ TimeoutError: The command execution exceeded "
                     f"the timeout of {timeout} seconds. "
