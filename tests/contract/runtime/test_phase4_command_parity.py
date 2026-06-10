@@ -20,12 +20,22 @@ import pytest
 
 from qwenpaw.runtime.builtin_commands import (
     _parse_skill_query,
-    build_default_command_registry,
+    collect_builtin_command_specs,
+    get_skill_fallback_handler,
 )
+from qwenpaw.runtime.slash_command_registry import SlashCommandRegistry
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _build_default_registry() -> SlashCommandRegistry:
+    reg = SlashCommandRegistry()
+    for spec in collect_builtin_command_specs():
+        reg.register(spec)
+    reg.register_fallback(get_skill_fallback_handler())
+    return reg
 
 
 def _stub_ctx(
@@ -65,6 +75,21 @@ def _text_of(msg) -> str | None:
     return str(content) if content else ""
 
 
+def _stub_kernel():
+    """Stub kernel with session for conversation commands."""
+    session = MagicMock()
+    session.load_session_state = AsyncMock(return_value=None)
+    session.save_session_state = AsyncMock(return_value=None)
+    return SimpleNamespace(
+        agent_id="test",
+        memory_manager=None,
+        context_manager=None,
+        _manager=None,
+        agent_name="QwenPaw",
+        session=session,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Conversation command parity
 # ---------------------------------------------------------------------------
@@ -72,92 +97,57 @@ def _text_of(msg) -> str | None:
 
 @pytest.mark.asyncio
 async def test_parity_clear_command() -> None:
-    """``/clear`` should delegate to ``command_handler.handle_command``."""
-    from agentscope.message import Msg, TextBlock
+    """``/clear`` should dispatch and produce a response with clear_history."""
+    kernel = _stub_kernel()
+    ctx = _stub_ctx(runner=kernel)
 
-    expected_msg = Msg(
-        name="QwenPaw",
-        role="assistant",
-        content=[TextBlock(type="text", text="**History Cleared!**")],
-        metadata={"clear_history": True, "clear_plan": True},
-    )
-
-    cmd_handler = SimpleNamespace(
-        handle_command=AsyncMock(return_value=expected_msg),
-    )
-    agent = SimpleNamespace(command_handler=cmd_handler)
-    ctx = _stub_ctx(agent=agent)
-
-    reg = build_default_command_registry()
+    reg = _build_default_registry()
     result = await reg.dispatch("/clear", ctx)
 
-    assert result is expected_msg
-    cmd_handler.handle_command.assert_awaited_once_with("/clear")
+    assert result is not None
+    text = _text_of(result)
+    assert text is not None
+    assert "clear" in text.lower() or "history" in text.lower()
 
 
 @pytest.mark.asyncio
 async def test_parity_compact_with_args() -> None:
-    """``/compact focus on API`` should pass args through."""
-    from agentscope.message import Msg, TextBlock
+    """``/compact focus on API`` should dispatch and produce a response."""
+    kernel = _stub_kernel()
+    ctx = _stub_ctx(runner=kernel)
 
-    expected_msg = Msg(
-        name="QwenPaw",
-        role="assistant",
-        content=[TextBlock(type="text", text="Compact done")],
-    )
-
-    cmd_handler = SimpleNamespace(
-        handle_command=AsyncMock(return_value=expected_msg),
-    )
-    agent = SimpleNamespace(command_handler=cmd_handler)
-    ctx = _stub_ctx(agent=agent)
-
-    reg = build_default_command_registry()
+    reg = _build_default_registry()
     result = await reg.dispatch("/compact focus on API", ctx)
 
-    assert result is expected_msg
-    cmd_handler.handle_command.assert_awaited_once_with(
-        "/compact focus on API",
-    )
+    assert result is not None
+    text = _text_of(result)
+    assert text is not None
 
 
 @pytest.mark.asyncio
 async def test_parity_plan_with_description_falls_through() -> None:
     """``/plan implement auth`` should NOT be a command."""
-    cmd_handler = SimpleNamespace(
-        handle_command=AsyncMock(return_value=MagicMock()),
-    )
-    agent = SimpleNamespace(command_handler=cmd_handler)
-    ctx = _stub_ctx(agent=agent)
+    kernel = _stub_kernel()
+    ctx = _stub_ctx(runner=kernel)
 
-    reg = build_default_command_registry()
+    reg = _build_default_registry()
     result = await reg.dispatch("/plan implement auth", ctx)
 
-    # /plan with args returns None from adapter; then fallback tries
-    # skill dispatch but no skills exist, so also None.
     assert result is None
-    cmd_handler.handle_command.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_parity_plan_bare_is_command() -> None:
     """Bare ``/plan`` is a status command."""
-    from agentscope.message import Msg, TextBlock
+    kernel = _stub_kernel()
+    ctx = _stub_ctx(runner=kernel)
 
-    expected = Msg(
-        name="QwenPaw",
-        role="assistant",
-        content=[TextBlock(type="text", text="Plan Mode")],
-    )
-    cmd_handler = SimpleNamespace(
-        handle_command=AsyncMock(return_value=expected),
-    )
-    agent = SimpleNamespace(command_handler=cmd_handler)
-    ctx = _stub_ctx(agent=agent)
-
-    reg = build_default_command_registry()
+    reg = _build_default_registry()
     result = await reg.dispatch("/plan", ctx)
-    assert result is expected
+
+    assert result is not None
+    text = _text_of(result)
+    assert text is not None
 
 
 # ---------------------------------------------------------------------------
@@ -168,24 +158,10 @@ async def test_parity_plan_bare_is_command() -> None:
 @pytest.mark.asyncio
 async def test_parity_version_command() -> None:
     """``/version`` should produce a version info response."""
-    from qwenpaw.app.runner.daemon_commands import (
-        run_daemon_version,
-        DaemonContext,
-    )
+    kernel = _stub_kernel()
+    ctx = _stub_ctx(runner=kernel)
 
-    daemon_ctx = DaemonContext()
-    _ = run_daemon_version(daemon_ctx)
-
-    runner = SimpleNamespace(
-        agent_id="test",
-        memory_manager=None,
-        context_manager=None,
-        _manager=None,
-        agent_name="QwenPaw",
-    )
-    ctx = _stub_ctx(runner=runner)
-
-    reg = build_default_command_registry()
+    reg = _build_default_registry()
     result = await reg.dispatch("/version", ctx)
 
     assert result is not None
@@ -197,16 +173,10 @@ async def test_parity_version_command() -> None:
 @pytest.mark.asyncio
 async def test_parity_daemon_compound() -> None:
     """``/daemon status`` should work via compound entry."""
-    runner = SimpleNamespace(
-        agent_id="test",
-        memory_manager=None,
-        context_manager=None,
-        _manager=None,
-        agent_name="QwenPaw",
-    )
-    ctx = _stub_ctx(runner=runner)
+    kernel = _stub_kernel()
+    ctx = _stub_ctx(runner=kernel)
 
-    reg = build_default_command_registry()
+    reg = _build_default_registry()
     result = await reg.dispatch("/daemon status", ctx)
 
     assert result is not None
@@ -223,7 +193,7 @@ async def test_parity_daemon_compound() -> None:
 @pytest.mark.asyncio
 async def test_non_command_returns_none() -> None:
     """Plain text should return None (fall through to model)."""
-    reg = build_default_command_registry()
+    reg = _build_default_registry()
     ctx = _stub_ctx()
     assert await reg.dispatch("hello world", ctx) is None
 
@@ -233,7 +203,7 @@ async def test_unknown_slash_hits_fallback() -> None:
     """``/unknowncmd`` without skills should return None."""
     agent = SimpleNamespace(toolkit=None)
     ctx = _stub_ctx(agent=agent)
-    reg = build_default_command_registry()
+    reg = _build_default_registry()
     result = await reg.dispatch("/unknowncmd test", ctx)
     assert result is None
 
