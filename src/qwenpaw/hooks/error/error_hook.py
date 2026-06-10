@@ -43,6 +43,9 @@ class ErrorNormalizeHook(LifecycleHook):
         except Exception:
             pass
 
+        if not isinstance(exc, Exception):
+            return HookResult()
+
         normalized = convert_model_exception(exc, model_name=model_name)
         error_text = normalized.message or str(exc) or exc.__class__.__name__
 

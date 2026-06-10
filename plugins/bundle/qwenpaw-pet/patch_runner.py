@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # pylint: disable=protected-access
-"""Wrap ``AgentRunner.stream_query`` to emit pet lifecycle events.
+"""Wrap ``Workspace.stream_query`` to emit pet lifecycle events.
 
 Emissions:
     - ``query.received`` / ``query.running``  — fired up-front
@@ -119,15 +119,15 @@ def _classify_event(
 
 
 def patch_agent_runner() -> None:
-    """Install an observing wrapper around AgentRunner.stream_query."""
+    """Install an observing wrapper around Workspace.stream_query."""
     global _ORIGINAL_STREAM_QUERY, _PATCHED
 
     if _PATCHED:
         return
 
-    from qwenpaw.app.runner.runner import AgentRunner
+    from qwenpaw.app.workspace.workspace import Workspace
 
-    _ORIGINAL_STREAM_QUERY = AgentRunner.stream_query
+    _ORIGINAL_STREAM_QUERY = Workspace.stream_query
 
     async def patched_stream_query(self, request, *args, **kwargs):
         meta = _request_meta(self, request)
@@ -182,9 +182,9 @@ def patch_agent_runner() -> None:
             )
             raise
 
-    AgentRunner.stream_query = patched_stream_query
+    Workspace.stream_query = patched_stream_query
     _PATCHED = True
-    logger.info("QwenPaw Pet patched AgentRunner.stream_query")
+    logger.info("QwenPaw Pet patched Workspace.stream_query")
 
     # Existing channels hold bound-method copies of
     # ``runner.stream_query`` from before the patch; the class-level
@@ -286,9 +286,9 @@ def restore_agent_runner() -> None:
     if not _PATCHED or _ORIGINAL_STREAM_QUERY is None:
         return
 
-    from qwenpaw.app.runner.runner import AgentRunner
+    from qwenpaw.app.workspace.workspace import Workspace
 
-    AgentRunner.stream_query = _ORIGINAL_STREAM_QUERY
+    Workspace.stream_query = _ORIGINAL_STREAM_QUERY
 
     # Undo channel rewiring
     for channel, original in _PATCHED_CHANNEL_PROCESSES:
@@ -308,4 +308,4 @@ def restore_agent_runner() -> None:
     except Exception:
         pass
     _PATCHED = False
-    logger.info("QwenPaw Pet restored AgentRunner.stream_query")
+    logger.info("QwenPaw Pet restored Workspace.stream_query")
