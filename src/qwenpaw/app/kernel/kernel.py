@@ -17,6 +17,7 @@ import logging
 from typing import Any, Iterable
 
 from .kernel_plugins import KernelPlugins
+from ..workspace.local_workspace import QwenPawLocalWorkspace
 from ..workspace.workspace import Workspace
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,18 @@ class Kernel(Workspace):
     def __init__(self, agent_id: str, workspace_dir: str) -> None:
         super().__init__(agent_id, workspace_dir)
         self.plugins = KernelPlugins()
+        self._local_workspace = QwenPawLocalWorkspace(
+            tool_registry=self.plugins.tool_registry,
+            workdir=str(self.workspace_dir),
+            workspace_id=agent_id,
+            default_mcps=[],
+            skill_paths=[],
+        )
+
+    @property
+    def local_workspace(self) -> QwenPawLocalWorkspace:
+        """AgentScope LocalWorkspace routing tools to ToolRegistry."""
+        return self._local_workspace
 
     def bootstrap_plugins(  # pylint: disable=too-many-branches
         self,

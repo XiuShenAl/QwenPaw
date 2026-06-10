@@ -31,8 +31,8 @@ from typing import Any
 import pytest
 
 from qwenpaw.agents.tools import discover_builtin_tool_funcs
+from qwenpaw.app.workspace.local_workspace import QwenPawLocalWorkspace
 from qwenpaw.config.config import ToolsConfig
-from qwenpaw.runtime.builder import AgentBuilder
 from qwenpaw.runtime.tool_registry import ToolRegistry
 
 # ---------------------------------------------------------------------------
@@ -181,8 +181,14 @@ def registry() -> ToolRegistry:
 
 
 @pytest.fixture
-def builder(registry: ToolRegistry) -> AgentBuilder:
-    return AgentBuilder(tool_registry=registry)
+def workspace(registry: ToolRegistry) -> QwenPawLocalWorkspace:
+    return QwenPawLocalWorkspace(
+        tool_registry=registry,
+        workdir="/tmp/test-ws",
+        workspace_id="test",
+        default_mcps=[],
+        skill_paths=[],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -190,8 +196,8 @@ def builder(registry: ToolRegistry) -> AgentBuilder:
 # ---------------------------------------------------------------------------
 
 
-def _new_path_tool_funcs(
-    builder: AgentBuilder,
+async def _new_path_tool_funcs(
+    workspace: QwenPawLocalWorkspace,
     agent_config: Any,
     *,
     active_modes: set[str],
@@ -204,12 +210,12 @@ def _new_path_tool_funcs(
     regression where the registry binds a tool name to the wrong
     function.
     """
-    tk = builder.build_toolkit(
-        agent_config,
+    tools = await workspace.list_tools(
+        agent_config=agent_config,
         active_modes=active_modes,
-        effective_skills=effective_skills,
+        active_skills=effective_skills,
     )
-    return {t.name: t._func for t in tk.tool_groups[0].tools}
+    return {t.name: t._func for t in tools}
 
 
 def _legacy_func_map() -> dict[str, Any]:
@@ -223,6 +229,7 @@ def _legacy_func_map() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("fixture_name", "agent_config", "active_modes", "effective_skills"),
     [
@@ -236,8 +243,8 @@ def _legacy_func_map() -> dict[str, Any]:
         ("restricted", _restricted_agent_config(), set(), set()),
     ],
 )
-def test_legacy_and_new_paths_select_the_same_tool_set(
-    builder: AgentBuilder,
+async def test_legacy_and_new_paths_select_the_same_tool_set(
+    workspace: QwenPawLocalWorkspace,
     fixture_name: str,
     agent_config: Any,
     active_modes: set[str],
@@ -250,8 +257,8 @@ def test_legacy_and_new_paths_select_the_same_tool_set(
         active_modes=active_modes,
     )
     actual = set(
-        _new_path_tool_funcs(
-            builder,
+        await _new_path_tool_funcs(
+            workspace,
             agent_config,
             active_modes=active_modes,
             effective_skills=effective_skills,
@@ -264,6 +271,7 @@ def test_legacy_and_new_paths_select_the_same_tool_set(
     )
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("fixture_name", "agent_config", "active_modes", "effective_skills"),
     [
@@ -277,8 +285,8 @@ def test_legacy_and_new_paths_select_the_same_tool_set(
         ("restricted", _restricted_agent_config(), set(), set()),
     ],
 )
-def test_each_selected_tool_binds_to_its_canonical_function(
-    builder: AgentBuilder,
+async def test_each_selected_tool_binds_to_its_canonical_function(
+    workspace: QwenPawLocalWorkspace,
     fixture_name: str,
     agent_config: Any,
     active_modes: set[str],
@@ -286,8 +294,8 @@ def test_each_selected_tool_binds_to_its_canonical_function(
 ) -> None:
     """Same name in both paths ⇒ same underlying function identity."""
     canonical = _legacy_func_map()
-    actual = _new_path_tool_funcs(
-        builder,
+    actual = await _new_path_tool_funcs(
+        workspace,
         agent_config,
         active_modes=active_modes,
         effective_skills=effective_skills,

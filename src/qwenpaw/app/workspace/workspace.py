@@ -372,7 +372,12 @@ class Workspace:
             # start so ChatManager / Runner see the canonical layout.
             self._migrate_legacy_weixin_data()
 
-            # 3. Start all services via ServiceManager
+            # 3. Initialize LocalWorkspace (created by Kernel subclass)
+            _local_ws = getattr(self, "_local_workspace", None)
+            if _local_ws is not None:
+                await _local_ws.initialize()
+
+            # 4. Start all services via ServiceManager
             await self._service_manager.start_all()
 
             self._started = True
@@ -448,6 +453,11 @@ class Workspace:
 
         # Stop all services via ServiceManager (handles reuse automatically)
         await self._service_manager.stop_all(final=final)
+
+        # Close LocalWorkspace (created by Kernel subclass)
+        _local_ws = getattr(self, "_local_workspace", None)
+        if _local_ws is not None and getattr(_local_ws, "is_alive", False):
+            await _local_ws.close()
 
         self._started = False
         logger.info(f"Workspace stopped: {self.agent_id}")

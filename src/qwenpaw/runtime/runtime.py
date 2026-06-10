@@ -100,7 +100,6 @@ class Runtime:
             if not skip_agent:
                 # --- [fixed 2] build agent ---
                 builder = AgentBuilder(
-                    self.kernel.plugins.tool_registry,
                     app_services=self.app_services,
                 )
                 ctx.agent = await builder.build(ctx)

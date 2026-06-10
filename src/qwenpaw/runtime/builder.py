@@ -2,10 +2,10 @@
 """Per-request agent assembly.
 
 :class:`AgentBuilder` fully constructs a :class:`QwenPawAgent` for each
-request.  It draws from the per-Kernel :class:`ToolRegistry`,
-:class:`PromptManager`, and model factory to produce all dependencies
-(toolkit, system prompt, model, middlewares) and injects them into the
-agent constructor.
+request.  It obtains tools from the per-Kernel
+:class:`QwenPawLocalWorkspace` (via ``list_tools``), the system prompt
+from :class:`PromptManager`, and the model from the factory, then
+injects all dependencies into the agent constructor.
 """
 
 from __future__ import annotations
@@ -13,27 +13,23 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 from .tool_guard import GuardedFunctionTool
-from .tool_registry import ToolRegistry
 
 
 class AgentBuilder:
-    """Compose an agent from a per-Kernel :class:`ToolRegistry`.
+    """Compose an agent for each request.
 
-    ``tool_registry`` is the per-Kernel registry that lifespan startup
-    populated via ``discover_builtin_tool_funcs``.  ``app_services``
-    provides cross-Kernel shared services (TaskTracker, etc.).
+    Tools are obtained from ``ctx.kernel.local_workspace.list_tools()``.
+    ``app_services`` provides cross-Kernel shared services.
     """
 
     def __init__(
         self,
-        tool_registry: ToolRegistry,
         app_services: Any | None = None,
     ) -> None:
-        self._tool_registry = tool_registry
         self._app_services = app_services
 
     # ------------------------------------------------------------------ public
-    def build_toolkit(
+    async def build_toolkit(
         self,
         agent_config: Any,
         *,
@@ -45,39 +41,29 @@ class AgentBuilder:
         extra_tools: Iterable[Any] | None = None,
         memory_tools: Iterable[Any] | None = None,
         mcp_clients: list[Any] | None = None,
+        ctx: Any = None,
     ) -> Any:
         """Build a populated ``Toolkit`` for one agent invocation.
 
-        Selection mirrors the legacy ``_create_toolkit``:
-
-        * ``agent_config.tools.builtin_tools[name].enabled`` is bridged to
-          the registry's ``allowed`` / ``denied`` sets (see
-          :meth:`_resolve_config_gates`).
-        * ``extra_tools`` are appended verbatim — used for dynamic tools
-          like Coding Mode's LSP wrapper that can't be statically
-          decorated.
-        * ``memory_tools`` are wrapped in :class:`GuardedFunctionTool` so
-          the memory manager's helpers respect the same approval flow.
+        Tools are obtained from the per-Kernel
+        :class:`QwenPawLocalWorkspace` via ``list_tools()``.
+        ``extra_tools`` and ``memory_tools`` are appended after the
+        workspace tools.
         """
         from agentscope.tool import Toolkit
 
-        allowed, denied = self._resolve_config_gates(agent_config)
-        descs = self._tool_registry.filter(
-            active_modes=set(active_modes or ()),
-            active_skills=set(effective_skills or ()),
-            enabled_features=set(enabled_features or ()),
-            allowed=allowed,
-            denied=denied,
-        )
-
-        tools: list[Any] = [
-            GuardedFunctionTool(
-                d.func,
+        local_ws = self._get_local_workspace(ctx) if ctx else None
+        if local_ws is not None:
+            tools: list[Any] = await local_ws.list_tools(
+                agent_config=agent_config,
                 agent_id=agent_id,
                 request_context=request_context,
+                active_modes=active_modes or (),
+                active_skills=effective_skills or (),
+                enabled_features=enabled_features or (),
             )
-            for d in descs
-        ]
+        else:
+            tools = []
 
         if extra_tools:
             tools.extend(extra_tools)
@@ -94,52 +80,15 @@ class AgentBuilder:
 
         return Toolkit(tools=tools, mcps=mcp_clients or None)
 
-    # ----------------------------------------------------------------- helpers
-    def _resolve_config_gates(
-        self,
-        agent_config: Any,
-    ) -> tuple[set[str] | None, set[str]]:
-        """Translate ``agent_config.tools.builtin_tools`` to (allowed, denied).
-
-        The legacy semantic was: hardcoded tools default-on unless the
-        config explicitly disables them; plugin tools default-off unless
-        the config explicitly enables them. The registry exposes the
-        former via ``enabled_by_default=True``; this method covers the
-        latter by widening ``allowed`` to ``defaults ∪ explicit_enabled``
-        whenever the user opted in at least one plugin tool. When no
-        plugin is opted in, ``allowed`` stays ``None`` so the filter
-        doesn't restrict the default-enabled set.
-        """
-        cfg = (
-            getattr(
-                getattr(agent_config, "tools", None),
-                "builtin_tools",
-                None,
-            )
-            or {}
-        )
-        denied = {
-            n for n, c in cfg.items() if getattr(c, "enabled", True) is False
-        }
-        explicit_enabled = {
-            n for n, c in cfg.items() if getattr(c, "enabled", True)
-        }
-
-        defaults = self._tool_registry.default_enabled_names()
-        plugin_opt_ins = explicit_enabled - defaults
-        if plugin_opt_ins:
-            return defaults | explicit_enabled, denied
-        return None, denied
-
     # ----------------------------------------------------------------- build
 
     async def build(self, ctx: Any) -> Any:
         """Construct a fully-wired :class:`QwenPawAgent` for one request.
 
-        Integrates all per-Kernel registries: ToolRegistry (toolkit),
-        PromptManager (system prompt), model factory, and middlewares.
-        The agent receives all dependencies externally — it does not
-        build any of them internally.
+        Integrates all per-Kernel registries: QwenPawLocalWorkspace
+        (toolkit), PromptManager (system prompt), model factory, and
+        middlewares.  The agent receives all dependencies externally —
+        it does not build any of them internally.
         """
         from agentscope.agent import ReActConfig
 
@@ -201,7 +150,7 @@ class AgentBuilder:
             agent_id,
             request_context,
         )
-        toolkit = self.build_toolkit(
+        toolkit = await self.build_toolkit(
             agent_config,
             agent_id=agent_id,
             request_context=request_context,
@@ -209,6 +158,7 @@ class AgentBuilder:
             effective_skills=effective_skills,
             extra_tools=extra_tools,
             mcp_clients=mcp_clients,
+            ctx=ctx,
         )
 
         # System prompt.
@@ -317,6 +267,13 @@ class AgentBuilder:
         return model, formatter
 
     # ------------------------------------------------------- helpers
+
+    @staticmethod
+    def _get_local_workspace(ctx: Any) -> Any:
+        kernel = getattr(ctx, "kernel", None)
+        if kernel is not None:
+            return getattr(kernel, "local_workspace", None)
+        return None
 
     @staticmethod
     def _build_request_context(ctx: Any) -> dict[str, str]:
