@@ -22,6 +22,8 @@ import threading
 from pathlib import Path
 from typing import Any, Optional
 
+from qwenpaw.exceptions import LspError
+
 LOGGER = logging.getLogger(__name__)
 
 # Avoid CREATE_NO_WINDOW because it can trigger Windows Defender.
@@ -81,10 +83,6 @@ def parse_messages(buffer: bytes) -> tuple[list[dict], bytes]:
 # ---------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------
-
-
-class LspError(RuntimeError):
-    """Raised when the LSP server returns a JSON-RPC error or dies."""
 
 
 def _client_capabilities() -> dict:

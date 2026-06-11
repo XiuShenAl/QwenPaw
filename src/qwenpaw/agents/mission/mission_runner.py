@@ -140,10 +140,6 @@ _REQUIRED_STORY_FIELDS = {
 # ── PRD validation ───────────────────────────────────────────────────────
 
 
-class PrdValidationError(ValueError):
-    """Raised when prd.json does not conform to the expected schema."""
-
-
 def validate_prd(prd: dict[str, Any]) -> list[str]:
     """Validate a PRD dict and return a list of problems (empty = valid)."""
     problems: list[str] = []

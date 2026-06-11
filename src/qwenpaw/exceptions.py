@@ -319,6 +319,261 @@ class SkillsError(AgentRuntimeErrorException):
         super().__init__("SKILLS_ERROR", message, details)
 
 
+class HookCycleError(AgentRuntimeErrorException):
+    """Raised when ``before``/``after`` constraints contain a cycle."""
+
+    def __init__(
+        self,
+        message: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__("HOOK_CYCLE_ERROR", message, details)
+
+
+class SkillConflictError(SkillsError):
+    """Raised when an import or save operation hits a renameable conflict."""
+
+    def __init__(self, detail: Dict[str, Any]) -> None:
+        super().__init__(
+            message=str(detail.get("message") or "Skill conflict"),
+            details=detail,
+        )
+        self.detail = detail
+
+
+class SkillImportCancelled(SkillsError):
+    """Raised when a skill import task is cancelled by user."""
+
+    def __init__(
+        self,
+        message: str = "Skill import cancelled by user",
+    ) -> None:
+        super().__init__(message=message)
+
+
+class SkillScanError(SkillsError):
+    """Raised when a skill fails a security scan and blocking is enabled."""
+
+    def __init__(self, result: Any) -> None:
+        self.result = result
+        findings = getattr(result, "findings", [])
+        skill_name = getattr(result, "skill_name", "unknown")
+        max_severity = getattr(result, "max_severity", None)
+        max_sev_str = (
+            getattr(max_severity, "value", "UNKNOWN")
+            if max_severity
+            else "UNKNOWN"
+        )
+
+        def _loc(f: Any) -> str:
+            ln = getattr(f, "line_number", None)
+            fp = getattr(f, "file_path", "")
+            return f"({fp}:{ln})" if ln is not None else f"({fp})"
+
+        findings_summary = "; ".join(
+            f"[{f.severity.value}] {f.title} {_loc(f)}" for f in findings[:5]
+        )
+        truncated = (
+            f" (and {len(findings) - 5} more)" if len(findings) > 5 else ""
+        )
+        msg = (
+            f"Security scan of skill '{skill_name}' found "
+            f"{len(findings)} issue(s) "
+            f"(max severity: {max_sev_str}): "
+            f"{findings_summary}{truncated}"
+        )
+        super().__init__(message=msg)
+
+
+# ==================== Command Execution Exceptions ====================
+
+
+class CommandExecutionError(AgentRuntimeErrorException):
+    """Raised when a shell command exits with a non-zero return code."""
+
+    def __init__(
+        self,
+        command: "Any",
+        message: str,
+        *,
+        returncode: Optional[int] = None,
+        stdout: str = "",
+        stderr: str = "",
+    ) -> None:
+        self.command = (
+            list(command) if not isinstance(command, list) else command
+        )
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        super().__init__(
+            "COMMAND_EXECUTION_ERROR",
+            message,
+            details={
+                "command": self.command,
+                "returncode": returncode,
+                "stdout": stdout[:500] if stdout else "",
+                "stderr": stderr[:500] if stderr else "",
+            },
+        )
+
+
+class ProcessLaunchError(AgentRuntimeErrorException):
+    """Raised when a subprocess cannot be started."""
+
+    def __init__(
+        self,
+        command: "Any",
+        message: str,
+    ) -> None:
+        self.command = (
+            list(command) if not isinstance(command, list) else command
+        )
+        super().__init__(
+            "PROCESS_LAUNCH_ERROR",
+            message,
+            details={"command": self.command},
+        )
+
+
+# ==================== Sandbox / Security Exceptions ====================
+
+
+class SandboxViolationError(AppBaseException):
+    """Raised when a tool call violates sandbox boundaries."""
+
+    def __init__(self, message: str = "Sandbox violation") -> None:
+        super().__init__(message=message, error_code="SANDBOX_VIOLATION")
+
+
+# ==================== Channel Exceptions ====================
+
+
+class QQApiError(ChannelError):
+    """HTTP error returned by QQ Bot API."""
+
+    def __init__(self, path: str, status: int, data: Any) -> None:
+        self.path = path
+        self.status = status
+        self.data = data
+        super().__init__(
+            channel_name="qq",
+            message=f"QQ API error: {path} returned {status}",
+            details={"path": path, "status": status, "data": data},
+        )
+
+
+# ==================== ACP Exceptions ====================
+
+
+class ACPError(ExternalServiceException):
+    """Base for Agent Communication Protocol errors."""
+
+    def __init__(self, message: str, *, agent: Optional[str] = None) -> None:
+        self.agent = agent
+        super().__init__(
+            service_name="acp",
+            message=message,
+            details={"agent": agent} if agent else None,
+        )
+
+
+class ACPConfigurationError(ACPError):
+    """ACP configuration is missing or invalid."""
+
+
+class ACPTransportError(ACPError):
+    """ACP transport-level failure (network, connection)."""
+
+
+class ACPProtocolError(ACPError):
+    """ACP protocol violation (malformed message, unexpected state)."""
+
+
+class ACPSessionError(ACPError):
+    """ACP session error (not found, expired, invalid state)."""
+
+
+# ==================== Backup Exceptions ====================
+
+
+class BackupConflictError(AppBaseException):
+    """Raised when an imported backup's ID already exists on disk."""
+
+    def __init__(self, existing_meta: Any) -> None:
+        self.existing_meta = existing_meta
+        meta_id = getattr(existing_meta, "id", "unknown")
+        super().__init__(
+            message=f"backup_conflict: {meta_id}",
+            error_code="BACKUP_CONFLICT",
+        )
+
+
+class BackupValidationError(AppBaseException):
+    """Raised for user-actionable backup validation failures."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        details: Optional[Dict[str, object]] = None,
+    ) -> None:
+        self.code = code
+        self.details = details
+        super().__init__(
+            message=message,
+            error_code=f"BACKUP_VALIDATION_{code}",
+        )
+
+
+# ==================== Misc Runtime Exceptions ====================
+
+
+class PrdValidationError(AppBaseException):
+    """Raised when prd.json does not conform to the expected schema."""
+
+    def __init__(self, message: str = "PRD validation failed") -> None:
+        super().__init__(message=message, error_code="PRD_VALIDATION_ERROR")
+
+
+class RestartInProgressError(AgentStateError):
+    """Raised when /daemon restart is invoked while another restart runs."""
+
+    def __init__(self, message: str = "Restart already in progress") -> None:
+        super().__init__(
+            session_id="",
+            message=message,
+        )
+
+
+class DirectUrlDownloadRejectedError(AgentRuntimeErrorException):
+    """Raised when direct URL download cannot be proven small enough."""
+
+    def __init__(
+        self,
+        reason: str,
+        content_length: Optional[int] = None,
+        status: Optional[int] = None,
+    ) -> None:
+        self.content_length = content_length
+        self.status = status
+        super().__init__(
+            "DIRECT_URL_DOWNLOAD_REJECTED",
+            reason,
+            details={
+                "content_length": content_length,
+                "status": status,
+            },
+        )
+
+
+class LspError(AgentRuntimeErrorException):
+    """Raised when the LSP server returns a JSON-RPC error or dies."""
+
+    def __init__(self, message: str = "LSP error") -> None:
+        super().__init__("LSP_ERROR", message)
+
+
 # ==================== LLM API Exception Converter ====================
 
 

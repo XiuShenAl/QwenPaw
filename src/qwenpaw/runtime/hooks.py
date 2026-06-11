@@ -26,6 +26,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..exceptions import HookCycleError
 from .phases import Phase
 
 if TYPE_CHECKING:
@@ -35,15 +36,6 @@ if TYPE_CHECKING:
     from ..schemas import AgentRequest
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Errors
-# ---------------------------------------------------------------------------
-
-
-class HookCycleError(RuntimeError):
-    """Raised when ``before``/``after`` constraints contain a cycle."""
 
 
 # ---------------------------------------------------------------------------

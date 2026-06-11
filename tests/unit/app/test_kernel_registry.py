@@ -4,9 +4,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from qwenpaw.app.kernel_registry import KernelRegistry
+from qwenpaw.app.workspace.workspace import Workspace
 
 
 class TestKernelRegistry:
@@ -17,9 +19,15 @@ class TestKernelRegistry:
 
     def test_create_workspace_produces_kernel(self):
         reg = KernelRegistry(app_services=None)
-        with patch(
-            "qwenpaw.app.kernel.kernel.Workspace.__init__",
-            return_value=None,
+
+        def _stub_workspace_init(self_obj, agent_id, workspace_dir):
+            # Set the minimal attrs that Kernel.__init__ reads
+            # after super().__init__.
+            self_obj.agent_id = agent_id
+            self_obj.workspace_dir = Path(workspace_dir)
+
+        with patch.object(Workspace, "__init__", _stub_workspace_init), patch(
+            "qwenpaw.app.kernel.kernel.QwenPawLocalWorkspace",
         ):
             ws = reg._create_workspace("test", "/tmp/test")
             from qwenpaw.app.kernel.kernel import Kernel

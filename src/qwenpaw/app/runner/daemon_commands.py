@@ -26,10 +26,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class RestartInProgressError(Exception):
-    """Raised when /daemon restart is invoked while another restart runs."""
-
-
 DAEMON_PREFIX = "/daemon"
 DAEMON_SUBCOMMANDS = frozenset(
     {"status", "restart", "reload-config", "version", "logs"},

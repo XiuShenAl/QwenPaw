@@ -38,6 +38,7 @@ from ...config import (
 )
 from ...config.context import get_current_workspace_dir
 from ...constant import WORKING_DIR, EnvVarLoader
+from ...exceptions import DirectUrlDownloadRejectedError
 from ...runtime.tool_registry import tool_descriptor
 
 from .browser_snapshot import build_role_snapshot_from_aria
@@ -104,21 +105,6 @@ def _safe_download_filename(filename: Any, default: str = "download") -> str:
     name = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "_", name)
     name = name.strip(" .")
     return name or default
-
-
-class DirectUrlDownloadRejectedError(ValueError):
-    """Raised when direct URL download cannot be proven small enough."""
-
-    def __init__(
-        self,
-        reason: str,
-        content_length: int | None = None,
-        status: int | None = None,
-    ) -> None:
-        super().__init__(reason)
-        self.content_length = content_length
-        self.status = status
-        self.reason = reason
 
 
 def _browser_output_dir(state: dict, name: str) -> Path:

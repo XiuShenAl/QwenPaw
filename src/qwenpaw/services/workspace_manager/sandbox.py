@@ -19,9 +19,7 @@ import sys
 from pathlib import Path
 from typing import Literal
 
-
-class SandboxViolationError(Exception):
-    """Raised when a tool call violates sandbox boundaries."""
+from qwenpaw.exceptions import SandboxViolationError
 
 
 class Sandbox:
