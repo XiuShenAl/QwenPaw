@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -25,6 +26,13 @@ if TYPE_CHECKING:
     from ..runtime.slash_command_registry import CommandSpec
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_path_params(http_path: str | None) -> list[str]:
+    """Extract ``{name}`` parameter names from an HTTP path template."""
+    if not http_path:
+        return []
+    return re.findall(r"\{(\w+)\}", http_path)
 
 
 # ======================================================================
@@ -41,10 +49,12 @@ def _make_endpoint(
 
     D1 (pseudocode §7.2): closure vars must be hidden from
     ``inspect.signature`` so FastAPI doesn't treat them as query params.
+    Handles path parameters (``{job_id}`` style) and optional request body.
     """
     request_model = spec.request_model
+    path_params = _extract_path_params(spec.http_path)
 
-    if request_model is None:
+    if request_model is None and not path_params:
 
         async def endpoint() -> Any:
             mgr = instance_getter(app)
@@ -52,21 +62,62 @@ def _make_endpoint(
 
         return endpoint
 
-    async def endpoint_with_body(body: Any) -> Any:  # type: ignore[override]
-        mgr = instance_getter(app)
-        data = body.dict() if hasattr(body, "dict") else dict(body)
-        return await getattr(mgr, spec.name)(**data)
+    if request_model is None:
 
-    endpoint_with_body.__signature__ = inspect.Signature(
-        parameters=[
-            inspect.Parameter(
-                "body",
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                annotation=request_model,
-            ),
-        ],
+        async def endpoint_path(**kwargs: Any) -> Any:
+            mgr = instance_getter(app)
+            return await getattr(mgr, spec.name)(**kwargs)
+
+        endpoint_path.__signature__ = inspect.Signature(
+            parameters=[
+                inspect.Parameter(
+                    name,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    annotation=str,
+                )
+                for name in path_params
+            ],
+        )
+        return endpoint_path
+
+    if not path_params:
+
+        async def endpoint_body(body: Any) -> Any:
+            mgr = instance_getter(app)
+            return await getattr(mgr, spec.name)(body)
+
+        endpoint_body.__signature__ = inspect.Signature(
+            parameters=[
+                inspect.Parameter(
+                    "body",
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    annotation=request_model,
+                ),
+            ],
+        )
+        return endpoint_body
+
+    async def endpoint_full(body: Any, **kwargs: Any) -> Any:
+        mgr = instance_getter(app)
+        return await getattr(mgr, spec.name)(body, **kwargs)
+
+    params = [
+        inspect.Parameter(
+            "body",
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            annotation=request_model,
+        ),
+    ]
+    params.extend(
+        inspect.Parameter(
+            name,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            annotation=str,
+        )
+        for name in path_params
     )
-    return endpoint_with_body
+    endpoint_full.__signature__ = inspect.Signature(parameters=params)
+    return endpoint_full
 
 
 def register_http_routes(
@@ -136,14 +187,36 @@ def collect_slash_specs_from_api_actions(
                 _spec: Any = action_spec,
                 _get: Any = instance_getter,
             ) -> Any:
+                import json as _json
+
                 from agentscope.message import Msg
                 from agentscope.message._block import TextBlock
 
                 app_state = getattr(ctx, "app_services", None)
                 mgr = _get(app_state)
                 method = getattr(mgr, _spec.name)
-                if args.strip():
-                    result = await method(args.strip())
+                stripped = args.strip()
+                if stripped and _spec.request_model is not None:
+                    try:
+                        data = _json.loads(stripped)
+                    except _json.JSONDecodeError:
+                        return Msg(
+                            name="assistant",
+                            role="assistant",
+                            content=[
+                                TextBlock(
+                                    type="text",
+                                    text=(
+                                        f"Error: expected JSON for "
+                                        f"/{_spec.slash_command or _spec.name}"
+                                    ),
+                                ),
+                            ],
+                        )
+                    model_instance = _spec.request_model(**data)
+                    result = await method(model_instance)
+                elif stripped:
+                    result = await method(stripped)
                 else:
                     result = await method()
                 if isinstance(result, Msg):

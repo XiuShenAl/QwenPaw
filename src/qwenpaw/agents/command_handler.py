@@ -112,6 +112,11 @@ class CommandHandler(ConversationCommandHandlerMixin):
                 exclusive with ``agent``.
             agent_id: Agent ID for config loading (standalone mode).
         """
+        if agent is not None and state is not None:
+            raise ValueError(
+                "agent and state are mutually exclusive; "
+                "pass one or the other",
+            )
         self.agent_name = agent_name
         self._agent = agent
         self._state_direct: "AgentState | None" = state

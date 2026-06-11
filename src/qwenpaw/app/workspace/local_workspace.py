@@ -19,13 +19,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from agentscope.workspace import LocalWorkspace
+from agentscope.workspace import LocalWorkspace as AgentScopeLocalWorkspace
 
 if TYPE_CHECKING:
     from ...runtime.tool_registry import ToolRegistry
 
 
-class QwenPawLocalWorkspace(LocalWorkspace):
+class QwenPawLocalWorkspace(AgentScopeLocalWorkspace):
     """LocalWorkspace whose ``list_tools`` delegates to ToolRegistry."""
 
     def __init__(self, tool_registry: ToolRegistry, **kwargs: Any) -> None:

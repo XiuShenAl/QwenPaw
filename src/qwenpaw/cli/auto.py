@@ -38,15 +38,13 @@ _MANAGER_CLASSES: list[str] = [
 
 def _ensure_daemon_alive(base_url: str) -> None:
     """HEAD ``/healthz`` and abort if the daemon is not reachable."""
-    import httpx
-
-    url = base_url.rstrip("/")
     try:
-        r = httpx.head(f"{url}/api/version", timeout=3.0)
-        r.raise_for_status()
+        with client(base_url) as c:
+            r = c.head("/version")
+            r.raise_for_status()
     except Exception:
         click.echo(
-            f"Error: QwenPaw daemon is not reachable at {url}. "
+            f"Error: QwenPaw daemon is not reachable at {base_url}. "
             "Start it with `qwenpaw app` first.",
             err=True,
         )
@@ -81,17 +79,41 @@ def _add_command(
         default=None,
         help="JSON body for POST.",
     )
+    @click.option(
+        "--path-params",
+        default=None,
+        help='JSON mapping for path placeholders, e.g. \'{"job_id":"abc"}\'.',
+    )
     @click.pass_context
     def _cmd(
         ctx: click.Context,
         base_url: str | None,
         data: str | None,
+        path_params: str | None,
         _spec: Any = spec,
         _prefix: str = prefix,
     ) -> None:
         base = _base_url(ctx, base_url)
         _ensure_daemon_alive(base)
         path = _spec.http_path or f"/{_prefix}/{_spec.name}"
+        if path_params:
+            try:
+                params = json.loads(path_params)
+            except json.JSONDecodeError as exc:
+                raise click.UsageError(
+                    f"--path-params must be valid JSON: {exc}",
+                ) from exc
+            try:
+                path = path.format(**params)
+            except KeyError as exc:
+                raise click.UsageError(
+                    f"Missing path parameter: {exc}",
+                ) from exc
+        elif "{" in path:
+            raise click.UsageError(
+                f"Path {path!r} has placeholders; "
+                f"provide --path-params JSON mapping.",
+            )
         with client(base) as c:
             if _spec.http_method.upper() == "GET":
                 r = c.get(path)

@@ -266,7 +266,7 @@ class Workspace:
 
         Drop-in replacement for the old ``Runner.stream_query()``.
         """
-        from ...runtime.runtime import Runtime
+        from ...runtime import Runtime
 
         rt = Runtime(workspace=self, app_services=self._app_services)
         async for item in rt.run(request):
@@ -287,9 +287,27 @@ class Workspace:
         from ...agents.context.base_context_manager import (
             get_context_manager_backend,
         )
-        from ...constant import WORKING_DIR
 
         sm = self._service_manager
+
+        # Priority 5: LocalWorkspace (tool routing)
+        def _init_local_workspace(
+            ws: "Workspace",
+            _service: Any,
+        ) -> "QwenPawLocalWorkspace":
+            return ws._local_workspace  # pylint: disable=protected-access
+
+        sm.register(
+            ServiceDescriptor(
+                name="local_workspace",
+                service_class=None,
+                post_init=_init_local_workspace,
+                start_method="initialize",
+                stop_method="close",
+                priority=5,
+                concurrent_init=False,
+            ),
+        )
 
         # Priority 10: Session (replaces old Runner init)
         sm.register(
@@ -297,9 +315,7 @@ class Workspace:
                 name="session",
                 service_class=SafeJSONSession,
                 init_args=lambda ws: {
-                    "save_dir": str(
-                        (ws.workspace_dir or WORKING_DIR) / "sessions",
-                    ),
+                    "save_dir": str(ws.workspace_dir / "sessions"),
                 },
                 priority=10,
                 concurrent_init=False,
@@ -495,12 +511,7 @@ class Workspace:
             # start so ChatManager / Runner see the canonical layout.
             self._migrate_legacy_weixin_data()
 
-            # 3. Initialize LocalWorkspace
-            _local_ws = getattr(self, "_local_workspace", None)
-            if _local_ws is not None:
-                await _local_ws.initialize()
-
-            # 4. Start all services via ServiceManager
+            # 3. Start all services via ServiceManager
             await self._service_manager.start_all()
 
             self._started = True
@@ -576,11 +587,6 @@ class Workspace:
 
         # Stop all services via ServiceManager (handles reuse automatically)
         await self._service_manager.stop_all(final=final)
-
-        # Close LocalWorkspace
-        _local_ws = getattr(self, "_local_workspace", None)
-        if _local_ws is not None and getattr(_local_ws, "is_alive", False):
-            await _local_ws.close()
 
         self._started = False
         logger.info(f"Workspace stopped: {self.agent_id}")

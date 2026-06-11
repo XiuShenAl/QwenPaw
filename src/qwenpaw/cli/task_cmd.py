@@ -128,6 +128,7 @@ async def _run_task(
             workspace=None,
             app_services=None,
             agent_config=None,
+            session_state=None,
         )
         builder = AgentBuilder()
         agent = await builder.build(ctx)
