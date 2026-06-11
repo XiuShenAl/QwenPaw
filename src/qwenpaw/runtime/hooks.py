@@ -93,9 +93,7 @@ class HookContext:
     workspace_dir: Path | None
 
     # ── Containers (read by hooks; never mutated) ──
-    kernel: (
-        Any  # forward ref: app/kernel/kernel.py:Kernel (introduced in Phase 5)
-    )
+    workspace: (Any)  # forward ref: app/workspace/workspace.py:Workspace
     app_services: Any  # forward ref: AppServiceManager
 
     # ── Per-request mutable state, filled in across phases ──
@@ -229,9 +227,10 @@ def _topo_sort(
 class HookRegistry:
     """Register hooks by phase; topologically order them; execute the phase.
 
-    One instance per kernel (held by ``Kernel.plugins.hook_registry``) plus
-    optional cross-kernel registries that can be ``merge()``d in. Topological
-    order is cached per phase and invalidated on every ``register`` call.
+    One instance per workspace (held by ``Workspace.plugins.hook_registry``)
+    plus optional cross-workspace registries that can be ``merge()``d in.
+    Topological order is cached per phase and invalidated on every
+    ``register`` call.
     """
 
     def __init__(self) -> None:

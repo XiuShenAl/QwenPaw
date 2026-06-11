@@ -34,7 +34,7 @@ def test_three_field_whitelist_is_enforced_by_slots() -> None:
     asm = _make_app_services()
 
     # __slots__ forbids any other attribute name — this is the cheapest
-    # mechanical guard against silently adding a 4th cross-Kernel field.
+    # mechanical guard against silently adding a 4th cross-workspace field.
     with pytest.raises(AttributeError):
         # pylint: disable-next=assigning-non-slot
         asm.foo = object()  # type: ignore[attr-defined]

@@ -14,7 +14,7 @@ from typing import Any
 from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, ORJSONResponse
+from fastapi.responses import FileResponse
 
 from ..config import load_config  # pylint: disable=no-name-in-module
 from ..config.utils import get_config_path
@@ -70,59 +70,59 @@ load_envs_into_environ()
 
 # Dynamic runner that selects the correct workspace based on request
 class DynamicMultiAgentRunner:
-    """Routes each request to the correct Kernel/Workspace and runs it
+    """Routes each request to the correct Workspace and runs it
     through ``Runtime.run()``.
     """
 
     def __init__(self):
         self.framework_type = "agentscope"
-        self._kernel_registry = None
+        self._workspace_registry = None
         self._app_services = None
 
     def set_app_services(self, app_services):
-        """Set the cross-Kernel AppServiceManager reference."""
+        """Set the cross-workspace AppServiceManager reference."""
         self._app_services = app_services
 
-    def set_kernel_registry(self, kernel_registry):
-        """Set the KernelRegistry (sole workspace manager)."""
-        self._kernel_registry = kernel_registry
+    def set_workspace_registry(self, workspace_registry):
+        """Set the WorkspaceRegistry (sole workspace manager)."""
+        self._workspace_registry = workspace_registry
 
-    async def _get_kernel(self, request):
-        """Get the correct Kernel based on request."""
+    async def _get_workspace(self, request):
+        """Get the correct Workspace based on request."""
         from .agent_context import get_current_agent_id
 
         agent_id = get_current_agent_id()
-        logger.debug("_get_kernel: agent_id=%s", agent_id)
+        logger.debug("_get_workspace: agent_id=%s", agent_id)
 
-        if self._kernel_registry is None:
-            raise RuntimeError("KernelRegistry not initialized")
+        if self._workspace_registry is None:
+            raise RuntimeError("WorkspaceRegistry not initialized")
 
-        kernel = await self._kernel_registry.get_agent(agent_id)
-        logger.debug("Got kernel: %s", kernel.agent_id)
-        return kernel
+        workspace = await self._workspace_registry.get_agent(agent_id)
+        logger.debug("Got workspace: %s", workspace.agent_id)
+        return workspace
 
     async def stream_query(self, request, *args, **kwargs):
-        """Route to the correct Kernel and run via Runtime.
+        """Route to the correct Workspace and run via Runtime.
 
         Registers the task with the workspace's TaskTracker so that
         graceful shutdown during agent reload can detect in-flight
         background tasks.
         """
         logger.debug("DynamicMultiAgentRunner.stream_query called")
-        kernel = None
+        workspace = None
         run_key = None
         try:
-            kernel = await self._get_kernel(request)
+            workspace = await self._get_workspace(request)
 
             run_key = f"ext-{uuid.uuid4().hex}"
-            await kernel.task_tracker.register_external_task(
+            await workspace.task_tracker.register_external_task(
                 run_key,
             )
 
             from ..runtime.runtime import Runtime
 
             rt = Runtime(
-                kernel=kernel,
+                workspace=workspace,
                 app_services=self._app_services,
             )
             async for item in rt.run(request):
@@ -137,8 +137,8 @@ class DynamicMultiAgentRunner:
                 "type": "error",
             }
         finally:
-            if kernel is not None and run_key is not None:
-                await kernel.task_tracker.unregister_external_task(
+            if workspace is not None and run_key is not None:
+                await workspace.task_tracker.unregister_external_task(
                     run_key,
                 )
 
@@ -209,21 +209,21 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
     provider_manager = ProviderManager.get_instance()
     local_model_manager = LocalModelManager.get_instance()
 
-    # --- Runtime v2: AppServiceManager + KernelRegistry ---
+    # --- Runtime v2: AppServiceManager + WorkspaceRegistry ---
     app_services = None
-    kernel_registry = None
+    workspace_registry = None
     try:
         from .app_services import AppServiceManager
-        from .kernel_registry import KernelRegistry
+        from .workspace_registry import WorkspaceRegistry
 
         app_services = AppServiceManager()
         await app_services.start()
         app.state.app_services = app_services
 
-        kernel_registry = KernelRegistry(
+        workspace_registry = WorkspaceRegistry(
             app_services=app_services,
         )
-        app.state.kernel_registry = kernel_registry
+        app.state.workspace_registry = workspace_registry
         logger.debug("Runtime v2 infrastructure initialized")
 
         # --- Phase 6: @api_action auto-registration ---
@@ -286,7 +286,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
             from ..agents.tools import discover_builtin_tool_funcs
 
             # pylint: disable-next=protected-access
-            kernel_registry._bootstrap_kwargs[
+            workspace_registry._bootstrap_kwargs[
                 "builtin_tool_funcs"
             ] = discover_builtin_tool_funcs()
             logger.debug("Built-in tool funcs collected")
@@ -305,7 +305,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
 
             _phase6_command_specs.extend(collect_builtin_command_specs())
             # pylint: disable-next=protected-access
-            kernel_registry._bootstrap_kwargs[
+            workspace_registry._bootstrap_kwargs[
                 "builtin_fallback_handler"
             ] = get_skill_fallback_handler()
             logger.debug("Built-in slash commands collected")
@@ -337,7 +337,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
             )
 
             # pylint: disable-next=protected-access
-            kernel_registry._bootstrap_kwargs["builtin_hook_clses"] = [
+            workspace_registry._bootstrap_kwargs["builtin_hook_clses"] = [
                 CronContextHook,
                 SessionLoadHook,
                 SessionSaveHook,
@@ -361,7 +361,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
             from ..runtime.prompt_contributors import _ALL_CONTRIBUTORS
 
             # pylint: disable-next=protected-access
-            kernel_registry._bootstrap_kwargs[
+            workspace_registry._bootstrap_kwargs[
                 "builtin_contributor_clses"
             ] = _ALL_CONTRIBUTORS
             logger.debug("Built-in prompt contributors collected")
@@ -377,7 +377,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
             from ..modes.mission import MissionMode
 
             # pylint: disable-next=protected-access
-            kernel_registry._bootstrap_kwargs["builtin_mode_clses"] = [
+            workspace_registry._bootstrap_kwargs["builtin_mode_clses"] = [
                 CodingMode,
                 MissionMode,
             ]
@@ -390,7 +390,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
 
         if _phase6_command_specs:
             # pylint: disable-next=protected-access
-            kernel_registry._bootstrap_kwargs[
+            workspace_registry._bootstrap_kwargs[
                 "builtin_command_specs"
             ] = _phase6_command_specs
 
@@ -408,9 +408,9 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
     token_usage_manager.start(flush_interval=10)
 
     # Expose to endpoints (must be set before first request arrives).
-    # KernelRegistry IS-A MultiAgentManager — backward compat for
+    # WorkspaceRegistry IS-A MultiAgentManager — backward compat for
     # routers / agent_context that read app.state.multi_agent_manager.
-    app.state.multi_agent_manager = kernel_registry
+    app.state.multi_agent_manager = workspace_registry
     app.state.provider_manager = provider_manager
     app.state.local_model_manager = local_model_manager
     app.state.plugin_loader = None
@@ -419,15 +419,15 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
     if isinstance(runner, DynamicMultiAgentRunner):
         if app_services is not None:
             runner.set_app_services(app_services)
-        if kernel_registry is not None:
-            runner.set_kernel_registry(kernel_registry)
+        if workspace_registry is not None:
+            runner.set_workspace_registry(workspace_registry)
 
     async def _get_agent_by_id(agent_id: str = None):
         """Get agent instance by ID, or active agent if not specified."""
         if agent_id is None:
             config = load_config(get_config_path())
             agent_id = config.agents.active_agent or "default"
-        return await kernel_registry.get_agent(agent_id)
+        return await workspace_registry.get_agent(agent_id)
 
     app.state.get_agent_by_id = _get_agent_by_id
 
@@ -448,7 +448,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
     async def _background_startup():  # pylint: disable=too-many-statements
         try:
             # Start all configured agents (truly parallel now)
-            await kernel_registry.start_all_configured_agents()
+            await workspace_registry.start_all_configured_agents()
 
             provider_manager.start_local_model_resume(local_model_manager)
 
@@ -565,7 +565,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
 
             # ---- Approval Service ----
             try:
-                default_agent = await kernel_registry.get_agent(
+                default_agent = await workspace_registry.get_agent(
                     "default",
                 )
                 if default_agent.channel_manager:
@@ -698,7 +698,6 @@ app = FastAPI(
     docs_url="/docs" if DOCS_ENABLED else None,
     redoc_url="/redoc" if DOCS_ENABLED else None,
     openapi_url="/openapi.json" if DOCS_ENABLED else None,
-    default_response_class=ORJSONResponse,
 )
 
 # Add agent context middleware for agent-scoped routes

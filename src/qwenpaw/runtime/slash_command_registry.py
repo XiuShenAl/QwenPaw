@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Per-kernel slash-command registry.
+"""Per-workspace slash-command registry.
 
 Named ``SlashCommandRegistry`` (not ``CommandRegistry``) to avoid clashing
 with ``app/channels/command_registry.py:CommandRegistry`` — that one is the

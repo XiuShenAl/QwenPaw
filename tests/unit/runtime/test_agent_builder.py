@@ -68,8 +68,8 @@ def _make_ctx_with_workspace(registry: ToolRegistry) -> SimpleNamespace:
         default_mcps=[],
         skill_paths=[],
     )
-    kernel = SimpleNamespace(local_workspace=ws)
-    return SimpleNamespace(kernel=kernel)
+    workspace = SimpleNamespace(local_workspace=ws)
+    return SimpleNamespace(workspace=workspace)
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +113,7 @@ async def test_build_toolkit_filters_by_modes_via_workspace() -> None:
 
 @pytest.mark.asyncio
 async def test_build_toolkit_without_workspace_returns_empty() -> None:
-    ctx = SimpleNamespace(kernel=None)
+    ctx = SimpleNamespace(workspace=None)
     builder = AgentBuilder()
 
     tk = await builder.build_toolkit(_agent_config(), ctx=ctx)
@@ -180,14 +180,14 @@ def test_build_methods_are_implemented() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_get_local_workspace_no_kernel() -> None:
+def test_get_local_workspace_no_workspace() -> None:
     ctx = SimpleNamespace()
     assert AgentBuilder._get_local_workspace(ctx) is None
 
 
 def test_get_local_workspace_returns_workspace() -> None:
     sentinel = object()
-    ctx = SimpleNamespace(kernel=SimpleNamespace(local_workspace=sentinel))
+    ctx = SimpleNamespace(workspace=SimpleNamespace(local_workspace=sentinel))
     assert AgentBuilder._get_local_workspace(ctx) is sentinel
 
 
@@ -197,7 +197,7 @@ def test_get_local_workspace_returns_workspace() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mcp_clients_async_no_kernel() -> None:
+async def test_mcp_clients_async_no_workspace() -> None:
     ctx = SimpleNamespace()
     result = await AgentBuilder._get_mcp_clients_async(ctx)
     assert result is None
@@ -205,7 +205,7 @@ async def test_mcp_clients_async_no_kernel() -> None:
 
 @pytest.mark.asyncio
 async def test_mcp_clients_async_no_mcp_manager() -> None:
-    ctx = SimpleNamespace(kernel=SimpleNamespace())
+    ctx = SimpleNamespace(workspace=SimpleNamespace())
     result = await AgentBuilder._get_mcp_clients_async(ctx)
     assert result is None
 
@@ -215,7 +215,7 @@ async def test_mcp_clients_async_success() -> None:
     from unittest.mock import AsyncMock
 
     mock_mgr = SimpleNamespace(get_clients=AsyncMock(return_value=["c1"]))
-    ctx = SimpleNamespace(kernel=SimpleNamespace(mcp_manager=mock_mgr))
+    ctx = SimpleNamespace(workspace=SimpleNamespace(mcp_manager=mock_mgr))
     result = await AgentBuilder._get_mcp_clients_async(ctx)
     assert result == ["c1"]
 
@@ -227,7 +227,7 @@ async def test_mcp_clients_async_exception_returns_none() -> None:
     mock_mgr = SimpleNamespace(
         get_clients=AsyncMock(side_effect=RuntimeError("fail")),
     )
-    ctx = SimpleNamespace(kernel=SimpleNamespace(mcp_manager=mock_mgr))
+    ctx = SimpleNamespace(workspace=SimpleNamespace(mcp_manager=mock_mgr))
     result = await AgentBuilder._get_mcp_clients_async(ctx)
     assert result is None
 
@@ -238,7 +238,7 @@ async def test_mcp_clients_async_exception_returns_none() -> None:
 
 
 def test_build_middlewares_empty_when_no_context_manager() -> None:
-    ctx = SimpleNamespace(kernel=None)
+    ctx = SimpleNamespace(workspace=None)
     result = AgentBuilder._build_middlewares(ctx, None)
     assert not result
 
@@ -246,7 +246,7 @@ def test_build_middlewares_empty_when_no_context_manager() -> None:
 def test_build_middlewares_includes_context_manager() -> None:
     sentinel = object()
     ctx = SimpleNamespace(
-        kernel=SimpleNamespace(context_manager=sentinel),
+        workspace=SimpleNamespace(context_manager=sentinel),
     )
     result = AgentBuilder._build_middlewares(ctx, None)
     assert result == [sentinel]

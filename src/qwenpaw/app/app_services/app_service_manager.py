@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""The single cross-Kernel service container.
+"""The single cross-workspace service container.
 
 Strict whitelist of three fields (``task_tracker`` / ``tool_coordinator`` /
 ``approval_coordinator``) per ``runtime_refactor_v2.html`` §0. Adding any
-other field here is a contract break — per-Kernel state belongs on
-``Kernel.service_manager`` / ``Kernel.plugins`` instead.
+other field here is a contract break — per-workspace state belongs on
+``Workspace.service_manager`` / ``Workspace.plugins`` instead.
 
 ``start`` / ``stop`` are called by FastAPI lifespan (Phase 1 of startup,
 the very first thing to come up so hooks running in any later phase can
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 
 class AppServiceManager:
-    """Hold the three cross-Kernel coordinators and own their lifecycle.
+    """Hold the three cross-workspace coordinators and own their lifecycle.
 
     Fields (frozen by contract — do not extend):
 

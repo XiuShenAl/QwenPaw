@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""WorkspaceManager + Sandbox — per-Kernel resource boundary management.
+"""WorkspaceManager + Sandbox — per-workspace resource boundary management.
 
 Concrete implementations are provided by a separate workstream.
 This package defines the interface contracts only.

@@ -18,7 +18,7 @@ def _make_ctx(**overrides) -> HookContext:
         "root_session_id": "s1",
         "root_agent_id": "default",
         "workspace_dir": None,
-        "kernel": None,
+        "workspace": None,
         "app_services": None,
     }
     defaults.update(overrides)

@@ -47,7 +47,7 @@ def _stub_ctx(
     return SimpleNamespace(
         agent_id="test-agent",
         session_id="test-session",
-        kernel=runner,
+        workspace=runner,
         agent=agent,
         request=request,
         input_msgs=msgs or [],
@@ -75,8 +75,8 @@ def _text_of(msg) -> str | None:
     return str(content) if content else ""
 
 
-def _stub_kernel():
-    """Stub kernel with session for conversation commands."""
+def _stub_workspace():
+    """Stub workspace with session for conversation commands."""
     session = MagicMock()
     session.load_session_state = AsyncMock(return_value=None)
     session.save_session_state = AsyncMock(return_value=None)
@@ -98,8 +98,8 @@ def _stub_kernel():
 @pytest.mark.asyncio
 async def test_parity_clear_command() -> None:
     """``/clear`` should dispatch and produce a response with clear_history."""
-    kernel = _stub_kernel()
-    ctx = _stub_ctx(runner=kernel)
+    ws = _stub_workspace()
+    ctx = _stub_ctx(runner=ws)
 
     reg = _build_default_registry()
     result = await reg.dispatch("/clear", ctx)
@@ -113,8 +113,8 @@ async def test_parity_clear_command() -> None:
 @pytest.mark.asyncio
 async def test_parity_compact_with_args() -> None:
     """``/compact focus on API`` should dispatch and produce a response."""
-    kernel = _stub_kernel()
-    ctx = _stub_ctx(runner=kernel)
+    ws = _stub_workspace()
+    ctx = _stub_ctx(runner=ws)
 
     reg = _build_default_registry()
     result = await reg.dispatch("/compact focus on API", ctx)
@@ -127,8 +127,8 @@ async def test_parity_compact_with_args() -> None:
 @pytest.mark.asyncio
 async def test_parity_plan_with_description_falls_through() -> None:
     """``/plan implement auth`` should NOT be a command."""
-    kernel = _stub_kernel()
-    ctx = _stub_ctx(runner=kernel)
+    ws = _stub_workspace()
+    ctx = _stub_ctx(runner=ws)
 
     reg = _build_default_registry()
     result = await reg.dispatch("/plan implement auth", ctx)
@@ -139,8 +139,8 @@ async def test_parity_plan_with_description_falls_through() -> None:
 @pytest.mark.asyncio
 async def test_parity_plan_bare_is_command() -> None:
     """Bare ``/plan`` is a status command."""
-    kernel = _stub_kernel()
-    ctx = _stub_ctx(runner=kernel)
+    ws = _stub_workspace()
+    ctx = _stub_ctx(runner=ws)
 
     reg = _build_default_registry()
     result = await reg.dispatch("/plan", ctx)
@@ -158,8 +158,8 @@ async def test_parity_plan_bare_is_command() -> None:
 @pytest.mark.asyncio
 async def test_parity_version_command() -> None:
     """``/version`` should produce a version info response."""
-    kernel = _stub_kernel()
-    ctx = _stub_ctx(runner=kernel)
+    ws = _stub_workspace()
+    ctx = _stub_ctx(runner=ws)
 
     reg = _build_default_registry()
     result = await reg.dispatch("/version", ctx)
@@ -173,8 +173,8 @@ async def test_parity_version_command() -> None:
 @pytest.mark.asyncio
 async def test_parity_daemon_compound() -> None:
     """``/daemon status`` should work via compound entry."""
-    kernel = _stub_kernel()
-    ctx = _stub_ctx(runner=kernel)
+    ws = _stub_workspace()
+    ctx = _stub_ctx(runner=ws)
 
     reg = _build_default_registry()
     result = await reg.dispatch("/daemon status", ctx)

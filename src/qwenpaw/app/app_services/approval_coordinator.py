@@ -4,7 +4,7 @@
 Phase 1 contract: a thin pass-through that lets callers migrate from
 ``from app.approvals import get_approval_service`` to
 ``ctx.app_services.approval_coordinator`` *without* changing behavior.
-The wrapper is the future seam where cross-Kernel approval orchestration
+The wrapper is the future seam where cross-workspace approval orchestration
 (see ``RUNTIME_REFACTOR_PSEUDOCODE.md`` §2.8) will land — Phase 1 just
 keeps it pure pass-through.
 """

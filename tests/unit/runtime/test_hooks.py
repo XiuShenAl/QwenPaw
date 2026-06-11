@@ -26,7 +26,7 @@ def _make_ctx() -> HookContext:
         root_session_id="s",
         root_agent_id="a",
         workspace_dir=None,
-        kernel=None,
+        workspace=None,
         app_services=None,
     )
 

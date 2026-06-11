@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Per-kernel system-prompt assembly.
+"""Per-workspace system-prompt assembly.
 
 Replaces (in Phase 3) the 700+ line hand-written concatenation inside
 ``agents/prompt.py:build_system_prompt_from_working_dir``. Each contributor

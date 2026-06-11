@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Per-kernel tool registry.
+"""Per-workspace tool registry.
 
 Replaces (in Phase 2) the hand-written ``_create_toolkit`` dict in
 ``agents/react_agent.py``. Each builtin tool function carries a

@@ -33,7 +33,7 @@ def _stub_ctx(**kwargs) -> SimpleNamespace:
     defaults = {
         "agent_id": "test-agent",
         "session_id": "test-session",
-        "kernel": None,
+        "workspace": None,
         "agent": None,
         "request": None,
         "input_msgs": [],
@@ -137,13 +137,13 @@ async def test_plan_with_args_returns_none() -> None:
     """``/plan description`` is NOT a command — should fall through."""
     specs = _collect_conversation_specs()
     plan_spec = next(s for s in specs if s.name == "plan")
-    ctx = _stub_ctx(kernel=SimpleNamespace(session=None))
+    ctx = _stub_ctx(workspace=SimpleNamespace(session=None))
     result = await plan_spec.handler(ctx, "implement auth flow")
     assert result is None
 
 
 @pytest.mark.asyncio
-async def test_conversation_adapter_no_kernel_returns_none() -> None:
+async def test_conversation_adapter_no_workspace_returns_none() -> None:
     specs = _collect_conversation_specs()
     clear_spec = next(s for s in specs if s.name == "clear")
     ctx = _stub_ctx()
@@ -183,13 +183,13 @@ async def test_daemon_adapter_delegates_to_handler() -> None:
         instance.handle_daemon_command = AsyncMock(return_value=mock_msg)
         MockMixin.return_value = instance
 
-        kernel = SimpleNamespace(
+        workspace = SimpleNamespace(
             agent_id="test",
             memory_manager=None,
             context_manager=None,
             _manager=None,
         )
-        ctx = _stub_ctx(kernel=kernel)
+        ctx = _stub_ctx(workspace=workspace)
         result = await version_spec.handler(ctx, "")
 
         assert result is mock_msg
@@ -245,7 +245,7 @@ def test_parse_skill_bracket_no_close_returns_none() -> None:
 
 
 @pytest.mark.asyncio
-async def test_skill_fallback_no_kernel_returns_none() -> None:
+async def test_skill_fallback_no_workspace_returns_none() -> None:
     ctx = _stub_ctx()
     result = await _skill_fallback_handler("/someskill test", ctx)
     assert result is None

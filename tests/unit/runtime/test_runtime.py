@@ -18,8 +18,12 @@ from qwenpaw.runtime.phases import Phase
 from qwenpaw.runtime.runtime import Runtime
 
 
-def _make_kernel(hook_registry=None, slash_registry=None, tool_registry=None):
-    """Build a minimal Kernel-like object for tests."""
+def _make_workspace(
+    hook_registry=None,
+    slash_registry=None,
+    tool_registry=None,
+):
+    """Build a minimal Workspace-like object for tests."""
     from qwenpaw.runtime.slash_command_registry import SlashCommandRegistry
     from qwenpaw.runtime.tool_registry import ToolRegistry
 
@@ -78,8 +82,8 @@ async def test_runtime_runs_pre_dispatch_and_finally():
     reg.register(LogHook(Phase.POST_RESPONSE, "post"))
     reg.register(LogHook(Phase.FINALLY, "fin"))
 
-    kernel = _make_kernel(hook_registry=reg)
-    rt = Runtime(kernel=kernel, app_services=None)
+    ws = _make_workspace(hook_registry=reg)
+    rt = Runtime(workspace=ws, app_services=None)
 
     items = []
     async for item in rt.run(_make_request()):
@@ -117,8 +121,8 @@ async def test_runtime_short_circuit_skips_agent():
     reg = HookRegistry()
     reg.register(ShortCircuit())
 
-    kernel = _make_kernel(hook_registry=reg)
-    rt = Runtime(kernel=kernel, app_services=None)
+    ws = _make_workspace(hook_registry=reg)
+    rt = Runtime(workspace=ws, app_services=None)
 
     items = []
     async for item in rt.run(_make_request()):
@@ -164,8 +168,8 @@ async def test_runtime_skip_agent_still_runs_post_response():
     reg.register(PostResponse())
     reg.register(Finally())
 
-    kernel = _make_kernel(hook_registry=reg)
-    rt = Runtime(kernel=kernel, app_services=None)
+    ws = _make_workspace(hook_registry=reg)
+    rt = Runtime(workspace=ws, app_services=None)
 
     async for _ in rt.run(_make_request()):
         pass
@@ -211,8 +215,8 @@ async def test_runtime_on_error_fires_on_exception():
     reg.register(ErrorLogger())
     reg.register(FinallyLogger())
 
-    kernel = _make_kernel(hook_registry=reg)
-    rt = Runtime(kernel=kernel, app_services=None)
+    ws = _make_workspace(hook_registry=reg)
+    rt = Runtime(workspace=ws, app_services=None)
 
     items = []
     with pytest.raises(ValueError, match="boom"):

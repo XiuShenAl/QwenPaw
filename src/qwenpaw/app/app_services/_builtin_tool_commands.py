@@ -2,7 +2,7 @@
 """HITL slash commands for tool-call management.
 
 Provides ``/tools``, ``/tool-bg``, and ``/tool-cancel`` as
-:class:`CommandSpec` instances registered into the per-Kernel
+:class:`CommandSpec` instances registered into the per-workspace
 :class:`SlashCommandRegistry` via lifespan bootstrap.
 """
 

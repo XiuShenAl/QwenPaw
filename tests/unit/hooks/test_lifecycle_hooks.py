@@ -22,7 +22,7 @@ def _make_ctx(**overrides) -> HookContext:
         "root_session_id": "s1",
         "root_agent_id": "default",
         "workspace_dir": None,
-        "kernel": None,
+        "workspace": None,
         "app_services": None,
     }
     defaults.update(overrides)
@@ -34,11 +34,11 @@ def _make_ctx(**overrides) -> HookContext:
 
 class TestSessionLoadHook:
     @pytest.mark.asyncio
-    async def test_skips_when_no_kernel(self):
+    async def test_skips_when_no_workspace(self):
         from qwenpaw.hooks.session.session_hook import SessionLoadHook
 
         hook = SessionLoadHook()
-        ctx = _make_ctx(kernel=None)
+        ctx = _make_ctx(workspace=None)
         r = await hook.run(ctx)
         assert r.action.value == "continue"
 
@@ -47,8 +47,8 @@ class TestSessionLoadHook:
         from qwenpaw.hooks.session.session_hook import SessionLoadHook
 
         hook = SessionLoadHook()
-        kernel = SimpleNamespace(session=None)
-        ctx = _make_ctx(kernel=kernel)
+        workspace = SimpleNamespace(session=None)
+        ctx = _make_ctx(workspace=workspace)
         r = await hook.run(ctx)
         assert r.action.value == "continue"
 
@@ -59,8 +59,8 @@ class TestSessionSaveHook:
         from qwenpaw.hooks.session.session_hook import SessionSaveHook
 
         hook = SessionSaveHook()
-        kernel = SimpleNamespace(session=MagicMock())
-        ctx = _make_ctx(kernel=kernel)
+        workspace = SimpleNamespace(session=MagicMock())
+        ctx = _make_ctx(workspace=workspace)
         ctx.agent = None
         r = await hook.run(ctx)
         assert r.action.value == "continue"

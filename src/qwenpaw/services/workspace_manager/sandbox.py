@@ -23,7 +23,7 @@ from qwenpaw.exceptions import SandboxViolationError
 
 
 class Sandbox:
-    """Per-Kernel resource boundary enforcer.
+    """Per-workspace resource boundary enforcer.
 
     Parameters
     ----------

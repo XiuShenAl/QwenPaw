@@ -6,17 +6,19 @@ Each Workspace represents a standalone agent workspace with its own:
 - BaseMemoryManager (conversation memory)
 - MCPClientManager (MCP tool clients)
 - CronManager (scheduled tasks)
+- WorkspacePlugins (tool/hook/command/prompt registries)
 
 Request processing is handled by ``Runtime`` (see ``stream_query``).
 """
 import logging
 from pathlib import Path
-from typing import Any, AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Iterable, Optional
 
 from qwenpaw.config.timezone import normalize_tz
 from qwenpaw.config.utils import load_config
 
 from .service_manager import ServiceDescriptor, ServiceManager
+from .workspace_plugins import WorkspacePlugins
 from .service_factories import (
     create_mcp_service,
     create_chat_service,
@@ -24,6 +26,7 @@ from .service_factories import (
     create_agent_config_watcher,
     create_mcp_config_watcher,
 )
+from .local_workspace import QwenPawLocalWorkspace
 from ..runner.task_tracker import TaskTracker
 from ..runner.session import SafeJSONSession
 from ..mcp import MCPClientManager
@@ -42,6 +45,7 @@ class Workspace:
     - BaseMemoryManager: Manages conversation memory
     - MCPClientManager: Manages MCP tool clients
     - CronManager: Manages scheduled tasks
+    - WorkspacePlugins: Per-workspace pluggable registries
 
     Request processing goes through ``stream_query`` which delegates
     to ``Runtime.run()``.
@@ -57,6 +61,16 @@ class Workspace:
         self.agent_id = agent_id
         self.workspace_dir = Path(workspace_dir).expanduser()
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        # Per-workspace pluggable registries (tools, hooks, commands, prompts)
+        self.plugins = WorkspacePlugins()
+        self._local_workspace = QwenPawLocalWorkspace(
+            tool_registry=self.plugins.tool_registry,
+            workdir=str(self.workspace_dir),
+            workspace_id=agent_id,
+            default_mcps=[],
+            skill_paths=[],
+        )
 
         # Service manager (unified component management)
         self._service_manager = ServiceManager(self)
@@ -123,6 +137,115 @@ class Workspace:
         self._config = load_agent_config(self.agent_id)
         return self._config
 
+    @property
+    def local_workspace(self) -> QwenPawLocalWorkspace:
+        """AgentScope LocalWorkspace routing tools to ToolRegistry."""
+        return self._local_workspace
+
+    def bootstrap_plugins(  # pylint: disable=too-many-branches
+        self,
+        *,
+        builtin_tool_funcs: Iterable[Any] | None = None,
+        builtin_contributor_clses: Iterable[type] | None = None,
+        builtin_mode_clses: Iterable[type] | None = None,
+        builtin_hook_clses: Iterable[type] | None = None,
+        builtin_command_specs: Iterable[Any] | None = None,
+        builtin_fallback_handler: Any | None = None,
+    ) -> None:
+        """Populate per-workspace registries with built-in classes.
+
+        Called once by ``WorkspaceRegistry`` immediately after creation.
+        """
+        if builtin_tool_funcs:
+            tr = self.plugins.tool_registry
+            for func in builtin_tool_funcs:
+                try:
+                    desc = getattr(func, "_tool_descriptor", None)
+                    if desc is not None:
+                        tr.register(desc)
+                    else:
+                        logger.debug(
+                            "bootstrap: %s has no _tool_descriptor, skipped",
+                            getattr(func, "__name__", func),
+                        )
+                except Exception:
+                    logger.debug(
+                        "bootstrap: tool register failed for %s",
+                        getattr(func, "__name__", func),
+                        exc_info=True,
+                    )
+
+        if builtin_contributor_clses:
+            for cls in builtin_contributor_clses:
+                try:
+                    self.plugins.prompt_manager.register(cls())
+                except Exception:
+                    logger.debug(
+                        "bootstrap: contributor register failed for %s",
+                        cls,
+                        exc_info=True,
+                    )
+
+        if builtin_hook_clses:
+            for cls in builtin_hook_clses:
+                try:
+                    self.plugins.hook_registry.register(cls())
+                except Exception:
+                    logger.debug(
+                        "bootstrap: hook register failed for %s",
+                        cls,
+                        exc_info=True,
+                    )
+
+        if builtin_command_specs:
+            for spec in builtin_command_specs:
+                try:
+                    self.plugins.slash_command_registry.register(spec)
+                except Exception:
+                    logger.debug(
+                        "bootstrap: command register failed for %s",
+                        getattr(spec, "name", spec),
+                        exc_info=True,
+                    )
+
+        if builtin_fallback_handler is not None:
+            try:
+                self.plugins.slash_command_registry.register_fallback(
+                    builtin_fallback_handler,
+                )
+            except Exception:
+                logger.debug(
+                    "bootstrap: fallback handler register failed",
+                    exc_info=True,
+                )
+
+        if builtin_mode_clses:
+            for cls in builtin_mode_clses:
+                try:
+                    mode = cls()
+                    self.plugins.register_mode(mode, self)
+                except Exception:
+                    logger.debug(
+                        "bootstrap: mode register failed for %s",
+                        cls,
+                        exc_info=True,
+                    )
+
+        # pylint: disable=protected-access
+        n_hooks = len(self.plugins.hook_registry._by_phase)
+        n_cmds = len(
+            self.plugins.slash_command_registry._by_name,
+        )
+        # pylint: enable=protected-access
+        logger.info(
+            "workspace %s: bootstrap_plugins complete "
+            "(hooks=%d commands=%d modes=%d)",
+            self.agent_id,
+            n_hooks,
+            n_cmds,
+            len(self.plugins.modes),
+        )
+
     def set_manager(self, manager) -> None:
         """Set reference to MultiAgentManager for /daemon restart.
 
@@ -132,7 +255,7 @@ class Workspace:
         self._manager = manager
 
     def set_app_services(self, app_services: Any) -> None:
-        """Inject the cross-Kernel AppServiceManager reference."""
+        """Inject the cross-workspace AppServiceManager reference."""
         self._app_services = app_services
 
     async def stream_query(
@@ -145,7 +268,7 @@ class Workspace:
         """
         from ...runtime.runtime import Runtime
 
-        rt = Runtime(kernel=self, app_services=self._app_services)
+        rt = Runtime(workspace=self, app_services=self._app_services)
         async for item in rt.run(request):
             yield item
 
@@ -372,7 +495,7 @@ class Workspace:
             # start so ChatManager / Runner see the canonical layout.
             self._migrate_legacy_weixin_data()
 
-            # 3. Initialize LocalWorkspace (created by Kernel subclass)
+            # 3. Initialize LocalWorkspace
             _local_ws = getattr(self, "_local_workspace", None)
             if _local_ws is not None:
                 await _local_ws.initialize()
@@ -454,7 +577,7 @@ class Workspace:
         # Stop all services via ServiceManager (handles reuse automatically)
         await self._service_manager.stop_all(final=final)
 
-        # Close LocalWorkspace (created by Kernel subclass)
+        # Close LocalWorkspace
         _local_ws = getattr(self, "_local_workspace", None)
         if _local_ws is not None and getattr(_local_ws, "is_alive", False):
             await _local_ws.close()

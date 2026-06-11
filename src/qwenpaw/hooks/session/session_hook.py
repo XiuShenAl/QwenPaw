@@ -26,9 +26,9 @@ class SessionLoadHook(LifecycleHook):
     priority = 10
 
     async def run(self, ctx: HookContext) -> HookResult:
-        if ctx.kernel is None:
+        if ctx.workspace is None:
             return HookResult()
-        session = getattr(ctx.kernel, "session", None)
+        session = getattr(ctx.workspace, "session", None)
         if session is None:
             return HookResult()
         try:
@@ -63,9 +63,9 @@ class SessionSaveHook(LifecycleHook):
     priority = 90
 
     async def run(self, ctx: HookContext) -> HookResult:
-        if ctx.kernel is None or ctx.agent is None:
+        if ctx.workspace is None or ctx.agent is None:
             return HookResult()
-        session = getattr(ctx.kernel, "session", None)
+        session = getattr(ctx.workspace, "session", None)
         if session is None:
             return HookResult()
         try:

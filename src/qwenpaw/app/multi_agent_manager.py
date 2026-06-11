@@ -47,7 +47,7 @@ class MultiAgentManager:
     ) -> Workspace:
         """Factory method for workspace creation.
 
-        Overridden by KernelRegistry.
+        Overridden by WorkspaceRegistry.
         """
         return Workspace(agent_id=agent_id, workspace_dir=workspace_dir)
 

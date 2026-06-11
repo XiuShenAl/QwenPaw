@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Per-Kernel workspace + sandbox manager (interface only).
+"""Per-workspace workspace + sandbox manager (interface only).
 
 The concrete implementation is provided by a separate workstream.
 This module defines the lifecycle contract (``start`` / ``stop``)
 and the relationship between ``WorkspaceManager`` and ``Sandbox``.
 
 Design notes (IMPL_PLAN §9):
-- ``WorkspaceManager`` is per-Kernel, held by ``Kernel.service_manager``.
+- ``WorkspaceManager`` is per-workspace, held by ``Workspace.service_manager``.
 - ``Sandbox`` handles resource-boundary checks; tools declare their
   requirements via ``ToolDescriptor.requires_sandbox``.
 - ``GuardedFunctionTool.check_permissions`` calls sandbox checks
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 
 class WorkspaceManager:
-    """Per-Kernel resource manager for file system roots, shell, and I/O.
+    """Per-workspace resource manager for file system roots, shell, and I/O.
 
     Parameters
     ----------

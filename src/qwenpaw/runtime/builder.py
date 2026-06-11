@@ -2,7 +2,7 @@
 """Per-request agent assembly.
 
 :class:`AgentBuilder` fully constructs a :class:`QwenPawAgent` for each
-request.  It obtains tools from the per-Kernel
+request.  It obtains tools from the per-workspace
 :class:`QwenPawLocalWorkspace` (via ``list_tools``), the system prompt
 from :class:`PromptManager`, and the model from the factory, then
 injects all dependencies into the agent constructor.
@@ -21,8 +21,8 @@ _logger = logging.getLogger(__name__)
 class AgentBuilder:
     """Compose an agent for each request.
 
-    Tools are obtained from ``ctx.kernel.local_workspace.list_tools()``.
-    ``app_services`` provides cross-Kernel shared services.
+    Tools are obtained from ``ctx.workspace.local_workspace.list_tools()``.
+    ``app_services`` provides cross-workspace shared services.
     """
 
     def __init__(
@@ -48,7 +48,7 @@ class AgentBuilder:
     ) -> Any:
         """Build a populated ``Toolkit`` for one agent invocation.
 
-        Tools are obtained from the per-Kernel
+        Tools are obtained from the per-workspace
         :class:`QwenPawLocalWorkspace` via ``list_tools()``.
         ``extra_tools`` and ``memory_tools`` are appended after the
         workspace tools.
@@ -88,7 +88,7 @@ class AgentBuilder:
     async def build(self, ctx: Any) -> Any:
         """Construct a fully-wired :class:`QwenPawAgent` for one request.
 
-        Integrates all per-Kernel registries: QwenPawLocalWorkspace
+        Integrates all per-workspace registries: QwenPawLocalWorkspace
         (toolkit), PromptManager (system prompt), model factory, and
         middlewares.  The agent receives all dependencies externally —
         it does not build any of them internally.
@@ -133,9 +133,9 @@ class AgentBuilder:
 
         # Compute active modes.
         active_modes: set[str] = set()
-        kernel = getattr(ctx, "kernel", None)
-        if kernel is not None:
-            plugins = getattr(kernel, "plugins", None)
+        workspace = getattr(ctx, "workspace", None)
+        if workspace is not None:
+            plugins = getattr(workspace, "plugins", None)
             if plugins is not None:
                 active_modes = plugins.active_mode_names(ctx)
 
@@ -203,7 +203,7 @@ class AgentBuilder:
         return agent
 
     def build_prompt(self, ctx: Any, agent_config: Any = None) -> str:
-        """Build the system prompt via the per-Kernel
+        """Build the system prompt via the per-workspace
         :class:`PromptManager`.
         """
         from types import SimpleNamespace
@@ -235,9 +235,9 @@ class AgentBuilder:
             },
         )
 
-        kernel = getattr(ctx, "kernel", None)
-        if kernel is not None:
-            plugins = getattr(kernel, "plugins", None)
+        workspace = getattr(ctx, "workspace", None)
+        if workspace is not None:
+            plugins = getattr(workspace, "plugins", None)
             pm = getattr(plugins, "prompt_manager", None) if plugins else None
             if pm is not None and len(pm) > 0:
                 return pm.build_sync(prompt_ctx)
@@ -269,9 +269,9 @@ class AgentBuilder:
 
     @staticmethod
     def _get_local_workspace(ctx: Any) -> Any:
-        kernel = getattr(ctx, "kernel", None)
-        if kernel is not None:
-            return getattr(kernel, "local_workspace", None)
+        workspace = getattr(ctx, "workspace", None)
+        if workspace is not None:
+            return getattr(workspace, "local_workspace", None)
         return None
 
     @staticmethod
@@ -370,24 +370,24 @@ class AgentBuilder:
 
     @staticmethod
     def _get_memory_manager(ctx: Any) -> Any:
-        kernel = getattr(ctx, "kernel", None)
-        if kernel is not None:
-            return getattr(kernel, "memory_manager", None)
+        workspace = getattr(ctx, "workspace", None)
+        if workspace is not None:
+            return getattr(workspace, "memory_manager", None)
         return None
 
     @staticmethod
     def _get_context_manager(ctx: Any) -> Any:
-        kernel = getattr(ctx, "kernel", None)
-        if kernel is not None:
-            return getattr(kernel, "context_manager", None)
+        workspace = getattr(ctx, "workspace", None)
+        if workspace is not None:
+            return getattr(workspace, "context_manager", None)
         return None
 
     @staticmethod
     async def _get_mcp_clients_async(ctx: Any) -> list[Any] | None:
-        kernel = getattr(ctx, "kernel", None)
-        if kernel is None:
+        workspace = getattr(ctx, "workspace", None)
+        if workspace is None:
             return None
-        mcp_mgr = getattr(kernel, "mcp_manager", None)
+        mcp_mgr = getattr(workspace, "mcp_manager", None)
         if mcp_mgr is None:
             return None
         try:

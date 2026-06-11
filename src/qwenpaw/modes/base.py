@@ -2,9 +2,9 @@
 """``AgentMode`` and ``ModeGatedHook`` base classes.
 
 An ``AgentMode`` is a *bundle* of behavior: commands, tools, hooks and
-prompt contributors that should appear together. ``setup(kernel)`` is
+prompt contributors that should appear together. ``setup(workspace)`` is
 the single entry point that pushes those four pieces into the host
-Kernel's plugins / service_manager — there is no other registration
+workspace's plugins / service_manager — there is no other registration
 path, which keeps "which mode owns what" trivially derivable from
 ``mode.commands()`` / ``.tools()`` / ``.hooks()`` /
 ``.prompt_contributors()``.
@@ -30,28 +30,28 @@ if TYPE_CHECKING:
 class AgentMode:
     """Base class for one named runtime mode.
 
-    Subclasses set ``name`` (must be unique within a Kernel) and
+    Subclasses set ``name`` (must be unique within a workspace) and
     override ``is_active`` plus any of the four content methods they
     actually contribute to.
     """
 
     name: str
 
-    def setup(self, kernel: object) -> None:
-        """Register every contribution into ``kernel``'s plugins.
+    def setup(self, workspace: object) -> None:
+        """Register every contribution into ``workspace``'s plugins.
 
-        ``kernel`` is typed as ``object`` because the concrete
-        ``Kernel`` class is defined in a higher layer — by duck-typing
-        on ``kernel.plugins`` subclasses stay stable.
+        ``workspace`` is typed as ``object`` because the concrete
+        ``Workspace`` class is defined in a higher layer — by duck-typing
+        on ``workspace.plugins`` subclasses stay stable.
         """
         for spec in self.commands():
-            kernel.plugins.slash_command_registry.register(spec)
+            workspace.plugins.slash_command_registry.register(spec)
         for desc in self.tools():
-            kernel.plugins.tool_registry.register(desc)
+            workspace.plugins.tool_registry.register(desc)
         for hook in self.hooks():
-            kernel.plugins.hook_registry.register(hook)
+            workspace.plugins.hook_registry.register(hook)
         for contributor in self.prompt_contributors():
-            kernel.plugins.prompt_manager.register(contributor)
+            workspace.plugins.prompt_manager.register(contributor)
 
     def commands(self) -> list["CommandSpec"]:
         return []

@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
-"""Per-Kernel pluggable layer.
+"""Per-workspace pluggable layer.
 
 Concretizes the HTML §0 "插件/Hook（注册进 Runtime）" tier as a single
-dataclass holding the three per-Kernel registries that ``Runtime.run()``
+dataclass holding the three per-workspace registries that ``Runtime.run()``
 reads each request:
 
 * :class:`SlashCommandRegistry` — slash dispatch
 * :class:`HookRegistry`         — 8-phase hook orchestration
 * ``modes``                     — list of :class:`AgentMode` instances
 
-Every field is **per-Kernel** — no cross-Kernel sharing. The
-matching cross-Kernel container is ``AppServiceManager`` and is strictly
+Every field is **per-workspace** — no cross-workspace sharing. The
+matching cross-workspace container is ``AppServiceManager`` and is strictly
 limited to its three coordinators (see ``app/app_services/``).
 """
 
@@ -30,8 +30,8 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class KernelPlugins:
-    """Per-Kernel pluggable registries."""
+class WorkspacePlugins:
+    """Per-workspace pluggable registries."""
 
     slash_command_registry: SlashCommandRegistry = field(
         default_factory=SlashCommandRegistry,
@@ -41,8 +41,8 @@ class KernelPlugins:
     prompt_manager: PromptManager = field(default_factory=PromptManager)
     modes: list["AgentMode"] = field(default_factory=list)
 
-    def register_mode(self, mode: "AgentMode", kernel: object) -> None:
-        """Add ``mode`` and immediately run its ``setup(kernel)``.
+    def register_mode(self, mode: "AgentMode", workspace: object) -> None:
+        """Add ``mode`` and immediately run its ``setup(workspace)``.
 
         Duplicate names are rejected — collisions usually mean two
         bootstrap paths both think they own the mode and silently
@@ -51,16 +51,16 @@ class KernelPlugins:
         if any(m.name == mode.name for m in self.modes):
             raise ValueError(f"AgentMode {mode.name!r} already registered")
         self.modes.append(mode)
-        mode.setup(kernel)
+        mode.setup(workspace)
 
     def active_mode_names(self, ctx: "HookContext") -> set[str]:
         """Return the names of every mode reporting ``is_active(ctx)``.
 
         Used by ``ToolRegistry.filter`` (and any other code that needs
-        the runtime-active set) so per-Kernel mode state never leaks
-        into cross-Kernel containers.
+        the runtime-active set) so per-workspace mode state never leaks
+        into cross-workspace containers.
         """
         return {m.name for m in self.modes if m.is_active(ctx)}
 
 
-__all__ = ["KernelPlugins"]
+__all__ = ["WorkspacePlugins"]

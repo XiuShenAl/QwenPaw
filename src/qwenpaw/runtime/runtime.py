@@ -8,7 +8,7 @@ Delegates to:
 * ``AgentExecutor``  — heartbeat-wrapped reply stream
 
 All insertable features live in ``LifecycleHook`` / ``AgentMode``
-instances registered in the per-Kernel ``HookRegistry``.  The two
+instances registered in the per-workspace ``HookRegistry``.  The two
 fixed steps (build + execute) are the only agent-touching code.
 """
 
@@ -30,9 +30,9 @@ logger = logging.getLogger(__name__)
 
 
 class Runtime:
-    """Per-Kernel request orchestrator.
+    """Per-workspace request orchestrator.
 
-    One ``Runtime`` instance per ``Kernel``.  ``run()`` is called once
+    One ``Runtime`` instance per ``Workspace``.  ``run()`` is called once
     per ``AgentRequest`` and yields SSE envelope objects identical to
     what the legacy ``Runner.stream_query`` produced.
     """
@@ -40,10 +40,10 @@ class Runtime:
     def __init__(
         self,
         *,
-        kernel: Any,
+        workspace: Any,
         app_services: Any,
     ) -> None:
-        self.kernel = kernel
+        self.workspace = workspace
         self.app_services = app_services
 
     async def run(  # pylint: disable=too-many-branches,too-many-statements
@@ -53,7 +53,7 @@ class Runtime:
         """8-phase lifecycle orchestration."""
         request = self._normalize(request)
         ctx = self._build_context(request)
-        hooks = self.kernel.plugins.hook_registry
+        hooks = self.workspace.plugins.hook_registry
 
         envelope = Envelope(session_id=ctx.session_id)
         skip_agent = False
@@ -70,7 +70,7 @@ class Runtime:
 
             # --- [fixed 1] slash command dispatch ---
             text = _get_last_user_text(ctx.input_msgs)
-            cmd_registry = self.kernel.plugins.slash_command_registry
+            cmd_registry = self.workspace.plugins.slash_command_registry
             cmd_msg = await cmd_registry.dispatch(text or "", ctx)
             if cmd_msg is not None:
                 async for ev in envelope.from_msg(cmd_msg):
@@ -170,7 +170,7 @@ class Runtime:
         return request
 
     def _build_context(self, request: Any) -> HookContext:
-        workspace_dir = getattr(self.kernel, "workspace_dir", None)
+        workspace_dir = getattr(self.workspace, "workspace_dir", None)
         agent_id = getattr(request, "agent_id", None) or "default"
         session_id = request.session_id
         root_session_id = getattr(request, "root_session_id", "") or session_id
@@ -183,7 +183,7 @@ class Runtime:
             root_session_id=root_session_id,
             root_agent_id=root_agent_id,
             workspace_dir=workspace_dir,
-            kernel=self.kernel,
+            workspace=self.workspace,
             app_services=self.app_services,
             input_msgs=_request_input_to_msgs(request.input),
         )

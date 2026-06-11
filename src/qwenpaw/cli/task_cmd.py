@@ -125,7 +125,7 @@ async def _run_task(
             root_session_id=req.session_id,
             root_agent_id=request_context.get("agent_id", "default"),
             workspace_dir=workspace,
-            kernel=None,
+            workspace=None,
             app_services=None,
             agent_config=None,
         )

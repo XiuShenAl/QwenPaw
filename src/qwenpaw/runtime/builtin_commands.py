@@ -4,7 +4,7 @@
 Wraps the four existing command mechanisms (daemon, control,
 conversation, skill) as :class:`CommandSpec` instances registered
 into a single :class:`SlashCommandRegistry`.  Each adapter reads
-from :class:`HookContext` (``ctx.kernel``, ``ctx.agent``, etc.)
+from :class:`HookContext` (``ctx.workspace``, ``ctx.agent``, etc.)
 and delegates to the original handler.
 """
 
@@ -39,7 +39,7 @@ def _make_daemon_adapter(subcommand: str) -> CommandSpec:
         from ..config.config import load_agent_config
 
         agent_id = getattr(ctx, "agent_id", None) or "default"
-        kernel = getattr(ctx, "kernel", None)
+        workspace = getattr(ctx, "workspace", None)
 
         try:
             cfg = load_agent_config(agent_id)
@@ -49,13 +49,13 @@ def _make_daemon_adapter(subcommand: str) -> CommandSpec:
 
         daemon_ctx = DaemonContext(
             load_config_fn=lambda: load_agent_config(agent_id),
-            memory_manager=getattr(kernel, "memory_manager", None),
+            memory_manager=getattr(workspace, "memory_manager", None),
             context_manager=getattr(
-                kernel,
+                workspace,
                 "context_manager",
                 None,
             ),
-            manager=getattr(kernel, "_manager", None),
+            manager=getattr(workspace, "_manager", None),
             agent_id=agent_id,
             session_id=getattr(ctx, "session_id", "") or "",
             agent_name=agent_name,
@@ -106,7 +106,7 @@ def _make_daemon_compound_adapter() -> CommandSpec:
             )
 
         agent_id = getattr(ctx, "agent_id", None) or "default"
-        kernel = getattr(ctx, "kernel", None)
+        workspace = getattr(ctx, "workspace", None)
 
         try:
             cfg = load_agent_config(agent_id)
@@ -117,16 +117,16 @@ def _make_daemon_compound_adapter() -> CommandSpec:
         daemon_ctx = DaemonContext(
             load_config_fn=lambda: load_agent_config(agent_id),
             memory_manager=getattr(
-                kernel,
+                workspace,
                 "memory_manager",
                 None,
             ),
             context_manager=getattr(
-                kernel,
+                workspace,
                 "context_manager",
                 None,
             ),
-            manager=getattr(kernel, "_manager", None),
+            manager=getattr(workspace, "_manager", None),
             agent_id=agent_id,
             session_id=getattr(ctx, "session_id", "") or "",
             agent_name=agent_name,
@@ -184,10 +184,10 @@ def _make_control_adapter(
         from ..app.runner.control_commands.base import ControlContext
         from agentscope.message import Msg, TextBlock
 
-        kernel = getattr(ctx, "kernel", None)
+        workspace = getattr(ctx, "workspace", None)
         request = getattr(ctx, "request", None)
 
-        if kernel is None:
+        if workspace is None:
             return Msg(
                 name="assistant",
                 role="assistant",
@@ -195,13 +195,13 @@ def _make_control_adapter(
                     TextBlock(
                         type="text",
                         text="**Error**\n\nControl command "
-                        "unavailable (kernel not initialized)",
+                        "unavailable (workspace not initialized)",
                     ),
                 ],
             )
 
         channel = None
-        channel_mgr = getattr(kernel, "channel_manager", None)
+        channel_mgr = getattr(workspace, "channel_manager", None)
         if channel_mgr is not None:
             channel_id = getattr(request, "channel", None) or "console"
             try:
@@ -220,7 +220,7 @@ def _make_control_adapter(
         )
 
         ctrl_ctx = ControlContext(
-            workspace=kernel,
+            workspace=workspace,
             payload=request,
             channel=channel,
             session_id=getattr(ctx, "session_id", "") or "",
@@ -287,13 +287,13 @@ _CONVERSATION_COMMANDS = frozenset(
 
 
 async def _load_agent_state(ctx: Any) -> "Any":
-    """Load AgentState from kernel.session without building the agent."""
+    """Load AgentState from workspace.session without building the agent."""
     from agentscope.state import AgentState
 
-    kernel = getattr(ctx, "kernel", None)
-    if kernel is None:
+    workspace = getattr(ctx, "workspace", None)
+    if workspace is None:
         return None
-    session = getattr(kernel, "session", None)
+    session = getattr(workspace, "session", None)
     if session is None:
         return None
 
@@ -330,11 +330,11 @@ async def _load_agent_state(ctx: Any) -> "Any":
 
 
 async def _save_agent_state(ctx: Any, state: "Any") -> None:
-    """Save AgentState back to kernel.session."""
-    kernel = getattr(ctx, "kernel", None)
-    if kernel is None:
+    """Save AgentState back to workspace.session."""
+    workspace = getattr(ctx, "workspace", None)
+    if workspace is None:
         return
-    session = getattr(kernel, "session", None)
+    session = getattr(workspace, "session", None)
     if session is None:
         return
 
@@ -365,8 +365,8 @@ def _make_conversation_adapter(name: str) -> CommandSpec:
         if name == "plan" and args.strip():
             return None
 
-        kernel = getattr(ctx, "kernel", None)
-        if kernel is None:
+        workspace = getattr(ctx, "workspace", None)
+        if workspace is None:
             return None
 
         state = await _load_agent_state(ctx)
@@ -378,8 +378,8 @@ def _make_conversation_adapter(name: str) -> CommandSpec:
             agent_name="QwenPaw",
             state=state,
             agent_id=agent_id,
-            memory_manager=getattr(kernel, "memory_manager", None),
-            context_manager=getattr(kernel, "context_manager", None),
+            memory_manager=getattr(workspace, "memory_manager", None),
+            context_manager=getattr(workspace, "context_manager", None),
         )
 
         full_query = f"/{name} {args}".strip() if args else f"/{name}"
@@ -439,11 +439,11 @@ async def _skill_fallback_handler(
     """
     from agentscope.message import Msg, TextBlock
 
-    kernel = getattr(ctx, "kernel", None)
-    if kernel is None:
+    workspace = getattr(ctx, "workspace", None)
+    if workspace is None:
         return None
 
-    workspace_dir = getattr(kernel, "workspace_dir", None)
+    workspace_dir = getattr(workspace, "workspace_dir", None)
     if not workspace_dir:
         return None
 
@@ -548,7 +548,7 @@ async def _skill_fallback_handler(
 def collect_builtin_command_specs() -> list[CommandSpec]:
     """Return all built-in command specs (daemon, control, conversation).
 
-    These are registered into each Kernel's :class:`SlashCommandRegistry`
+    These are registered into each workspace's :class:`SlashCommandRegistry`
     via ``bootstrap_plugins(builtin_command_specs=...)``.
     """
     specs: list[CommandSpec] = []

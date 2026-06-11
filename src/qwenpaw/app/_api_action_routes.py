@@ -6,7 +6,7 @@
 ``methods`` include ``"http"``.
 
 ``collect_slash_specs_from_api_actions`` does the same for ``"slash"``
-methods, returning :class:`CommandSpec` instances for the per-Kernel
+methods, returning :class:`CommandSpec` instances for the per-workspace
 :class:`SlashCommandRegistry`.
 
 See ``RUNTIME_REFACTOR_PSEUDOCODE.md`` §7.2 / §7.4.
