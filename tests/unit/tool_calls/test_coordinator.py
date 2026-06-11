@@ -97,7 +97,7 @@ async def test_execute_streams_chunks():
 @pytest.mark.asyncio
 async def test_list_empty():
     coordinator = ToolCoordinator()
-    assert coordinator.list() == []
+    assert coordinator.list_entries() == []
 
 
 @pytest.mark.asyncio
@@ -114,8 +114,8 @@ async def test_list_by_session():
     task = asyncio.create_task(_drain_gen(gen))
     await asyncio.sleep(0.05)
 
-    assert len(coordinator.list(session_id="s-1")) == 1
-    assert coordinator.list(session_id="other") == []
+    assert len(coordinator.list_entries(session_id="s-1")) == 1
+    assert coordinator.list_entries(session_id="other") == []
 
     await coordinator.cancel("tc-1")
     await asyncio.wait_for(task, timeout=2.0)

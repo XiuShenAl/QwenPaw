@@ -31,7 +31,7 @@ class Envelope:
     ``stream_query`` produced.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, session_id: str = "") -> None:
         from ..schemas import (
             AgentResponse,
             Message,
@@ -42,7 +42,7 @@ class Envelope:
 
         self._response = AgentResponse(output=[], status=RunStatus.Created)
         self._response.object = "response"
-        self._response.session_id = ""
+        self._response.session_id = session_id
 
         self._message_id = uuid.uuid4().hex
         self._completed_message = Message(
@@ -62,9 +62,6 @@ class Envelope:
 
         self._error_text: str | None = None
         self._finalized = False
-
-    def set_session_id(self, session_id: str) -> None:
-        self._response.session_id = session_id
 
     # ------------------------------------------------------------------
     # Response lifecycle

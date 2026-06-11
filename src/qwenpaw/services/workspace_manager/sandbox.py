@@ -14,6 +14,8 @@ Design notes (IMPL_PLAN §9):
 
 from __future__ import annotations
 
+import shutil
+import sys
 from pathlib import Path
 from typing import Literal
 
@@ -42,13 +44,19 @@ class Sandbox:
         *,
         allowed_paths: list[Path] | None = None,
         denied_tools: set[str] | None = None,
-        shell_executable: str = "/bin/sh",
+        shell_executable: str | None = None,
         shell_timeout: int = 60,
     ) -> None:
         self.allowed_paths: list[Path] = allowed_paths or []
         self.denied_tools: set[str] = denied_tools or set()
-        self.shell_executable: str = shell_executable
+        self.shell_executable: str = shell_executable or self._default_shell()
         self.shell_timeout: int = shell_timeout
+
+    @staticmethod
+    def _default_shell() -> str:
+        if sys.platform == "win32":
+            return shutil.which("cmd") or "cmd.exe"
+        return shutil.which("sh") or "/bin/sh"
 
     def check_path(
         self,

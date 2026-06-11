@@ -42,7 +42,7 @@ class ToolDescriptor:
     requires_sandbox: tuple[str, ...] = ()
     async_execution: bool = False
     description: str = ""
-    metadata: dict = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class ToolRegistry:

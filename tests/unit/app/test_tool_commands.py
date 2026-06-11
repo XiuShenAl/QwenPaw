@@ -19,7 +19,7 @@ from qwenpaw.tool_calls._stream import ToolStream
 
 def _stub_coordinator() -> MagicMock:
     tc = MagicMock()
-    tc.list = MagicMock(return_value=[])
+    tc.list_entries = MagicMock(return_value=[])
     tc.request_offload = AsyncMock(return_value=True)
     tc.cancel = AsyncMock(return_value=True)
     return tc
@@ -68,7 +68,7 @@ async def test_tools_command_no_active() -> None:
 @pytest.mark.asyncio
 async def test_tools_command_with_active() -> None:
     tc = _stub_coordinator()
-    tc.list.return_value = [_make_entry()]
+    tc.list_entries.return_value = [_make_entry()]
     specs = build_tool_command_specs(tc)
     tools_spec = next(s for s in specs if s.name == "tools")
 

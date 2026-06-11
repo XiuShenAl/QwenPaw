@@ -11,23 +11,11 @@ from __future__ import annotations
 import logging
 
 from ..base import LifecycleHook
+from ...runtime._state_utils import StateProxy
 from ...runtime.hooks import HookContext, HookResult
 from ...runtime.phases import Phase
 
 logger = logging.getLogger(__name__)
-
-
-class _StateProxy:
-    """Minimal proxy satisfying SafeJSONSession's state_module protocol."""
-
-    def __init__(self) -> None:
-        self.data: dict = {}
-
-    def state_dict(self) -> dict:
-        return self.data
-
-    def load_state_dict(self, d: dict) -> None:
-        self.data = d
 
 
 class SessionLoadHook(LifecycleHook):
@@ -48,7 +36,7 @@ class SessionLoadHook(LifecycleHook):
             user_id = getattr(request, "user_id", "") or ctx.session_id
             channel = getattr(request, "channel", "") or ""
 
-            proxy = _StateProxy()
+            proxy = StateProxy()
             await session.load_session_state(
                 session_id=ctx.session_id,
                 user_id=user_id,
@@ -85,7 +73,7 @@ class SessionSaveHook(LifecycleHook):
             user_id = getattr(request, "user_id", "") or ctx.session_id
             channel = getattr(request, "channel", "") or ""
 
-            proxy = _StateProxy()
+            proxy = StateProxy()
             proxy.data = ctx.agent.state_dict()
             await session.save_session_state(
                 session_id=ctx.session_id,

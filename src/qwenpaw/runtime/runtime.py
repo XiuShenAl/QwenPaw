@@ -55,8 +55,7 @@ class Runtime:
         ctx = self._build_context(request)
         hooks = self.kernel.plugins.hook_registry
 
-        envelope = Envelope()
-        envelope.set_session_id(ctx.session_id)
+        envelope = Envelope(session_id=ctx.session_id)
         skip_agent = False
 
         try:
@@ -134,18 +133,23 @@ class Runtime:
         except (asyncio.CancelledError, KeyboardInterrupt) as e:
             ctx.error = e
             await hooks.run(Phase.ON_ERROR, ctx)
-            error_text = ctx.extras.get("_error_text", "Cancelled")
             async for ev in envelope.cancel_envelope():
                 yield ev
             raise
         except BaseException as e:
             ctx.error = e
+            logger.error(
+                "runtime: unhandled error session=%s: %s",
+                getattr(ctx, "session_id", ""),
+                e,
+                exc_info=True,
+            )
             await hooks.run(Phase.ON_ERROR, ctx)
-            error_text = ctx.extras.get(
+            err_text = ctx.extras.get(
                 "_error_text",
                 str(e) or e.__class__.__name__,
             )
-            async for ev in envelope.error_envelope(error_text):
+            async for ev in envelope.error_envelope(err_text):
                 yield ev
             raise
         finally:

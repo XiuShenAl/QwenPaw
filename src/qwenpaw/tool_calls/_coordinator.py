@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import builtins
 import logging
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Awaitable, Callable
@@ -32,7 +31,15 @@ class _NextEvent:
 
 
 class ToolCoordinator:
-    """Single owner of runtime state for every in-flight tool call."""
+    """Single owner of runtime state for every in-flight tool call.
+
+    Concurrency model: all public methods are designed for single-threaded
+    asyncio.  ``_entries_lock`` guards the insertion path (``execute``) to
+    serialize concurrent tool launches within the same event loop tick.
+    Read methods (``get``, ``list_entries``) are lock-free since CPython
+    dict reads are atomic between await points.  Do NOT call these methods
+    from ``asyncio.to_thread`` without external synchronization.
+    """
 
     def __init__(
         self,
@@ -126,7 +133,7 @@ class ToolCoordinator:
         root_session_id: str,
         deadline_override: float | None,
     ) -> ToolCallEntry:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         now = loop.time()
         timeout = self._resolve_timeout(
             agent_id,
@@ -165,7 +172,7 @@ class ToolCoordinator:
             name=f"toolcall-supervise-{ctx.tool_call_id}",
         )
 
-        for handler in builtins.list(self._offloaded_handlers):
+        for handler in list(self._offloaded_handlers):
             try:
                 await handler(entry)
             except Exception as exc:
@@ -206,7 +213,7 @@ class ToolCoordinator:
     def get(self, tool_call_id: str) -> ToolCallEntry | None:
         return self._entries.get(tool_call_id)
 
-    def list(
+    def list_entries(
         self,
         session_id: str | None = None,
     ) -> list[ToolCallEntry]:
@@ -261,7 +268,7 @@ class ToolCoordinator:
         if entry is None or entry.status != ToolCallStatus.RUNNING:
             return False
         entry.ctx.offload_reason = reason
-        entry.ctx.deadline = asyncio.get_event_loop().time()
+        entry.ctx.deadline = asyncio.get_running_loop().time()
         entry.ctx.deadline_changed_event.set()
         return True
 
@@ -306,7 +313,7 @@ class ToolCoordinator:
         if seconds is None or seconds <= 0:
             return False
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         base = entry.ctx.deadline if entry.ctx.deadline else loop.time()
         new_deadline = base + seconds
 
@@ -322,10 +329,10 @@ class ToolCoordinator:
     # ================================================================
     # HINT INJECTION + CALLBACKS
     # ================================================================
-    async def pop_pending_hints(  # noqa: F811
+    async def pop_pending_hints(
         self,
         session_id: str,
-    ) -> "builtins.list[Any]":
+    ) -> list[Any]:
         async with self._hints_lock:
             return self._pending_hints.pop(session_id, [])
 
@@ -389,7 +396,7 @@ class ToolCoordinator:
         *,
         chunk_queue: asyncio.Queue[Any] | None,
     ) -> _NextEvent:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         remaining = (
             entry.ctx.deadline - loop.time()
             if entry.ctx.deadline is not None
@@ -432,6 +439,10 @@ class ToolCoordinator:
             return _NextEvent(type="cancelled")
 
         if waiters["dl_changed"] in done:
+            # Clear before returning so the next _await_next_event blocks.
+            # A concurrent set() between wait() and clear() is benign:
+            # the caller always re-reads entry.ctx.deadline for the true
+            # value, so a "lost" notification just triggers one extra loop.
             entry.ctx.deadline_changed_event.clear()
             return _NextEvent(type="deadline_changed")
 
@@ -592,7 +603,10 @@ class ToolCoordinator:
         try:
             await bg
         except asyncio.CancelledError:
-            pass
+            # Distinguish: bg task cancelled vs supervise task cancelled.
+            current = asyncio.current_task()
+            if current is not None and current.cancelled():
+                raise
 
         self._finalize_completed(entry)
 
@@ -636,6 +650,7 @@ class ToolCoordinator:
             entry.end_state = (
                 "interrupted" if entry.ctx.cancel_event.is_set() else "success"
             )
+        # Safe in cooperative asyncio; dict.pop is atomic within one step.
         self._entries.pop(entry.ctx.tool_call_id, None)
         return entry.final_response
 

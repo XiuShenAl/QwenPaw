@@ -22,7 +22,7 @@ def test_coordinator_importable_from_app_services() -> None:
 
 def test_coordinator_constructable() -> None:
     tc = ToolCoordinator()
-    assert tc.list() == []
+    assert tc.list_entries() == []
 
 
 def test_tool_call_status_values() -> None:

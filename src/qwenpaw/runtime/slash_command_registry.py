@@ -14,7 +14,7 @@ mechanisms in the current code: ``app/runner/command_dispatch.py``,
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 if TYPE_CHECKING:
     from agentscope.message import Msg
@@ -41,7 +41,7 @@ class CommandSpec:
     aliases: tuple[str, ...] = ()
     category: str = "user"
     help_text: str = ""
-    metadata: dict = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class SlashCommandRegistry:

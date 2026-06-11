@@ -14,6 +14,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ._state_utils import StateProxy
 from .slash_command_registry import CommandSpec, FallbackHandler
 
 if TYPE_CHECKING:
@@ -285,19 +286,6 @@ _CONVERSATION_COMMANDS = frozenset(
 )
 
 
-class _StateProxy:
-    """Minimal proxy satisfying SafeJSONSession's state_module protocol."""
-
-    def __init__(self) -> None:
-        self.data: dict = {}
-
-    def state_dict(self) -> dict:
-        return self.data
-
-    def load_state_dict(self, d: dict) -> None:
-        self.data = d
-
-
 async def _load_agent_state(ctx: Any) -> "Any":
     """Load AgentState from kernel.session without building the agent."""
     from agentscope.state import AgentState
@@ -313,7 +301,7 @@ async def _load_agent_state(ctx: Any) -> "Any":
     user_id = (getattr(request, "user_id", "") if request else "") or ""
     channel = (getattr(request, "channel", "") if request else "") or ""
 
-    proxy = _StateProxy()
+    proxy = StateProxy()
     await session.load_session_state(
         session_id=ctx.session_id,
         user_id=user_id or ctx.session_id,
@@ -354,7 +342,7 @@ async def _save_agent_state(ctx: Any, state: "Any") -> None:
     user_id = (getattr(request, "user_id", "") if request else "") or ""
     channel = (getattr(request, "channel", "") if request else "") or ""
 
-    proxy = _StateProxy()
+    proxy = StateProxy()
     proxy.data = {"state": state.model_dump(mode="json")}
     await session.save_session_state(
         session_id=ctx.session_id,

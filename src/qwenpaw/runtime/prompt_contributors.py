@@ -46,7 +46,13 @@ _MEMORY_PATTERN = re.compile(
 
 
 def _read_prompt_file(workspace_dir: Path, filename: str) -> str | None:
-    """Read a markdown file, strip YAML frontmatter, return content or None."""
+    """Read a markdown file from *workspace_dir* / *filename*.
+
+    If the file starts with a ``---``-delimited YAML frontmatter block,
+    that block is stripped and only the body content is returned.
+    Returns ``None`` when the file does not exist or is empty after
+    stripping.
+    """
     path = workspace_dir / filename
     if not path.exists():
         return None

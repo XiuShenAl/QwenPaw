@@ -10,9 +10,12 @@ injects all dependencies into the agent constructor.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Iterable
 
 from .tool_guard import GuardedFunctionTool
+
+_logger = logging.getLogger(__name__)
 
 
 class AgentBuilder:
@@ -100,10 +103,6 @@ class AgentBuilder:
         from ..config.config import load_agent_config
         from ..constant import WORKING_DIR
         from ..providers.provider_manager import ProviderManager
-
-        import logging
-
-        _logger = logging.getLogger(__name__)
 
         agent_id = getattr(ctx, "agent_id", None) or "default"
         agent_config = load_agent_config(agent_id)
@@ -276,9 +275,9 @@ class AgentBuilder:
         return None
 
     @staticmethod
-    def _build_request_context(ctx: Any) -> dict[str, str]:
+    def _build_request_context(ctx: Any) -> dict[str, Any]:
         request = getattr(ctx, "request", None)
-        rc: dict[str, str] = {
+        rc: dict[str, Any] = {
             "session_id": getattr(ctx, "session_id", "") or "",
             "agent_id": getattr(ctx, "agent_id", "") or "",
             "channel": (
@@ -358,7 +357,7 @@ class AgentBuilder:
         agent_config: Any,
         workspace_dir: Any,
         agent_id: str,
-        request_context: dict[str, str],
+        request_context: dict[str, Any],
     ) -> list[Any]:
         from ..agents.coding_mode_mixin import collect_coding_tools
 

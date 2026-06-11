@@ -52,7 +52,7 @@ def test_construction_wires_the_three_coordinators() -> None:
     assert asm.task_tracker is not None
     assert isinstance(asm.tool_coordinator, ToolCoordinator)
     assert isinstance(asm.approval_coordinator, ApprovalCoordinator)
-    assert asm.tool_coordinator.list() == []
+    assert asm.tool_coordinator.list_entries() == []
 
 
 @pytest.mark.asyncio

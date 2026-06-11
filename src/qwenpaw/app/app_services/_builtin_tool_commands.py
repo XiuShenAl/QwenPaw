@@ -26,7 +26,7 @@ def build_tool_command_specs(
         from agentscope.message._block import TextBlock
 
         root_sid = getattr(ctx, "root_session_id", None)
-        active = tool_coordinator.list(session_id=root_sid)
+        active = tool_coordinator.list_entries(session_id=root_sid)
         if not active:
             text = "No active tool calls."
         else:
@@ -37,7 +37,7 @@ def build_tool_command_specs(
                     import asyncio
 
                     elapsed_s = (
-                        asyncio.get_event_loop().time() - e.ctx.started_at
+                        asyncio.get_running_loop().time() - e.ctx.started_at
                     )
                     elapsed = f" {elapsed_s:.1f}s"
                 except Exception:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 _SENTINEL = object()
@@ -11,11 +11,15 @@ _SENTINEL = object()
 
 @dataclass
 class ToolStream:
-    """Pure fan-out notifier. Holds no chunk storage of its own."""
+    """Pure fan-out notifier. Holds no chunk storage of its own.
+
+    Uses copy-on-write for ``_subscribers`` to avoid mutation during
+    concurrent ``asyncio.gather`` in ``append``/``close``.
+    """
 
     tool_call_id: str
     session_id: str
-    _subscribers: list[asyncio.Queue[Any]] = field(default_factory=list)
+    _subscribers: tuple[asyncio.Queue[Any], ...] = ()
     _is_closed: bool = False
 
     @property
@@ -23,20 +27,20 @@ class ToolStream:
         return self._is_closed
 
     def add_subscriber(self, queue: asyncio.Queue[Any]) -> None:
-        self._subscribers.append(queue)
+        self._subscribers = (*self._subscribers, queue)
 
     def remove_subscriber(self, queue: asyncio.Queue[Any]) -> None:
-        try:
-            self._subscribers.remove(queue)
-        except ValueError:
-            pass
+        self._subscribers = tuple(
+            q for q in self._subscribers if q is not queue
+        )
 
     async def append(self, chunk: Any) -> None:
         if self._is_closed:
             return
-        if self._subscribers:
+        subs = self._subscribers
+        if subs:
             await asyncio.gather(
-                *(q.put(chunk) for q in self._subscribers),
+                *(q.put(chunk) for q in subs),
                 return_exceptions=True,
             )
 
@@ -44,15 +48,16 @@ class ToolStream:
         if self._is_closed:
             return
         self._is_closed = True
-        if self._subscribers:
+        subs = self._subscribers
+        if subs:
             await asyncio.gather(
-                *(q.put(_SENTINEL) for q in self._subscribers),
+                *(q.put(_SENTINEL) for q in subs),
                 return_exceptions=True,
             )
 
     async def subscribe(self) -> AsyncIterator[Any]:
         queue: asyncio.Queue[Any] = asyncio.Queue()
-        self._subscribers.append(queue)
+        self.add_subscriber(queue)
         if self._is_closed:
             await queue.put(_SENTINEL)
         try:
@@ -62,7 +67,4 @@ class ToolStream:
                     return
                 yield item
         finally:
-            try:
-                self._subscribers.remove(queue)
-            except ValueError:
-                pass
+            self.remove_subscriber(queue)

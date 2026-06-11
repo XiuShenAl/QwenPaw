@@ -51,5 +51,5 @@ class ToolCallContext:
     def remaining(self) -> float | None:
         if self.deadline is None:
             return None
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return max(0.0, self.deadline - loop.time())

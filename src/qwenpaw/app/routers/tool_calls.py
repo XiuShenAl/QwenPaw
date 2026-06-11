@@ -59,7 +59,7 @@ def _get_coordinator(request: Request) -> Any:
 
 
 def _entry_to_info(entry: Any) -> ToolCallInfo:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     elapsed = loop.time() - entry.ctx.started_at
     return ToolCallInfo(
         tool_call_id=entry.ctx.tool_call_id,
@@ -83,7 +83,7 @@ def _entry_to_info(entry: Any) -> ToolCallInfo:
 @router.get("/{session_id}", response_model=ListResponse)
 async def list_calls(session_id: str, request: Request) -> ListResponse:
     coordinator = _get_coordinator(request)
-    entries = coordinator.list(session_id=session_id)
+    entries = coordinator.list_entries(session_id=session_id)
     items = [_entry_to_info(e) for e in entries]
     return ListResponse(items=items, total=len(items))
 
