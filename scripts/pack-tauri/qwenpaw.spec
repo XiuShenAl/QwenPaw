@@ -120,7 +120,9 @@ a = Analysis(
         "qwenpaw.app.api",
         "qwenpaw.app.middleware",
         "qwenpaw.app.multi_agent_manager",
-        "qwenpaw.app.runner",
+        "qwenpaw.app.chats",
+        "qwenpaw.app.task_tracker",
+        "qwenpaw.runtime.commands",
         # Backup modules are exposed through qwenpaw.backup.__getattr__, which
         # PyInstaller cannot discover from static imports.
         *collect_submodules("qwenpaw.backup"),

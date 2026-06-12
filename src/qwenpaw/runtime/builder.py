@@ -319,7 +319,7 @@ class AgentBuilder:
     def _build_env_context(ctx: Any, agent_config: Any) -> str:
         import os
         import sys
-        from ..app.runner.utils import build_env_context
+        from ..app.chats.utils import build_env_context
         from ..constant import WORKING_DIR
 
         workspace_dir = getattr(ctx, "workspace_dir", None)

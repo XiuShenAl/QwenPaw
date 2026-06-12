@@ -175,7 +175,7 @@ async def test_daemon_adapter_delegates_to_handler() -> None:
     version_spec = next(s for s in specs if s.name == "version")
 
     with patch(
-        "qwenpaw.app.runner.daemon_commands.DaemonCommandHandlerMixin",
+        "qwenpaw.runtime.commands.daemon.DaemonCommandHandlerMixin",
         autospec=False,
     ) as MockMixin:
         mock_msg = MagicMock()

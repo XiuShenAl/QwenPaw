@@ -170,7 +170,7 @@ async def _post_load_setup(  # pylint: disable=too-many-branches
 
     # Register any control commands the plugin registered
     try:
-        from ...app.runner.control_commands import register_command
+        from ...runtime.commands.control import register_command
         from ...app.channels.command_registry import CommandRegistry
 
         command_registry = CommandRegistry()
@@ -380,7 +380,7 @@ def _post_unload_cleanup(
     # ── Control commands ─────────────────────────────────────────────────
     if command_names:
         try:
-            from ...app.runner.control_commands import (
+            from ...runtime.commands.control import (
                 unregister_command as unregister_handler,
             )
             from ...app.channels.command_registry import CommandRegistry

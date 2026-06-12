@@ -8,7 +8,7 @@ import tempfile
 
 import pytest
 
-from qwenpaw.app.runner.session import SafeJSONSession
+from qwenpaw.app.chats.session import SafeJSONSession
 
 
 @pytest.fixture

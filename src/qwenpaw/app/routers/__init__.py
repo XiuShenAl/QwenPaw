@@ -16,7 +16,7 @@ from .mcp import router as mcp_router
 from .mcp_oauth import router as mcp_oauth_router
 from .tools import router as tools_router
 from ..crons.api import router as cron_router
-from ..runner.api import router as runner_router
+from ..chats.api import router as runner_router
 from .console import router as console_router
 from .token_usage import router as token_usage_router
 from .agent_stats import router as agent_stats_router

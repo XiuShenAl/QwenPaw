@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Runner module with chat manager for coordinating repository."""
+"""Chat management: models, repository, session, and API."""
 from .api import router
 from .manager import ChatManager
 from .models import (

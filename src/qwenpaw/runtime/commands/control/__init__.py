@@ -31,7 +31,7 @@ from .stop_handler import StopCommandHandler
 
 logger = logging.getLogger(__name__)
 
-# Global command registry: command_name → handler instance
+# Global command registry: command_name -> handler instance
 _COMMAND_REGISTRY: Dict[str, BaseControlCommandHandler] = {}
 
 
@@ -69,7 +69,7 @@ def register_command(handler: BaseControlCommandHandler) -> None:
     _COMMAND_REGISTRY[command] = handler
     logger.debug(
         f"Registered control command: {command} "
-        f"→ {handler.__class__.__name__}",
+        f"-> {handler.__class__.__name__}",
     )
 
 
@@ -120,9 +120,9 @@ def is_control_command(query: str | None) -> bool:
         True if query matches a registered control command
 
     Example:
-        is_control_command("/stop") → True
-        is_control_command("/stop session=123") → True
-        is_control_command("hello") → False
+        is_control_command("/stop") -> True
+        is_control_command("/stop session=123") -> True
+        is_control_command("hello") -> False
     """
     return _extract_command_token(query) in _COMMAND_REGISTRY
 
@@ -136,21 +136,6 @@ def parse_args(query: str, command_prefix: str) -> Dict[str, Any]:
 
     Returns:
         Dict of parsed arguments with "_raw_args" key for raw arguments
-
-    Example:
-        parse_args("/stop session=console:user1", "/stop")
-        → {"session": "console:user1", "_raw_args": "session=console:user1"}
-
-        parse_args("/model openai:gpt-4o", "/model")
-        → {"_raw_args": "openai:gpt-4o"}
-
-        parse_args("/approval approve abc123", "/approval")
-        → {"action": "approve", "request_id": "abc123",
-           "_raw_args": "approve abc123"}
-
-        parse_args("/approval deny abc123 wrong params", "/approval")
-        → {"action": "deny", "request_id": "abc123",
-           "reason": "wrong params", "_raw_args": "deny abc123 wrong params"}
     """
     args: Dict[str, Any] = {}
 

@@ -9,10 +9,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from qwenpaw.app.runner.manager import ChatManager
-from qwenpaw.app.runner.models import ChatSpec, ChatUpdate
-from qwenpaw.app.runner.repo.json_repo import JsonChatRepository
-from qwenpaw.app.runner.title_generator import (
+from qwenpaw.app.chats.manager import ChatManager
+from qwenpaw.app.chats.models import ChatSpec, ChatUpdate
+from qwenpaw.app.chats.repo.json_repo import JsonChatRepository
+from qwenpaw.app.chats.title_generator import (
     MAX_TITLE_CHARS,
     _clean_title,
     _extract_text_from_response,

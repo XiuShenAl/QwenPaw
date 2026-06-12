@@ -167,7 +167,7 @@ def _init_a2a_manager() -> None:
 def _register_a2a_command() -> None:
     """Register /a2a as a control command."""
     try:
-        from qwenpaw.app.runner.control_commands import register_command
+        from qwenpaw.runtime.commands.control import register_command
         from .tools.a2a_command import A2AListCommandHandler
 
         register_command(A2AListCommandHandler())

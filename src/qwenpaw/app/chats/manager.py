@@ -18,7 +18,7 @@ class ChatManager:
     """Manages chat specifications in repository.
 
     Only handles ChatSpec CRUD operations.
-    Does NOT manage Redis session state - that's handled by runner's session.
+    Does NOT manage Redis session state - that's handled by SafeJSONSession.
 
     Similar to CronManager's role in crons module.
     """

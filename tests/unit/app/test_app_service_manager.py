@@ -19,7 +19,7 @@ def _make_app_services() -> AppServiceManager:
     """AppServiceManager with both cross-singletons stubbed out.
 
     The ``TaskTracker`` injection is required in the test environment to
-    avoid eagerly importing ``app.runner.__init__``, which transitively
+    avoid eagerly importing ``app.chats.__init__``, which transitively
     imports agentscope 2.0-only modules that the test venv may lack.
     """
     fake_tracker = MagicMock(name="TaskTracker")

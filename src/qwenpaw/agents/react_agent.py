@@ -172,7 +172,7 @@ class QwenPawAgent(CodingModeMixin, Agent):
         # --- 1.x legacy format: migrate ``memory`` → ``state`` ---
         memory_raw = state_dict.get("memory")
         if isinstance(memory_raw, dict):
-            from qwenpaw.app.runner.utils import parse_legacy_memory_state
+            from qwenpaw.app.chats.utils import parse_legacy_memory_state
 
             msgs, summary = parse_legacy_memory_state(memory_raw)
             self.state = AgentState()

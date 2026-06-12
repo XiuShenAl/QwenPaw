@@ -10,14 +10,15 @@ from pathlib import Path
 
 import frontmatter as fm
 
-from .base import BaseControlCommandHandler, ControlContext
-from ....agents.skill_system import (
+from qwenpaw.agents.skill_system import (
     get_workspace_skills_dir,
     reconcile_workspace_manifest,
 )
-from ....agents.utils.file_handling import (
+from qwenpaw.agents.utils.file_handling import (
     read_text_file_with_encoding_fallback,
 )
+
+from .base import BaseControlCommandHandler, ControlContext
 
 
 class SkillsCommandHandler(BaseControlCommandHandler):

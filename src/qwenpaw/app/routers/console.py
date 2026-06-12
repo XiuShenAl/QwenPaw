@@ -20,7 +20,7 @@ from qwenpaw.schemas import (
 )
 from ...utils.logging import LOG_FILE_PATH
 from ..agent_context import get_agent_for_request
-from ..runner.title_generator import generate_and_update_title
+from ..chats.title_generator import generate_and_update_title
 
 
 logger = logging.getLogger(__name__)

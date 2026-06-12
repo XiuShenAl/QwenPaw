@@ -505,7 +505,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
 
             # ---- Plugin Control Commands ----
             logger.debug("Registering plugin control commands...")
-            from ..app.runner.control_commands import register_command
+            from qwenpaw.runtime.commands.control import register_command
             from ..app.channels.command_registry import CommandRegistry
 
             command_registry = CommandRegistry()

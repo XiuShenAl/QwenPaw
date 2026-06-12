@@ -10,9 +10,10 @@ from __future__ import annotations
 import logging
 import time
 
+from qwenpaw.app.approvals import get_approval_service
+from qwenpaw.security.tool_guard.approval import ApprovalDecision
+
 from .base import BaseControlCommandHandler, ControlContext
-from ...approvals import get_approval_service
-from ....security.tool_guard.approval import ApprovalDecision
 
 logger = logging.getLogger(__name__)
 

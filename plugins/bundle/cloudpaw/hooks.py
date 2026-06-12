@@ -532,21 +532,28 @@ def _setup_a2a_query_rewrite() -> None:  # pylint: disable=too-many-statements
 
     ``/a2a`` without arguments is left for the control-command handler to
     list registered agents.
+
+    TODO: Migrate to a Runtime RequestSetupHook instead of monkey-patching
+    DynamicMultiAgentRunner.stream_query. The old AgentRunner class has been
+    removed as part of Runtime 2.0.
     """
     try:
-        from qwenpaw.app.runner.runner import AgentRunner
+        from qwenpaw.app._app import DynamicMultiAgentRunner
     except ImportError as exc:
         logger.warning(
-            "Cannot import AgentRunner; /a2a query rewrite skipped: %s",
+            "Cannot import DynamicMultiAgentRunner; "
+            "/a2a query rewrite skipped: %s",
             exc,
         )
         return
 
-    _original_stream_query = AgentRunner.stream_query
+    _original_stream_query = DynamicMultiAgentRunner.stream_query
 
     async def _patched_stream_query(self, request, *args, **kwargs):
         try:
-            _maybe_rewrite_a2a_input(request, self.workspace_dir)
+            workspace = await self._get_workspace(request)
+            workspace_dir = getattr(workspace, "workspace_dir", None)
+            _maybe_rewrite_a2a_input(request, workspace_dir)
         except Exception:
             logger.warning(
                 "[CloudPaw] /a2a query rewrite raised; "
@@ -561,13 +568,11 @@ def _setup_a2a_query_rewrite() -> None:  # pylint: disable=too-many-statements
         ):
             yield item
 
-    AgentRunner.stream_query = _patched_stream_query
+    DynamicMultiAgentRunner.stream_query = _patched_stream_query
     logger.info(
-        "[CloudPaw] Patched AgentRunner.stream_query for /a2a rewrite",
+        "[CloudPaw] Patched DynamicMultiAgentRunner.stream_query "
+        "for /a2a rewrite",
     )
-
-    _wire_existing_channels(_patched_stream_query)
-    _patch_make_process_factory(_patched_stream_query)
 
 
 def _maybe_rewrite_a2a_input(request: Any, workspace_dir: Path | None) -> None:

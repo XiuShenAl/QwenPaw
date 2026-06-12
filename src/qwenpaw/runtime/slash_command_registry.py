@@ -6,9 +6,8 @@ with ``app/channels/command_registry.py:CommandRegistry`` — that one is the
 IM-channel priority router and is unrelated to runtime slash dispatch.
 
 Replaces (incrementally, across Phase 4a + 4b) the four parallel
-mechanisms in the current code: ``app/runner/command_dispatch.py``,
-``agents/command_handler.py``, ``app/runner/control_commands/*`` and
-``app/runner/daemon_commands.py``.
+mechanisms in the legacy code: ``agents/command_handler.py``,
+``runtime/commands/control/*`` and ``runtime/commands/daemon.py``.
 """
 
 from __future__ import annotations

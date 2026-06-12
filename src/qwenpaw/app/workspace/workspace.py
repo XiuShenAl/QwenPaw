@@ -27,8 +27,8 @@ from .service_factories import (
     create_mcp_config_watcher,
 )
 from .local_workspace import QwenPawLocalWorkspace
-from ..runner.task_tracker import TaskTracker
-from ..runner.session import SafeJSONSession
+from ..task_tracker import TaskTracker
+from ..chats.session import SafeJSONSession
 from ..mcp import MCPClientManager
 from ..crons.manager import CronManager
 from ..crons.repo.json_repo import JsonJobRepository
@@ -532,8 +532,8 @@ class Workspace:
         blocking startup; affected files stay in their legacy state.
         """
         from ..crons.repo.json_repo import migrate_legacy_weixin_jobs_file
-        from ..runner.repo.json_repo import migrate_legacy_weixin_chats_file
-        from ..runner.session import migrate_legacy_weixin_session_files
+        from ..chats.repo.json_repo import migrate_legacy_weixin_chats_file
+        from ..chats.session import migrate_legacy_weixin_session_files
 
         try:
             migrate_legacy_weixin_chats_file(

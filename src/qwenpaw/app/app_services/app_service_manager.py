@@ -23,7 +23,7 @@ from ...tool_calls import ToolCoordinator
 
 if TYPE_CHECKING:
     from ..approvals.service import ApprovalService
-    from ..runner.task_tracker import TaskTracker
+    from ..task_tracker import TaskTracker
 
 
 class AppServiceManager:
@@ -49,7 +49,7 @@ class AppServiceManager:
         approval_service: "ApprovalService | None" = None,
     ) -> None:
         if task_tracker is None:
-            from ..runner.task_tracker import TaskTracker
+            from ..task_tracker import TaskTracker
 
             task_tracker = TaskTracker()
         self.task_tracker = task_tracker

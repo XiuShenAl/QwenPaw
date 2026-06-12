@@ -40,8 +40,8 @@ async def create_chat_service(ws: "Workspace", service):
         service: Existing ChatManager if reused, None if creating new
     """
     # pylint: disable=protected-access
-    from ..runner.manager import ChatManager
-    from ..runner.repo.json_repo import JsonChatRepository
+    from ..chats.manager import ChatManager
+    from ..chats.repo.json_repo import JsonChatRepository
 
     if service is not None:
         cm = service

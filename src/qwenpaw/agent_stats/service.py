@@ -13,7 +13,7 @@ import aiofiles
 import aiofiles.os
 import orjson
 
-from ..app.runner.repo import JsonChatRepository
+from ..app.chats.repo import JsonChatRepository
 from ..token_usage import get_token_usage_manager
 from .models import (
     AgentStatsSummary,

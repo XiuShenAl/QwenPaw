@@ -50,7 +50,7 @@ class ErrorNormalizeHook(LifecycleHook):
         error_text = normalized.message or str(exc) or exc.__class__.__name__
 
         try:
-            from ...app.runner.query_error_dump import write_query_error_dump
+            from ...app.chats.query_error_dump import write_query_error_dump
 
             dump_path = write_query_error_dump(
                 ctx.request,

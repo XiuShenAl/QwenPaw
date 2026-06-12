@@ -160,7 +160,7 @@ class TestErrorNormalizeHook:
         ) as mock_convert:
             mock_convert.return_value = SimpleNamespace(message="normalized")
             with patch(
-                "qwenpaw.app.runner.query_error_dump.write_query_error_dump",
+                "qwenpaw.app.chats.query_error_dump.write_query_error_dump",
                 side_effect=Exception("dump failed"),
             ):
                 await hook.run(ctx)

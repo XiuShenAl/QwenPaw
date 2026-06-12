@@ -32,7 +32,7 @@ def _make_daemon_adapter(subcommand: str) -> CommandSpec:
     """Create a :class:`CommandSpec` for one daemon subcommand."""
 
     async def _handler(ctx: Any, args: str) -> "Msg | None":
-        from ..app.runner.daemon_commands import (
+        from .commands.daemon import (
             DaemonCommandHandlerMixin,
             DaemonContext,
         )
@@ -82,7 +82,7 @@ def _make_daemon_compound_adapter() -> CommandSpec:
     """
 
     async def _handler(ctx: Any, args: str) -> "Msg | None":
-        from ..app.runner.daemon_commands import (
+        from .commands.daemon import (
             DaemonCommandHandlerMixin,
             DaemonContext,
             parse_daemon_query,
@@ -180,8 +180,8 @@ def _make_control_adapter(
     """
 
     async def _handler(ctx: Any, args: str) -> "Msg | None":
-        from ..app.runner.control_commands import parse_args
-        from ..app.runner.control_commands.base import ControlContext
+        from .commands.control import parse_args
+        from .commands.control.base import ControlContext
         from agentscope.message import Msg, TextBlock
 
         workspace = getattr(ctx, "workspace", None)
@@ -252,7 +252,7 @@ def _make_control_adapter(
 
 
 def _collect_control_specs() -> list[CommandSpec]:
-    from ..app.runner.control_commands import _COMMAND_REGISTRY
+    from .commands.control import _COMMAND_REGISTRY
 
     specs = []
     seen_names: set[str] = set()
@@ -318,7 +318,7 @@ async def _load_agent_state(ctx: Any) -> "Any":
     # Legacy 1.x format
     memory_raw = proxy.data.get("memory")
     if isinstance(memory_raw, dict):
-        from ..app.runner.utils import parse_legacy_memory_state
+        from ..app.chats.utils import parse_legacy_memory_state
 
         msgs, summary = parse_legacy_memory_state(memory_raw)
         state = AgentState()
