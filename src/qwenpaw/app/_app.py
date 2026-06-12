@@ -164,7 +164,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
     add_project_file_handler(LOG_FILE_PATH)
 
     # ================================================================
-    # Phase 1: Fast synchronous setup (target < 100ms)
+    # Fast synchronous setup (target < 100ms)
     # Everything here must be lightweight so the server starts quickly.
     # ================================================================
 
@@ -209,7 +209,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
     provider_manager = ProviderManager.get_instance()
     local_model_manager = LocalModelManager.get_instance()
 
-    # --- Runtime v2: AppServiceManager + WorkspaceRegistry ---
+    # --- AppServiceManager + WorkspaceRegistry ---
     app_services = None
     workspace_registry = None
     try:
@@ -224,10 +224,10 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
             app_services=app_services,
         )
         app.state.workspace_registry = workspace_registry
-        logger.debug("Runtime v2 infrastructure initialized")
+        logger.debug("Runtime infrastructure initialized")
 
-        # --- Phase 6: @api_action auto-registration ---
-        _phase6_command_specs: list[Any] = []
+        # --- @api_action auto-registration ---
+        _api_action_command_specs: list[Any] = []
         try:
             from ..api_action import ManagerRegistry
             from ._api_action_routes import (
@@ -250,18 +250,18 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
             app.state.manager_registry = manager_registry
 
             n_routes = register_http_routes(app, manager_registry)
-            logger.debug("Phase 6: auto-registered %d HTTP routes", n_routes)
+            logger.debug("Auto-registered %d HTTP routes", n_routes)
 
-            _phase6_command_specs.extend(
+            _api_action_command_specs.extend(
                 collect_slash_specs_from_api_actions(manager_registry),
             )
             logger.debug(
-                "Phase 6: collected %d slash specs from @api_action",
-                len(_phase6_command_specs),
+                "Collected %d slash specs from @api_action",
+                len(_api_action_command_specs),
             )
         except Exception:
             logger.debug(
-                "Phase 6 @api_action auto-registration skipped",
+                "@api_action auto-registration skipped",
                 exc_info=True,
             )
 
@@ -271,7 +271,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
                 build_tool_command_specs,
             )
 
-            _phase6_command_specs.extend(
+            _api_action_command_specs.extend(
                 build_tool_command_specs(app_services.tool_coordinator),
             )
             logger.debug("HITL tool commands registered")
@@ -303,7 +303,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
                 get_skill_fallback_handler,
             )
 
-            _phase6_command_specs.extend(collect_builtin_command_specs())
+            _api_action_command_specs.extend(collect_builtin_command_specs())
             # pylint: disable-next=protected-access
             workspace_registry._bootstrap_kwargs[
                 "builtin_fallback_handler"
@@ -388,15 +388,15 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
                 exc_info=True,
             )
 
-        if _phase6_command_specs:
+        if _api_action_command_specs:
             # pylint: disable-next=protected-access
             workspace_registry._bootstrap_kwargs[
                 "builtin_command_specs"
-            ] = _phase6_command_specs
+            ] = _api_action_command_specs
 
     except Exception:
         logger.debug(
-            "Runtime v2 infrastructure init skipped",
+            "Runtime infrastructure init skipped",
             exc_info=True,
         )
 
@@ -438,7 +438,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
     )
 
     # ================================================================
-    # Phase 2: Background heavy initialization
+    # Background heavy initialization
     # Agents, plugins, and services start in a background task so the
     # server can begin accepting HTTP requests immediately.
     # First API requests that need an agent will await its readiness

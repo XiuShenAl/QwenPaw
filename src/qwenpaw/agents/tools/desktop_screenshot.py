@@ -80,7 +80,7 @@ async def _capture_macos_screencapture(
     """macOS: screencapture (supports window selection with -w)."""
     import asyncio
 
-    from qwenpaw.tool_calls import cancellable_wait
+    from ...tool_calls import cancellable_wait
 
     cmd = ["screencapture", "-x", path]
     if capture_window:

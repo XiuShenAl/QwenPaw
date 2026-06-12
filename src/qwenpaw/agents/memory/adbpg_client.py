@@ -23,7 +23,7 @@ try:
 except ImportError:
     psycopg2 = None  # type: ignore[assignment]
 
-from qwenpaw.exceptions import ConfigurationException as ConfigurationError
+from ...exceptions import ConfigurationException as ConfigurationError
 
 logger = logging.getLogger(__name__)
 

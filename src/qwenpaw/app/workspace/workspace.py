@@ -14,8 +14,8 @@ import logging
 from pathlib import Path
 from typing import Any, AsyncGenerator, Iterable, Optional
 
-from qwenpaw.config.timezone import normalize_tz
-from qwenpaw.config.utils import load_config
+from ...config.timezone import normalize_tz
+from ...config.utils import load_config
 
 from .service_manager import ServiceDescriptor, ServiceManager
 from .workspace_plugins import WorkspacePlugins
@@ -262,7 +262,7 @@ class Workspace:
         self,
         request: Any,
     ) -> AsyncGenerator[Any, None]:
-        """Process a request through Runtime 2.0.
+        """Process a request through the Runtime pipeline.
 
         Drop-in replacement for the old ``Runner.stream_query()``.
         """

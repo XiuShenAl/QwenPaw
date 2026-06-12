@@ -359,7 +359,7 @@ class AgentBuilder:
         agent_id: str,
         request_context: dict[str, Any],
     ) -> list[Any]:
-        from ..agents.coding_mode_mixin import collect_coding_tools
+        from ..modes.coding import collect_coding_tools
 
         return collect_coding_tools(
             agent_config,
@@ -417,7 +417,7 @@ class AgentBuilder:
                 None,
             )
             if tool_coordinator is not None:
-                from qwenpaw.tool_calls import ToolCoordinatorMiddleware
+                from ..tool_calls import ToolCoordinatorMiddleware
 
                 mws.append(
                     ToolCoordinatorMiddleware(coordinator=tool_coordinator),

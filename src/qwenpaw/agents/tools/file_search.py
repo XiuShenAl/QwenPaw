@@ -541,7 +541,7 @@ async def grep_search(
             return [], f"error: {exc}"
 
     try:
-        from qwenpaw.tool_calls import cancellable_wait
+        from ...tool_calls import cancellable_wait
 
         match_lines, status = await cancellable_wait(
             asyncio.to_thread(_worker),
@@ -616,7 +616,7 @@ async def glob_search(
             return [], False
 
     try:
-        from qwenpaw.tool_calls import cancellable_wait
+        from ...tool_calls import cancellable_wait
 
         results, truncated = await cancellable_wait(
             asyncio.to_thread(_worker),

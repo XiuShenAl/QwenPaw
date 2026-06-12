@@ -6,10 +6,9 @@ This module defines the contracts that tool execution code programs
 against — ``check_path`` / ``check_tool`` raise
 :class:`SandboxViolationError` when a tool call violates boundaries.
 
-Design notes (IMPL_PLAN §9):
-- Guard = content safety (``tool_guard/engine.py``)
-- Sandbox = resource boundary (paths / tool whitelist)
-- The two layers are orthogonal; both run before ``tool.func()``.
+Guard = content safety (``tool_guard/engine.py``), Sandbox = resource
+boundary (paths / tool whitelist).  The two layers are orthogonal;
+both run before ``tool.func()``.
 """
 
 from __future__ import annotations

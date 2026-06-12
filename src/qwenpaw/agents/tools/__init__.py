@@ -1,26 +1,30 @@
 # -*- coding: utf-8 -*-
-# Note: ``execute_python_code`` / ``view_text_file`` / ``write_text_file``
-# are intentionally not re-exported — qwenpaw's react_agent does not
-# register them. The literal names still appear in
-# ``security/tool_guard`` guardians for backward compatibility with
-# pre-existing allowlists.
+"""Built-in tool functions for QwenPaw agents.
+
+Every tool function decorated with ``@tool_descriptor`` is automatically
+collected into a global registry at import time.  Adding a new built-in
+tool requires only two things:
+
+1. Decorate the function with ``@tool_descriptor(...)`` in its module.
+2. Import the module here so that the decorator executes.
+
+:func:`discover_builtin_tool_funcs` returns all auto-collected built-in
+tools — no manual list maintenance or filesystem scanning required.
+
+Note: ``execute_python_code`` / ``view_text_file`` / ``write_text_file``
+are intentionally not re-exported — qwenpaw's react_agent does not
+register them. The literal names still appear in
+``security/tool_guard`` guardians for backward compatibility with
+pre-existing allowlists.
+"""
 from __future__ import annotations
 
-import importlib
-import inspect
-import pkgutil
 from typing import Callable
 
-from .file_io import (
-    read_file,
-    write_file,
-    edit_file,
-    append_file,
-)
-from .file_search import (
-    grep_search,
-    glob_search,
-)
+# Each import triggers the @tool_descriptor decorator, which auto-
+# collects the function into the global registry.
+from .file_io import read_file, write_file, edit_file, append_file
+from .file_search import grep_search, glob_search
 from .shell import execute_shell_command
 from .send_file import send_file_to_user
 from .browser_control import browser_use
@@ -35,12 +39,25 @@ from .agent_management import (
     check_agent_task,
 )
 from .delegate_external_agent import delegate_external_agent
+from .make_skill_tools import materialize_skill
+from .ast_tool import ast_search
 
-# Registered via react_agent's hardcoded tool_functions; kept out of
-# __all__ so it's always enabled, not gated on agent config.
-from .make_skill_tools import materialize_skill  # noqa: F401
+
+def discover_builtin_tool_funcs() -> list[Callable]:
+    """Return all built-in tool functions auto-collected by
+    ``@tool_descriptor``.
+
+    The decorator registers each function at import time.  This function
+    simply returns the collected built-in tools — no ``pkgutil`` /
+    ``importlib`` scanning, no manual list.
+    """
+    from ...runtime.tool_registry import get_builtin_tool_funcs
+
+    return get_builtin_tool_funcs()
+
 
 __all__ = [
+    "discover_builtin_tool_funcs",
     "execute_shell_command",
     "read_file",
     "write_file",
@@ -61,28 +78,6 @@ __all__ = [
     "chat_with_agent",
     "submit_to_agent",
     "check_agent_task",
-    "discover_builtin_tool_funcs",
+    "materialize_skill",
+    "ast_search",
 ]
-
-
-def discover_builtin_tool_funcs() -> list[Callable]:
-    """Walk this subpackage and return all functions carrying a
-    ``_tool_descriptor`` attribute (produced by ``@tool_descriptor``).
-
-    Modules starting with ``_`` are skipped — they're private helpers
-    (``_lsp_client``, ``_lsp_servers``) that shouldn't be auto-loaded
-    just to scan for tools.
-    """
-    funcs: list[Callable] = []
-    seen: set[int] = set()
-    for info in pkgutil.iter_modules(__path__):
-        if info.name.startswith("_"):
-            continue
-        mod = importlib.import_module(f"{__name__}.{info.name}")
-        for _, obj in inspect.getmembers(mod):
-            if callable(obj) and hasattr(obj, "_tool_descriptor"):
-                if id(obj) in seen:
-                    continue
-                seen.add(id(obj))
-                funcs.append(obj)
-    return funcs

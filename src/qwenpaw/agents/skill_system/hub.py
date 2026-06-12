@@ -22,7 +22,7 @@ import frontmatter
 import httpx
 import yaml
 
-from qwenpaw.exceptions import (
+from ...exceptions import (
     ConfigurationException,
     SkillConflictError,
     SkillImportCancelled,

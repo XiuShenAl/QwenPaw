@@ -5,9 +5,8 @@ Named ``SlashCommandRegistry`` (not ``CommandRegistry``) to avoid clashing
 with ``app/channels/command_registry.py:CommandRegistry`` — that one is the
 IM-channel priority router and is unrelated to runtime slash dispatch.
 
-Replaces (incrementally, across Phase 4a + 4b) the four parallel
-mechanisms in the legacy code: ``agents/command_handler.py``,
-``runtime/commands/control/*`` and ``runtime/commands/daemon.py``.
+Unifies the four previously-parallel command mechanisms
+(conversation, control, daemon, skill) into a single dispatch point.
 """
 
 from __future__ import annotations

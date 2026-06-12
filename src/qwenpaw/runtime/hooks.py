@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 
 class HookAction(str, Enum):
-    """The three return semantics a hook may emit (HTML §10)."""
+    """The three return semantics a hook may emit."""
 
     CONTINUE = "continue"
     SHORT_CIRCUIT = "short_circuit"

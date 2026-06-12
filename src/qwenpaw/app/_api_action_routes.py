@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Phase 6 — auto-register HTTP routes and slash commands from ``@api_action``.
+"""Auto-register HTTP routes and slash commands from ``@api_action``.
 
 ``register_http_routes`` scans every :class:`ManagerBase` subclass in a
 :class:`ManagerRegistry` and creates FastAPI endpoints for actions whose
@@ -8,8 +8,6 @@
 ``collect_slash_specs_from_api_actions`` does the same for ``"slash"``
 methods, returning :class:`CommandSpec` instances for the per-workspace
 :class:`SlashCommandRegistry`.
-
-See ``RUNTIME_REFACTOR_PSEUDOCODE.md`` §7.2 / §7.4.
 """
 
 from __future__ import annotations
@@ -47,8 +45,8 @@ def _make_endpoint(
 ) -> Any:
     """Build a FastAPI endpoint closure with a clean signature.
 
-    D1 (pseudocode §7.2): closure vars must be hidden from
-    ``inspect.signature`` so FastAPI doesn't treat them as query params.
+    Closure vars must be hidden from ``inspect.signature``
+    so FastAPI doesn't treat them as query params.
     Handles path parameters (``{job_id}`` style) and optional request body.
     """
     request_model = spec.request_model

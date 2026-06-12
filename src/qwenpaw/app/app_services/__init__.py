@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """Cross-workspace coordination services held by FastAPI lifespan.
 
-Per ``runtime_refactor_v2.html`` §0, the AppServiceManager is the ONLY
-cross-workspace container, and it is *strictly* limited to three coordinators:
+The AppServiceManager is the ONLY cross-workspace container, and it is
+*strictly* limited to three coordinators:
 
 * ``task_tracker``         — observability for streaming runs
 * ``tool_coordinator``     — HITL tool-call coordination
 * ``approval_coordinator`` — HITL approval coordination
 
 Any state that should be per-workspace (ToolRegistry, PromptManager,
-SlashCommandRegistry, HookRegistry, modes, …) belongs on
+SlashCommandRegistry, HookRegistry, modes, ...) belongs on
 ``Workspace.service_manager`` / ``Workspace.plugins`` instead — never here.
 """
 

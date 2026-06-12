@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """Runtime hook phase enum.
 
-The eight values map 1:1 to ``runtime_refactor_v2.html`` §10 ("8 Phase
-points covering the full request lifecycle"):
+Eight phase points covering the full request lifecycle::
 
     PRE_DISPATCH      — request normalization, before slash dispatch
     POST_DISPATCH     — slash dispatch finished without a match

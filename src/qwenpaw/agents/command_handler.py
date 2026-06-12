@@ -99,7 +99,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
 
         1. **Agent-backed** (legacy): pass ``agent`` — state is read from
            ``agent.state``.
-        2. **Standalone** (Runtime 2.0): pass ``state`` directly — no
+        2. **Standalone**: pass ``state`` directly — no
            agent instance required.  Used by slash command adapters that
            load state from session before agent construction.
 

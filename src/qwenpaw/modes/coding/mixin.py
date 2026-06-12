@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Coding Mode mixin for QwenPawAgent.
+"""Coding Mode mixin and tool collection helpers.
 
-Provides one behaviour activated when ``coding_mode.enabled`` is
-``True`` in the agent configuration:
+Provides:
 
-1. **System Prompt Injection** — appends a coding-focused persona
-   and workflow guidelines to the agent system prompt.
+- ``CodingModeMixin`` — mixin class that adds Coding Mode features
+  to a ReActAgent (system prompt injection, LSP / AST tools).
+- ``collect_coding_tools()`` — standalone function used by
+  :class:`AgentBuilder` to collect coding tools without a mixin instance.
+- ``_CODING_SYSTEM_PROMPT_TEMPLATE`` — the system prompt template
+  referenced by :class:`CodingModeContributor`.
 """
 
 from __future__ import annotations
@@ -13,11 +16,11 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from ..constant import WORKING_DIR
-from ..runtime import GuardedFunctionTool
-from .tools import ast_tool
-from .tools._lsp_servers import detect_available_lsp_languages
-from .tools.lsp_tool import make_lsp_tool
+from ...constant import WORKING_DIR
+from ...runtime import GuardedFunctionTool
+from ...agents.tools import ast_tool
+from ...agents.tools._lsp_servers import detect_available_lsp_languages
+from ...agents.tools.lsp_tool import make_lsp_tool
 
 logger = logging.getLogger(__name__)
 
@@ -135,8 +138,7 @@ class CodingModeMixin:
 
     At runtime this class is mixed into ``QwenPawAgent`` and combined
     with ``Agent`` via MRO. Coding Mode prompt injection is handled by
-    :class:`~qwenpaw.runtime.prompt_contributors.CodingModeContributor`
-    (Phase 3).
+    :class:`~qwenpaw.runtime.prompt_contributors.CodingModeContributor`.
     """
 
     def _get_coding_project_dir(self) -> str | None:
@@ -148,9 +150,8 @@ class CodingModeMixin:
 
         Returns None when no project has been set (use workspace default).
         """
-        from ..config.config import load_agent_config
+        from ...config.config import load_agent_config
 
-        # Determine agent id: prefer _agent_config.id, then self.name
         agent_config = getattr(self, "_agent_config", None)
         agent_id: str | None = None
         if agent_config is not None:
@@ -171,7 +172,6 @@ class CodingModeMixin:
         except Exception:
             pass
 
-        # Fallback to stale in-memory config
         if agent_config is None:
             return None
         if isinstance(agent_config, dict):
@@ -179,10 +179,6 @@ class CodingModeMixin:
             return cm_dict.get("project_dir") or None
         cm_obj = getattr(agent_config, "coding_mode", None)
         return getattr(cm_obj, "project_dir", None) or None
-
-    # ------------------------------------------------------------------
-    # Helpers: config access
-    # ------------------------------------------------------------------
 
     def _coding_mode_enabled(self) -> bool:
         """Return ``True`` when Coding Mode is active."""
@@ -197,21 +193,12 @@ class CodingModeMixin:
             return False
         return bool(getattr(cm, "enabled", False))
 
-    # ------------------------------------------------------------------
-    # Tool registration hook (called from QwenPawAgent._create_toolkit)
-    # ------------------------------------------------------------------
-
     def _collect_coding_mode_tools(
         self,
         agent_id: str | None = None,
         request_context: dict[str, str] | None = None,
     ) -> list:
-        """Collect Coding Mode tool instances (`lsp`, `ast_search`).
-
-        Returns a list of ``FunctionTool`` instances to be included in
-        the ``Toolkit(tools=[...])`` constructor.  Both tools are
-        smart-discovered and missing dependencies are logged, not raised.
-        """
+        """Collect Coding Mode tool instances (`lsp`, `ast_search`)."""
         if not self._coding_mode_enabled():
             return []
 
@@ -315,3 +302,10 @@ def collect_coding_tools(
         logger.warning("Failed to register ast_search tool: %s", exc)
 
     return result
+
+
+__all__ = [
+    "CodingModeMixin",
+    "_CODING_SYSTEM_PROMPT_TEMPLATE",
+    "collect_coding_tools",
+]

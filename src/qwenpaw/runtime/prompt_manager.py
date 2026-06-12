@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 """Per-workspace system-prompt assembly.
 
-Replaces (in Phase 3) the 700+ line hand-written concatenation inside
-``agents/prompt.py:build_system_prompt_from_working_dir``. Each contributor
-declares one fragment of the system prompt; ``PromptManager`` orders them by
-priority and joins non-empty results with ``PROMPT_SEPARATOR``.
+Each contributor declares one fragment of the system prompt;
+``PromptManager`` orders them by priority and joins non-empty results
+with ``PROMPT_SEPARATOR``.
 
-``PROMPT_SEPARATOR`` is intentionally a module-level constant so Phase 3
-golden tests can pin the exact separator (any change is a contract break).
+``PROMPT_SEPARATOR`` is intentionally a module-level constant so
+parity tests can pin the exact separator (any change is a contract break).
 """
 
 from __future__ import annotations
@@ -112,7 +111,7 @@ class PromptManager:
         return PROMPT_SEPARATOR.join(parts)
 
     def build_sync(self, ctx: Any) -> str:
-        """Synchronous variant of :meth:`build` for Phase 3 bridge callers.
+        """Synchronous variant of :meth:`build`.
 
         All built-in contributors use :class:`SyncPromptContributor`, so
         their ``contribute()`` returns a plain string (not a coroutine).

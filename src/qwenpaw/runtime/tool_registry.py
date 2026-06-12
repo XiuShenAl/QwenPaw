@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """Per-workspace tool registry.
 
-Replaces (in Phase 2) the hand-written ``_create_toolkit`` dict in
-``agents/react_agent.py``. Each builtin tool function carries a
-``ToolDescriptor`` (via ``@tool_descriptor``); the registry exposes a
-single ``filter(...)`` entry point that ``AgentBuilder.build_toolkit`` calls
+Each builtin tool function carries a ``ToolDescriptor``
+(via ``@tool_descriptor``); the registry exposes a single
+``filter(...)`` entry point that ``AgentBuilder.build_toolkit`` calls
 to decide which descriptors should be wrapped into ``GuardedFunctionTool``.
 """
 
@@ -136,6 +135,34 @@ class ToolRegistry:
 
 
 # ---------------------------------------------------------------------------
+# Global auto-collection — populated by @tool_descriptor at import time
+# ---------------------------------------------------------------------------
+
+_REGISTERED_TOOL_FUNCS: list[Callable[..., Any]] = []
+_REGISTERED_IDS: set[int] = set()
+
+# Built-in tools live under this package prefix.  Functions decorated
+# outside this prefix (e.g. in tests) are silently ignored by
+# ``get_builtin_tool_funcs()``.
+_BUILTIN_TOOLS_PREFIX = "qwenpaw.agents.tools."
+
+
+def get_builtin_tool_funcs() -> list[Callable[..., Any]]:
+    """Return all built-in tool functions auto-collected by
+    ``@tool_descriptor``.
+
+    Only functions whose ``__module__`` starts with the built-in tools
+    package prefix are included, so test helpers or plugin tools that
+    also use ``@tool_descriptor`` are not mixed in.
+    """
+    return [
+        fn
+        for fn in _REGISTERED_TOOL_FUNCS
+        if getattr(fn, "__module__", "").startswith(_BUILTIN_TOOLS_PREFIX)
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Decorator
 # ---------------------------------------------------------------------------
 
@@ -148,20 +175,31 @@ def tool_descriptor(
     requires_skills: tuple[str, ...] = (),
     requires_features: tuple[str, ...] = (),
     requires_sandbox: tuple[str, ...] = (),
-    async_execution: bool = False,
+    async_execution: bool | None = None,
     description: str = "",
     **metadata: Any,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Attach a :class:`ToolDescriptor` to ``fn._tool_descriptor``.
+    """Attach a :class:`ToolDescriptor` to ``fn._tool_descriptor`` and
+    auto-collect the function into the global registry.
 
-    Phase 1 only wires the decorator; Phase 2 will scan modules at
-    lifespan startup and call ``ToolRegistry.register`` on each function
-    that carries the attribute.
+    When ``async_execution`` is not explicitly provided it is
+    auto-detected via :func:`inspect.iscoroutinefunction`.
+
+    Built-in tools (under ``qwenpaw.agents.tools``) are automatically
+    discoverable via :func:`get_builtin_tool_funcs` — no manual list
+    maintenance or filesystem scanning required.
     """
 
     def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
+        import inspect
+
         resolved_name = name or fn.__name__
-        # pylint: disable-next=protected-access
+        is_async = (
+            async_execution
+            if async_execution is not None
+            else inspect.iscoroutinefunction(fn)
+        )
+        # pylint: disable=protected-access
         fn._tool_descriptor = ToolDescriptor(  # type: ignore[attr-defined]
             name=resolved_name,
             func=fn,
@@ -170,7 +208,7 @@ def tool_descriptor(
             requires_skills=tuple(requires_skills),
             requires_features=tuple(requires_features),
             requires_sandbox=tuple(requires_sandbox),
-            async_execution=async_execution,
+            async_execution=is_async,
             description=(
                 description or (fn.__doc__ or "").strip().splitlines()[0]
                 if fn.__doc__
@@ -178,9 +216,18 @@ def tool_descriptor(
             ),
             metadata=dict(metadata),
         )
+        # pylint: enable=protected-access
+        if id(fn) not in _REGISTERED_IDS:
+            _REGISTERED_IDS.add(id(fn))
+            _REGISTERED_TOOL_FUNCS.append(fn)
         return fn
 
     return deco
 
 
-__all__ = ["ToolDescriptor", "ToolRegistry", "tool_descriptor"]
+__all__ = [
+    "ToolDescriptor",
+    "ToolRegistry",
+    "get_builtin_tool_funcs",
+    "tool_descriptor",
+]

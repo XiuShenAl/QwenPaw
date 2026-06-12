@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """Per-workspace pluggable layer.
 
-Concretizes the HTML §0 "插件/Hook（注册进 Runtime）" tier as a single
-dataclass holding the three per-workspace registries that ``Runtime.run()``
+Holds the three per-workspace registries that ``Runtime.run()``
 reads each request:
 
 * :class:`SlashCommandRegistry` — slash dispatch

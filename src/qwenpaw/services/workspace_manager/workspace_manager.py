@@ -5,12 +5,11 @@ The concrete implementation is provided by a separate workstream.
 This module defines the lifecycle contract (``start`` / ``stop``)
 and the relationship between ``WorkspaceManager`` and ``Sandbox``.
 
-Design notes (IMPL_PLAN §9):
-- ``WorkspaceManager`` is per-workspace, held by ``Workspace.service_manager``.
-- ``Sandbox`` handles resource-boundary checks; tools declare their
-  requirements via ``ToolDescriptor.requires_sandbox``.
-- ``GuardedFunctionTool.check_permissions`` calls sandbox checks
-  before ``tool.func()``, so individual tools don't need to.
+``WorkspaceManager`` is per-workspace, held by ``Workspace.service_manager``.
+``Sandbox`` handles resource-boundary checks; tools declare their
+requirements via ``ToolDescriptor.requires_sandbox``.
+``GuardedFunctionTool.check_permissions`` calls sandbox checks
+before ``tool.func()``, so individual tools don't need to.
 """
 
 from __future__ import annotations

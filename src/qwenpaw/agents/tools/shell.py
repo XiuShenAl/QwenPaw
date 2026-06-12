@@ -456,7 +456,7 @@ async def execute_shell_command(
             try:
                 # Apply timeout to communicate directly; wait()+communicate()
                 # can hang if descendants keep stdout/stderr pipes open.
-                from qwenpaw.tool_calls import cancellable_wait
+                from ...tool_calls import cancellable_wait
 
                 stdout, stderr = await cancellable_wait(
                     proc.communicate(),

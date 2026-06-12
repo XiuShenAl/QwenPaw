@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Mission mode — thin wrapper around ``agents/mission/``.
+"""Mission mode — ``AgentMode`` for autonomous iterative tasks.
 
-Strategy: **wrap first, rewrite later** ("先包后改").  The 2061-line
-``agents/mission/`` package stays in place; this mode only exposes
-hooks and a prompt contributor so the Runtime lifecycle drives
-mission state load/save instead of the old middleware path.
+Exposes hooks and a prompt contributor so the Runtime lifecycle drives
+mission state load/save.  Domain logic (state machine, PRD generation,
+iteration loop) lives in ``agents.mission``.
 """
 
 from __future__ import annotations

@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Built-in :class:`PromptContributor` implementations for Phase 3.
+"""Built-in :class:`PromptContributor` implementations.
 
 Each contributor is responsible for one fragment of the system prompt.
 ``build_default_prompt_manager`` assembles a :class:`PromptManager`
-pre-loaded with all 7 contributors, ready for ``build_sync(ctx)`` in the
-Phase 3 bridge.
+pre-loaded with all 7 contributors, ready for ``build_sync(ctx)``.
 
 Contributors read configuration from ``ctx.extras``:
 
@@ -212,7 +211,7 @@ class CodingModeContributor(SyncPromptContributor):
         cm = getattr(agent_config, "coding_mode", None)
         if not cm or not getattr(cm, "enabled", False):
             return None
-        from ..agents.coding_mode_mixin import _CODING_SYSTEM_PROMPT_TEMPLATE
+        from ..modes.coding import _CODING_SYSTEM_PROMPT_TEMPLATE
 
         workspace_dir = str(getattr(ctx, "workspace_dir", "") or "(unknown)")
         project_dir = self._resolve_project_dir(agent_config) or workspace_dir

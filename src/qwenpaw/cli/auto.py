@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Auto-generated CLI subcommands from ``@api_action`` (Phase 6).
+"""Auto-generated CLI subcommands from ``@api_action``.
 
 ``auto_group`` is a :class:`_LazyAutoGroup` registered lazily in
 ``cli/main.py``.  On first access (``list_commands`` / ``get_command``)
@@ -15,7 +15,6 @@ live ``Manager`` instance.  The generated subcommands therefore
 work as HTTP clients — they send requests to the running server
 using the ``http_path`` and ``http_method`` from ``ApiActionSpec``.
 
-See ``RUNTIME_REFACTOR_PSEUDOCODE.md`` §7.3.
 """
 
 from __future__ import annotations

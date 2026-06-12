@@ -1,13 +1,10 @@
 # -*- coding: utf-8 -*-
 """SSE envelope state machine.
 
-Replaces the 320-line ``if/elif`` chain in ``stream_query.py:L391-710``
-with an explicit ``Envelope`` class that tracks per-request state
-(text blocks, reasoning blocks, tool calls) and translates agentscope
-``EventType`` events into the frontend's streaming envelope protocol.
-
-The envelope contract matches ``Builder.tsx`` — any deviation is a
-regression (see ``tests/contract/runtime/test_phase5_envelope_parity.py``).
+Translates agentscope ``EventType`` events into the frontend's
+streaming envelope protocol.  Tracks per-request state (text blocks,
+reasoning blocks, tool calls) and emits the correct event sequence
+that ``Builder.tsx`` expects.
 """
 
 from __future__ import annotations

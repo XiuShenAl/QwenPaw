@@ -114,7 +114,7 @@ class ModelCommandHandler(BaseControlCommandHandler):
 
         if active_model is None or not active_model.provider_id:
             # Fallback to global active model
-            from qwenpaw.providers.provider_manager import ProviderManager
+            from ....providers.provider_manager import ProviderManager
 
             manager = ProviderManager.get_instance()
             active_model = manager.get_active_model()
@@ -146,7 +146,7 @@ class ModelCommandHandler(BaseControlCommandHandler):
         Returns:
             Formatted list of all providers and models
         """
-        from qwenpaw.providers.provider_manager import ProviderManager
+        from ....providers.provider_manager import ProviderManager
 
         manager = ProviderManager.get_instance()
         workspace = context.workspace
@@ -287,8 +287,8 @@ class ModelCommandHandler(BaseControlCommandHandler):
             )
 
         # Update agent config
-        from qwenpaw.config.config import save_agent_config
-        from qwenpaw.config.config import ModelSlotConfig as ModelSlot
+        from ....config.config import save_agent_config
+        from ....config.config import ModelSlotConfig as ModelSlot
 
         workspace = context.workspace
         agent_config = workspace.config
@@ -329,8 +329,8 @@ class ModelCommandHandler(BaseControlCommandHandler):
         Returns:
             Success message
         """
-        from qwenpaw.config.config import save_agent_config
-        from qwenpaw.providers.provider_manager import ProviderManager
+        from ....config.config import save_agent_config
+        from ....providers.provider_manager import ProviderManager
 
         workspace = context.workspace
         agent_config = workspace.config
@@ -399,7 +399,7 @@ class ModelCommandHandler(BaseControlCommandHandler):
         model_id = parts[1].strip()
 
         # Get provider and model
-        from qwenpaw.providers.provider_manager import ProviderManager
+        from ....providers.provider_manager import ProviderManager
 
         manager = ProviderManager.get_instance()
         provider = manager.get_provider(provider_id)
@@ -481,7 +481,7 @@ class ModelCommandHandler(BaseControlCommandHandler):
         Returns:
             Tuple of (is_valid, error_message)
         """
-        from qwenpaw.providers.provider_manager import ProviderManager
+        from ....providers.provider_manager import ProviderManager
 
         manager = ProviderManager.get_instance()
 

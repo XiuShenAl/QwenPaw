@@ -1,17 +1,25 @@
 # -*- coding: utf-8 -*-
-"""Coding mode — wraps ``agents/coding_mode_mixin.py`` as an ``AgentMode``.
+"""Coding mode — self-contained ``AgentMode`` plugin.
 
-Contributions:
-- ``ProjectDirInjectionHook(PRE_AGENT_BUILD)`` — stashes ``project_dir``
-  into ``ctx.mode_state["coding"]`` for downstream consumers.
-- ``CodingModeContributor`` — system prompt injection (Phase 3,
-  already registered in ``prompt_contributors.py``).
+All coding-mode logic lives under this package:
+
+- ``CodingMode`` — the ``AgentMode`` entry point.
+- ``CodingModeMixin`` — mixin that adds coding features to a ReActAgent.
+- ``collect_coding_tools()`` — standalone tool-collection helper.
+- ``_CODING_SYSTEM_PROMPT_TEMPLATE`` — system prompt template.
+- ``ProjectDirInjectionHook`` — hook that stashes ``project_dir``
+  into ``ctx.mode_state["coding"]``.
 """
 
 from __future__ import annotations
 
 from ..base import AgentMode
 from ...runtime.hooks import HookBase, HookContext
+from .mixin import (
+    CodingModeMixin,
+    _CODING_SYSTEM_PROMPT_TEMPLATE,
+    collect_coding_tools,
+)
 
 
 class CodingMode(AgentMode):
@@ -37,4 +45,9 @@ class CodingMode(AgentMode):
         return bool(cm and getattr(cm, "enabled", False))
 
 
-__all__ = ["CodingMode"]
+__all__ = [
+    "CodingMode",
+    "CodingModeMixin",
+    "_CODING_SYSTEM_PROMPT_TEMPLATE",
+    "collect_coding_tools",
+]

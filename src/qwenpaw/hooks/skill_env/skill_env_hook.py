@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """Skill environment override hooks.
 
-Migrates ``RequestSetupMiddleware`` step 7
-(``apply_skill_config_env_overrides``) into a PRE_EXECUTE / FINALLY
+Applies ``skill_config_env_overrides`` as a PRE_EXECUTE / FINALLY
 hook pair.
 """
 

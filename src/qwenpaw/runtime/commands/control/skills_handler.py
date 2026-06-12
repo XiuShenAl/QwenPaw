@@ -10,11 +10,11 @@ from pathlib import Path
 
 import frontmatter as fm
 
-from qwenpaw.agents.skill_system import (
+from ....agents.skill_system import (
     get_workspace_skills_dir,
     reconcile_workspace_manifest,
 )
-from qwenpaw.agents.utils.file_handling import (
+from ....agents.utils.file_handling import (
     read_text_file_with_encoding_fallback,
 )
 

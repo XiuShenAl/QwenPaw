@@ -219,7 +219,6 @@ def _format_matches(
 @tool_descriptor(
     requires_modes=("coding",),
     requires_sandbox=("file_read",),
-    async_execution=True,
 )
 async def ast_search(  # pylint: disable=too-many-return-statements
     pattern: str,
@@ -282,7 +281,7 @@ async def ast_search(  # pylint: disable=too-many-return-statements
     ]
 
     try:
-        from qwenpaw.tool_calls import cancellable_wait
+        from ...tool_calls import cancellable_wait
 
         returncode, stdout, stderr = await cancellable_wait(
             asyncio.to_thread(_run_ast_grep_sync, args, root),

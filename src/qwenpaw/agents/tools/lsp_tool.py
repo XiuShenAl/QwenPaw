@@ -254,7 +254,7 @@ def make_lsp_tool(  # noqa: C901  pylint: disable=too-many-statements
             )
 
         try:
-            from qwenpaw.tool_calls import cancellable_wait
+            from ...tool_calls import cancellable_wait
 
             result = await cancellable_wait(
                 asyncio.to_thread(_run),

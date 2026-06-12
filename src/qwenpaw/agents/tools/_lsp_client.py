@@ -22,7 +22,7 @@ import threading
 from pathlib import Path
 from typing import Any, Optional
 
-from qwenpaw.exceptions import LspError
+from ...exceptions import LspError
 
 LOGGER = logging.getLogger(__name__)
 

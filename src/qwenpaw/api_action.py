@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
-"""``@api_action`` skeleton (Phase 1).
+"""``@api_action`` — three-way registrar for HTTP, CLI, and slash commands.
 
-Phase 6 grows this into a three-way registrar that auto-publishes a
-single method as an HTTP route, a CLI sub-command and a slash command.
-Phase 1 ships only the declarative pieces other modules can already
-import without having to handle ``ImportError`` later:
+Auto-publishes a single method as an HTTP route, a CLI sub-command
+and a slash command.
 
 * :class:`ApiActionSpec` — frozen metadata attached by the decorator.
 * :func:`api_action`     — decorator that attaches ``_api_action`` to a
@@ -13,8 +11,6 @@ import without having to handle ``ImportError`` later:
                            the ``ApiActionSpec`` instances declared on
                            each subclass into ``cls._api_actions``.
 
-HTTP / CLI / slash collection live in Phase 6 (see
-``RUNTIME_REFACTOR_PSEUDOCODE.md`` §7) and are deliberately absent here.
 ``__init_subclass__`` is used (not a metaclass) so subclasses can also
 inherit from pydantic / abc bases without metaclass clashes.
 """
@@ -30,8 +26,8 @@ class ApiActionSpec:
     """Declarative description of one ``@api_action``-tagged method.
 
     ``methods`` is a subset of ``{"http", "cli", "slash"}`` — the three
-    surfaces Phase 6 will auto-publish to. The default paths /
-    sub-commands are derived from ``name`` at publish time; the optional
+    surfaces auto-published to. The default paths / sub-commands are
+    derived from ``name`` at publish time; the optional
     ``http_path`` / ``cli_command`` / ``slash_command`` overrides let a
     manager pick a different public name when it needs to.
     """
@@ -59,7 +55,7 @@ def api_action(
     """Attach an :class:`ApiActionSpec` to ``fn._api_action``.
 
     Validates ``methods`` early so a typo (``"htttp"``) fails at import
-    time rather than silently disappearing from every surface in Phase 6.
+    time rather than silently disappearing from every generated surface.
     """
     method_set = frozenset(methods)
     invalid = method_set - {"http", "cli", "slash"}
@@ -92,7 +88,7 @@ class ManagerBase:
     """Base class collecting every ``@api_action``-tagged method on a subclass.
 
     Each subclass gets its own ``_api_actions`` list (built in
-    ``__init_subclass__``) so Phase 6's HTTP / CLI / slash registrars
+    ``__init_subclass__``) so the HTTP / CLI / slash registrars
     can iterate without scanning attributes themselves.
 
     Subclasses should override ``endpoint_prefix`` to pick the segment
@@ -116,7 +112,7 @@ class ManagerRegistry:
     """Holds (manager_cls, instance_getter) pairs for auto-generation.
 
     ``instance_getter`` is a callable ``(app_state) -> manager_instance``
-    that Phase 6 HTTP / CLI / slash collectors call at request time.
+    that the HTTP / CLI / slash collectors call at request time.
     """
 
     def __init__(self) -> None:

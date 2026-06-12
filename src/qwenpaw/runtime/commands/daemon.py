@@ -15,13 +15,13 @@ from typing import Any, Callable, Optional, TYPE_CHECKING
 
 from agentscope.message import Msg, TextBlock
 
-from qwenpaw.constant import WORKING_DIR
-from qwenpaw.config import load_config
-from qwenpaw.utils.logging import LOG_NAMESPACE, LOG_FILE_PATH
+from ...constant import WORKING_DIR
+from ...config import load_config
+from ...utils.logging import LOG_NAMESPACE, LOG_FILE_PATH
 
 if TYPE_CHECKING:
-    from qwenpaw.config.config import AgentProfileConfig
-    from qwenpaw.app.multi_agent_manager import MultiAgentManager
+    from ...config.config import AgentProfileConfig
+    from ...app.multi_agent_manager import MultiAgentManager
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +107,7 @@ def run_daemon_status(context: DaemonContext) -> str:
         agent_id = getattr(context, "agent_id", None)
         if agent_id:
             try:
-                from qwenpaw.config.config import (
+                from ...config.config import (
                     get_model_max_input_length,
                     load_agent_config,
                 )
@@ -187,7 +187,7 @@ def run_daemon_reload_config(context: DaemonContext) -> str:
 def run_daemon_version(context: DaemonContext) -> str:
     """Return version and paths."""
     try:
-        from qwenpaw.__version__ import __version__ as ver
+        from ...__version__ import __version__ as ver
     except ImportError:
         ver = "unknown"
     return (

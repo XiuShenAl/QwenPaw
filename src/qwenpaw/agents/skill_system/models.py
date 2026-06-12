@@ -9,7 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from qwenpaw.exceptions import SkillConflictError
+from ...exceptions import SkillConflictError
 
 
 ALL_SKILL_ROUTING_CHANNELS = [

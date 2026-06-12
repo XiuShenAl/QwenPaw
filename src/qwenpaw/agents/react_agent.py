@@ -20,10 +20,9 @@ from agentscope.message import Msg, TextBlock
 from agentscope.state import AgentState
 from agentscope.tool import Toolkit
 
-from .command_handler import CommandHandler
 from ..runtime import GuardedFunctionTool
 from .skill_system import get_workspace_skills_dir
-from .coding_mode_mixin import CodingModeMixin
+from ..modes.coding import CodingModeMixin
 from ..constant import (
     MEDIA_UNSUPPORTED_PLACEHOLDER,
     WORKING_DIR,
@@ -46,7 +45,6 @@ class QwenPawAgent(CodingModeMixin, Agent):
     - Dynamic skill loading from working directory
     - Memory management with auto-compaction
     - Bootstrap guidance for first-time setup
-    - System command handling (/compact, /new, etc.)
     - Tool-guard security (via ``GuardedFunctionTool.check_permissions``)
     - Coding Mode features: Inline Diff (via CodingModeMixin)
     """
@@ -83,7 +81,7 @@ class QwenPawAgent(CodingModeMixin, Agent):
         # Register skills metadata on toolkit
         self._register_skills(toolkit, effective_skills=effective_skills or [])
 
-        # Store managers for use by command_handler and downstream
+        # Store managers for downstream consumers
         self.memory_manager = memory_manager
         self.context_manager = context_manager
 
@@ -121,17 +119,6 @@ class QwenPawAgent(CodingModeMixin, Agent):
 
         # Tombstone for legacy ``getattr(agent, "memory", None)`` callers
         self.memory = None  # type: ignore[assignment]
-
-        # CommandHandler for /compact, /new, etc.
-        if self.context_manager is not None:
-            self.command_handler = CommandHandler(
-                agent_name=self.name,
-                agent=self,
-                memory_manager=self.memory_manager,
-                context_manager=self.context_manager,
-            )
-        else:
-            self.command_handler = None
 
         self._register_tool_call_hooks()
 

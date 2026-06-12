@@ -1,12 +1,10 @@
 # -*- coding: utf-8 -*-
 """Façade over the existing ``ApprovalService`` singleton.
 
-Phase 1 contract: a thin pass-through that lets callers migrate from
-``from app.approvals import get_approval_service`` to
+A thin pass-through that lets callers use
 ``ctx.app_services.approval_coordinator`` *without* changing behavior.
-The wrapper is the future seam where cross-workspace approval orchestration
-(see ``RUNTIME_REFACTOR_PSEUDOCODE.md`` §2.8) will land — Phase 1 just
-keeps it pure pass-through.
+The wrapper is the future seam where cross-workspace approval
+orchestration will land.
 """
 
 from __future__ import annotations

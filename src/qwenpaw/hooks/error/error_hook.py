@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """Error handling hooks.
 
-Migrates ``stream_query.py:L712-787`` — exception normalization,
-error dump, and cancel cleanup into ON_ERROR hooks.
+Exception normalization, error dump, and cancel cleanup as ON_ERROR hooks.
 """
 
 from __future__ import annotations

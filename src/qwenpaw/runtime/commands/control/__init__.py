@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
-from qwenpaw.exceptions import SystemCommandException
+from ....exceptions import SystemCommandException
 from .base import BaseControlCommandHandler, ControlContext
 from .approval_handler import (
     ApprovalCommandHandler,

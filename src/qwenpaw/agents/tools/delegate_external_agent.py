@@ -587,7 +587,7 @@ async def _stream_action_responses(
         ),
     )
     loop = asyncio.get_running_loop()
-    from qwenpaw.tool_calls import get_call_context
+    from ...tool_calls import get_call_context
 
     _tc_ctx = get_call_context()
     if _tc_ctx is not None and _tc_ctx.remaining() is not None:
