@@ -115,6 +115,9 @@ adbpg = [
 whisper = [
     "openai-whisper>=20231117",
 ]
+migrate = [
+    "pyjson5>=1.6.0",
+]
 full = [
     "qwenpaw[local,whisper]",
 ]

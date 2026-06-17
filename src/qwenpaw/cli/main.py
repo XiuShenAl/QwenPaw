@@ -116,6 +116,11 @@ class LazyGroup(click.Group):
         "cron": ("qwenpaw.cli.cron_cmd", "cron_group", ".cron_cmd"),
         "env": ("qwenpaw.cli.env_cmd", "env_group", ".env_cmd"),
         "init": ("qwenpaw.cli.init_cmd", "init_cmd", ".init_cmd"),
+        "migrate": (
+            "qwenpaw.cli.migrate_cmd",
+            "migrate_group",
+            ".migrate_cmd",
+        ),
         "models": (
             "qwenpaw.cli.providers_cmd",
             "models_group",
