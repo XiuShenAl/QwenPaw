@@ -8,8 +8,8 @@ into the agent's reasoning loop.
 
 | Plugin | Hook | Behavior |
 |--------|------|----------|
-| `tracing-middleware` | `on_acting` | Logs every tool call (name, duration) to a file. Conditionally activated only when `debug` mode is enabled. |
-| `thinking-log-middleware` | `on_reasoning` | Prints the model's reasoning steps to stdout with a `[THINKING]` prefix. Always active. |
+| `tracing-middleware` | `on_acting` | Logs every tool call (name, duration) to a file. Conditionally activated only when `QWENPAW_TRACE` env var is set. |
+| `thinking-log-middleware` | `on_reasoning` | Prints model reasoning stream events to stdout (`[THINKING]` for chain-of-thought, `[TEXT]` for text responses). Always active. |
 
 ## Installation
 

@@ -56,6 +56,6 @@ def check_plugin_version_compat(
         )
 
     if current < min_v or current >= max_v:
-        msg = f"requires QwenPaw >={min_v}, <{max_v}, " f"current is {current}"
+        msg = f"requires QwenPaw >={min_v}, <{max_v}, current is {current}"
         return False, msg
     return True, ""

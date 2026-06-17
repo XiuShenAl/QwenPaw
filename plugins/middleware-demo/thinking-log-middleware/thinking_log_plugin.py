@@ -13,7 +13,7 @@ import sys
 from typing import Any, AsyncGenerator, Callable
 
 from agentscope.middleware import MiddlewareBase
-from agentscope.message import TextBlock
+from agentscope.event import ThinkingBlockDeltaEvent, TextBlockDeltaEvent
 
 from qwenpaw.plugins.api import PluginApi
 
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 class ThinkingLogMiddleware(MiddlewareBase):
-    """Prints each reasoning step to stdout with a [THINKING] prefix."""
+    """Prints reasoning stream events to stdout."""
 
     async def on_reasoning(  # pylint: disable=unused-argument
         self,
@@ -29,20 +29,22 @@ class ThinkingLogMiddleware(MiddlewareBase):
         input_kwargs: dict[str, Any],
         next_handler: Callable[..., AsyncGenerator[Any, None]],
     ) -> AsyncGenerator[Any, None]:
-        events = []
         async for item in next_handler():
-            events.append(item)
+            if isinstance(item, ThinkingBlockDeltaEvent):
+                print(
+                    f"[THINKING] {item.delta}",
+                    end="",
+                    file=sys.stdout,
+                    flush=True,
+                )
+            elif isinstance(item, TextBlockDeltaEvent):
+                print(
+                    f"[TEXT] {item.delta}",
+                    end="",
+                    file=sys.stdout,
+                    flush=True,
+                )
             yield item
-
-        for event in events:
-            if isinstance(event, TextBlock):
-                text = getattr(event, "text", str(event))
-                if text.strip():
-                    print(
-                        f"[THINKING] {text[:200]}",
-                        file=sys.stdout,
-                        flush=True,
-                    )
 
 
 def _thinking_log_factory(

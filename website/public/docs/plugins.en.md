@@ -1251,7 +1251,7 @@ curl -X POST http://127.0.0.1:8088/api/pets \
 
 ### Example 8: Tracing Middleware (Tool Call Tracing)
 
-This example demonstrates how to register an `on_acting` middleware that logs every tool call with timing information in debug mode.
+This example demonstrates how to register an `on_acting` middleware that logs every tool call with timing information when the `QWENPAW_TRACE` environment variable is set.
 
 **plugin.json:**
 
@@ -1277,6 +1277,7 @@ This example demonstrates how to register an `on_acting` middleware that logs ev
 **tracing_plugin.py:**
 
 ```python
+import os
 import time
 from pathlib import Path
 from typing import Any, AsyncGenerator, Callable
@@ -1286,7 +1287,7 @@ from qwenpaw.plugins.api import PluginApi
 
 
 class TracingMiddleware(MiddlewareBase):
-    """Logs tool call name, arguments, and execution duration."""
+    """Logs tool call name, input, and execution duration."""
 
     def __init__(self, trace_file: Path) -> None:
         self._trace_file = trace_file
@@ -1300,7 +1301,7 @@ class TracingMiddleware(MiddlewareBase):
     ) -> AsyncGenerator[Any, None]:
         tool_call = input_kwargs["tool_call"]
         tool_name = getattr(tool_call, "name", str(tool_call))
-        tool_args = getattr(tool_call, "arguments", "")
+        tool_input = getattr(tool_call, "input", "")
 
         start = time.perf_counter()
         try:
@@ -1308,15 +1309,14 @@ class TracingMiddleware(MiddlewareBase):
                 yield item
         finally:
             elapsed_ms = (time.perf_counter() - start) * 1000
-            line = f"[{time.strftime('%H:%M:%S')}] {tool_name}({tool_args}) — {elapsed_ms:.1f}ms\n"
+            line = f"[{time.strftime('%H:%M:%S')}] {tool_name}({tool_input[:100]}) — {elapsed_ms:.1f}ms\n"
             with open(self._trace_file, "a", encoding="utf-8") as f:
                 f.write(line)
 
 
 def _tracing_factory(ctx: Any, agent_config: Any) -> TracingMiddleware | None:
-    """Create TracingMiddleware only when debug mode is enabled."""
-    running = getattr(agent_config, "running", None)
-    if running is None or not getattr(running, "debug", False):
+    """Create TracingMiddleware when QWENPAW_TRACE env var is set."""
+    if not os.environ.get("QWENPAW_TRACE"):
         return None
     workspace_dir = getattr(ctx, "workspace_dir", None)
     if workspace_dir is None:
@@ -1335,7 +1335,7 @@ plugin = TracingPlugin()
 
 **Key points:**
 
-- **Conditional activation**: The factory checks `agent_config.running.debug` and only activates in debug mode
+- **Conditional activation**: The factory checks the `QWENPAW_TRACE` environment variable and only activates when set
 - **`priority=50`**: Higher priority (lower number = outermost in onion), ensuring tracing wraps other middlewares
 - **`on_acting` hook**: Measures execution time before/after tool calls
 - Full source: `plugins/middleware-demo/tracing-middleware/tracing_plugin.py`
@@ -1374,12 +1374,12 @@ import sys
 from typing import Any, AsyncGenerator, Callable
 
 from agentscope.middleware import MiddlewareBase
-from agentscope.message import TextBlock
+from agentscope.event import ThinkingBlockDeltaEvent, TextBlockDeltaEvent
 from qwenpaw.plugins.api import PluginApi
 
 
 class ThinkingLogMiddleware(MiddlewareBase):
-    """Prints each reasoning step to stdout with a [THINKING] prefix."""
+    """Prints reasoning stream events to stdout."""
 
     async def on_reasoning(
         self,
@@ -1387,16 +1387,12 @@ class ThinkingLogMiddleware(MiddlewareBase):
         input_kwargs: dict[str, Any],
         next_handler: Callable[..., AsyncGenerator[Any, None]],
     ) -> AsyncGenerator[Any, None]:
-        events = []
         async for item in next_handler():
-            events.append(item)
+            if isinstance(item, ThinkingBlockDeltaEvent):
+                print(f"[THINKING] {item.delta}", end="", file=sys.stdout, flush=True)
+            elif isinstance(item, TextBlockDeltaEvent):
+                print(f"[TEXT] {item.delta}", end="", file=sys.stdout, flush=True)
             yield item
-
-        for event in events:
-            if isinstance(event, TextBlock):
-                text = getattr(event, "text", str(event))
-                if text.strip():
-                    print(f"[THINKING] {text[:200]}", file=sys.stdout, flush=True)
 
 
 def _thinking_log_factory(ctx: Any, agent_config: Any) -> ThinkingLogMiddleware:
@@ -1415,8 +1411,8 @@ plugin = ThinkingLogPlugin()
 **Key points:**
 
 - **Unconditional activation**: The factory always returns an instance, applied to every request
-- **`on_reasoning` hook**: Captures output during the model's reasoning phase
-- **Yield-then-process**: Reasoning events are forwarded downstream first, then printed — does not block streaming
+- **`on_reasoning` hook**: Captures streaming events during the model's reasoning phase (`ThinkingBlockDeltaEvent` for chain-of-thought, `TextBlockDeltaEvent` for text responses)
+- **Real-time printing**: Each delta event is printed immediately while being yielded downstream — does not block streaming
 - Full source: `plugins/middleware-demo/thinking-log-middleware/thinking_log_plugin.py`
 
 ---
@@ -1695,7 +1691,7 @@ Factory signature: `(ctx: HookContext, agent_config: AgentProfileConfig) -> Midd
 
 The factory is called during `AgentBuilder.build()` for each request. The returned middleware instance is inserted into the agent's middleware chain.
 
-See [Example 8](#example-8-tracing-middleware) and [Example 9](#example-9-thinking-log-middleware) for full walkthroughs.
+See [Example 8](#example-8-tracing-middleware) and [Example 9](#example-9-thinking-log-middleware) above for full walkthroughs.
 
 ## Advanced Features
 

@@ -493,7 +493,6 @@ class PluginLoader:
         # Ensure plugin dependencies are installed before loading
         await self._ensure_dependencies_installed(source_path, plugin_id)
 
-
         backend_entry = manifest.entry.backend
         frontend_entry = manifest.entry.frontend
         backend_entry_file = (
