@@ -86,7 +86,12 @@ def openclaw_cmd(
     from qwenpaw.migrate.openclaw.orchestrator import run_migration
 
     include_set = set(include.split(",")) if include else None
-    exclude_set = set(exclude.split(",")) if exclude else {"history"}
+    if exclude:
+        exclude_set = set(exclude.split(","))
+    elif include_set and "history" in include_set:
+        exclude_set = set()
+    else:
+        exclude_set = {"history"}
     source_path = Path(source) if source else None
 
     run_migration(

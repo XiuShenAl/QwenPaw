@@ -129,9 +129,10 @@ def run_migration(
     if not no_backup:
         backup_path = _create_pre_migration_backup(target_workspace, ts)
 
+    _writable = {ItemStatus.OK, ItemStatus.WARN, ItemStatus.ARCHIVED}
     applied, errors = 0, 0
     for item in plan.items:
-        if item.status == ItemStatus.OK and item.write_fn:
+        if item.status in _writable and item.write_fn:
             try:
                 item.write_fn()
                 applied += 1

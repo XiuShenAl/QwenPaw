@@ -17,21 +17,21 @@ def parse_json5(text: str) -> dict:
 
 
 def _process_normal(ch, text, i, n, result):
-    """Process character in normal state."""
+    """Process character in normal state. Returns (next_state, next_i)."""
     if ch == '"':
         result.append(ch)
-        return "in_string", i
+        return "in_string", i + 1
     nxt = text[i : i + 2] if i + 1 < n else ""
     if nxt == "//":
-        return "in_line_comment", i + 1
+        return "in_line_comment", i + 2
     if nxt == "/*":
-        return "in_block_comment", i + 1
+        return "in_block_comment", i + 2
     result.append(ch)
-    return "normal", i
+    return "normal", i + 1
 
 
 def _process_string(ch, text, i, n, result):
-    """Process character in string state."""
+    """Process character in string state. Returns (next_state, next_i)."""
     result.append(ch)
     if ch == "\\" and i + 1 < n:
         result.append(text[i + 1])
