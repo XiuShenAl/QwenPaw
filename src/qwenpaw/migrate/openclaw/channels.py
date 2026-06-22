@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 
 _ARCHIVED_PLATFORMS = {
     "whatsapp",
-    "slack",
     "signal",
     "line",
     "nostr",
@@ -37,10 +36,31 @@ def _resolve_token(value: Any, env: dict[str, str]) -> str | None:
     return None
 
 
+def _get_channel_field(ch_cfg: dict, field_name: str) -> Any:
+    """Get a field from channel config, checking flat and accounts.default."""
+    val = ch_cfg.get(field_name)
+    if val is not None:
+        return val
+    accounts = ch_cfg.get("accounts")
+    if isinstance(accounts, dict):
+        default = accounts.get("default")
+        if isinstance(default, dict):
+            return default.get(field_name)
+    return None
+
+
 def _map_allow_from(openclaw_allow: list[str] | None) -> list[str]:
     if not openclaw_allow:
         return []
-    return [str(e) for e in openclaw_allow if e != "*"]
+    result: list[str] = []
+    for e in openclaw_allow:
+        s = str(e).strip()
+        if s == "*":
+            continue
+        s = re.sub(r"^(telegram|tg):", "", s, flags=re.IGNORECASE)
+        if s:
+            result.append(s)
+    return result
 
 
 def _apply_access_control(result: dict, oc_cfg: dict) -> None:
@@ -62,8 +82,8 @@ def _apply_access_control(result: dict, oc_cfg: dict) -> None:
 
 
 def _extract_telegram(oc_cfg: dict, env: dict[str, str]) -> dict:
-    token = _resolve_token(oc_cfg.get("botToken"), env)
-    allow_from = _map_allow_from(oc_cfg.get("allowFrom"))
+    token = _resolve_token(_get_channel_field(oc_cfg, "botToken"), env)
+    allow_from = _map_allow_from(_get_channel_field(oc_cfg, "allowFrom"))
     result: dict[str, Any] = {"enabled": True}
     if token:
         result["bot_token"] = token
@@ -74,10 +94,10 @@ def _extract_telegram(oc_cfg: dict, env: dict[str, str]) -> dict:
 
 
 def _extract_discord(oc_cfg: dict, env: dict[str, str]) -> dict:
-    token = _resolve_token(oc_cfg.get("token"), env)
+    token = _resolve_token(_get_channel_field(oc_cfg, "token"), env)
     dm_cfg = oc_cfg.get("dm", {}) if isinstance(oc_cfg.get("dm"), dict) else {}
     allow_from = _map_allow_from(
-        dm_cfg.get("allowFrom") or oc_cfg.get("allowFrom"),
+        dm_cfg.get("allowFrom") or _get_channel_field(oc_cfg, "allowFrom"),
     )
     result: dict[str, Any] = {"enabled": True}
     if token:
@@ -88,10 +108,25 @@ def _extract_discord(oc_cfg: dict, env: dict[str, str]) -> dict:
     return result
 
 
+def _extract_slack(oc_cfg: dict, env: dict[str, str]) -> dict:
+    bot_token = _resolve_token(_get_channel_field(oc_cfg, "botToken"), env)
+    app_token = _resolve_token(_get_channel_field(oc_cfg, "appToken"), env)
+    allow_from = _map_allow_from(_get_channel_field(oc_cfg, "allowFrom"))
+    result: dict[str, Any] = {"enabled": True}
+    if bot_token:
+        result["bot_token"] = bot_token
+    if app_token:
+        result["app_token"] = app_token
+    if allow_from:
+        result["allow_from"] = allow_from
+    _apply_access_control(result, oc_cfg)
+    return result
+
+
 def _extract_matrix(oc_cfg: dict, env: dict[str, str]) -> dict:
-    token = _resolve_token(oc_cfg.get("accessToken"), env)
-    homeserver = oc_cfg.get("homeserver")
-    allow_from = _map_allow_from(oc_cfg.get("allowFrom"))
+    token = _resolve_token(_get_channel_field(oc_cfg, "accessToken"), env)
+    homeserver = _get_channel_field(oc_cfg, "homeserver")
+    allow_from = _map_allow_from(_get_channel_field(oc_cfg, "allowFrom"))
     result: dict[str, Any] = {"enabled": True}
     if token:
         result["access_token"] = token
@@ -104,9 +139,12 @@ def _extract_matrix(oc_cfg: dict, env: dict[str, str]) -> dict:
 
 
 def _extract_mattermost(oc_cfg: dict, env: dict[str, str]) -> dict:
-    token = _resolve_token(oc_cfg.get("botToken"), env)
-    url = oc_cfg.get("baseUrl") or oc_cfg.get("url")
-    allow_from = _map_allow_from(oc_cfg.get("allowFrom"))
+    token = _resolve_token(_get_channel_field(oc_cfg, "botToken"), env)
+    url = _get_channel_field(oc_cfg, "baseUrl") or _get_channel_field(
+        oc_cfg,
+        "url",
+    )
+    allow_from = _map_allow_from(_get_channel_field(oc_cfg, "allowFrom"))
     result: dict[str, Any] = {"enabled": True}
     if token:
         result["bot_token"] = token
@@ -119,8 +157,8 @@ def _extract_mattermost(oc_cfg: dict, env: dict[str, str]) -> dict:
 
 
 def _extract_imessage(oc_cfg: dict, env: dict[str, str]) -> dict:
-    del env  # unused but kept for uniform extractor signature
-    allow_from = _map_allow_from(oc_cfg.get("allowFrom"))
+    del env
+    allow_from = _map_allow_from(_get_channel_field(oc_cfg, "allowFrom"))
     result: dict[str, Any] = {"enabled": True}
     if allow_from:
         result["allow_from"] = allow_from
@@ -131,6 +169,7 @@ def _extract_imessage(oc_cfg: dict, env: dict[str, str]) -> dict:
 _CHANNEL_EXTRACTORS = {
     "telegram": _extract_telegram,
     "discord": _extract_discord,
+    "slack": _extract_slack,
     "matrix": _extract_matrix,
     "mattermost": _extract_mattermost,
     "imessage": _extract_imessage,

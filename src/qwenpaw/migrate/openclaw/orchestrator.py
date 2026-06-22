@@ -20,7 +20,7 @@ from .mcp import plan_mcp_migration
 from .channels import plan_channel_migration
 from .cron import plan_cron_migration
 from .history import plan_history_migration
-from .skills import plan_skill_report
+from .skills import plan_skill_migration
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,7 @@ ALL_CATEGORIES = {
     "channels",
     "cron",
     "history",
+    "skills",
 }
 
 
@@ -106,13 +107,16 @@ def run_migration(
             target_workspace,
             overwrite,
         ),
+        "skills": lambda: plan_skill_migration(
+            source,
+            target_workspace,
+            overwrite,
+        ),
     }
 
     for name, converter_fn in converters.items():
         if name in active:
             plan.items.extend(converter_fn())
-
-    plan.items.extend(plan_skill_report(source))
 
     _print_preview(plan)
 

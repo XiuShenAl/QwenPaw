@@ -38,14 +38,14 @@ class TestPlanMemoryMigration:
         assert mem_items[0].status == ItemStatus.OK
 
         mem_items[0].write_fn()
-        assert (target_ws / "MEMORY.md").read_text() == "remember this"
+        assert "remember this" in (target_ws / "MEMORY.md").read_text()
 
-    def test_memory_dir_bulk_copy(self, tmp_path: Path):
+    def test_memory_dir_merge(self, tmp_path: Path):
         src_ws = tmp_path / "source" / "ws"
         mem_dir = src_ws / "memory"
         mem_dir.mkdir(parents=True)
-        (mem_dir / "topic_a.md").write_text("topic a")
-        (mem_dir / "topic_b.md").write_text("topic b")
+        (mem_dir / "topic_a.md").write_text("topic a content")
+        (mem_dir / "topic_b.md").write_text("topic b content")
         target_ws = tmp_path / "target" / "ws"
         target_ws.mkdir(parents=True)
         archive = tmp_path / "archive"
@@ -59,15 +59,15 @@ class TestPlanMemoryMigration:
         dir_items = [
             i
             for i in items
-            if "memory/" in i.source_path or "memory\\" in i.source_path
+            if "memory" in i.source_path and "MEMORY" not in i.source_path
         ]
-        assert len(dir_items) == 2
-        assert all(i.status == ItemStatus.OK for i in dir_items)
+        assert len(dir_items) == 1
+        assert dir_items[0].status == ItemStatus.OK
 
-        for item in dir_items:
-            item.write_fn()
-        assert (target_ws / "memory" / "topic_a.md").read_text() == "topic a"
-        assert (target_ws / "memory" / "topic_b.md").read_text() == "topic b"
+        dir_items[0].write_fn()
+        result = (target_ws / "MEMORY.md").read_text()
+        assert "topic a content" in result
+        assert "topic b content" in result
 
     def test_dreams_archived(self, tmp_path: Path):
         src_ws = tmp_path / "source" / "ws"
@@ -90,13 +90,13 @@ class TestPlanMemoryMigration:
         archived[0].write_fn()
         assert (archive / "DREAMS.md").read_text() == "dreams"
 
-    def test_conflict_existing_memory_md(self, tmp_path: Path):
+    def test_merge_existing_memory_md(self, tmp_path: Path):
         src_ws = tmp_path / "source" / "ws"
         src_ws.mkdir(parents=True)
         (src_ws / "MEMORY.md").write_text("new memory")
         target_ws = tmp_path / "target" / "ws"
         target_ws.mkdir(parents=True)
-        (target_ws / "MEMORY.md").write_text("existing")
+        (target_ws / "MEMORY.md").write_text("existing memory")
         archive = tmp_path / "archive"
 
         items = plan_memory_migration(
@@ -106,7 +106,8 @@ class TestPlanMemoryMigration:
             overwrite=False,
         )
         mem_items = [i for i in items if "MEMORY.md" in i.source_path]
-        assert mem_items[0].status == ItemStatus.CONFLICT
+        assert mem_items[0].status == ItemStatus.WARN
+        assert "Merge" in mem_items[0].detail
 
     def test_empty_source(self, tmp_path: Path):
         src_ws = tmp_path / "source" / "ws"

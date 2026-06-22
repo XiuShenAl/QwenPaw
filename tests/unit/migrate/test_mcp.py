@@ -206,3 +206,33 @@ class TestPlanMcpMigration:
             data["mcp"]["clients"]["auth-server"]["headers"]["Authorization"]
             == "Bearer tok"
         )
+
+    def test_tool_filter_migration(self, tmp_path: Path):
+        """OpenClaw uses ``toolFilter`` for MCP tool filtering."""
+        source_ws = tmp_path / "source"
+        source_ws.mkdir()
+        target_ws = tmp_path / "target"
+        target_ws.mkdir()
+
+        config = {
+            "mcp": {
+                "servers": {
+                    "filtered": {
+                        "command": "node",
+                        "args": ["server.js"],
+                        "toolFilter": {
+                            "include": ["search_*"],
+                            "exclude": ["admin_*"],
+                        },
+                    },
+                },
+            },
+        }
+        source = _make_source(source_ws, source_ws, config=config)
+        items = plan_mcp_migration(source, target_ws, overwrite=False)
+        assert len(items) == 1
+        items[0].write_fn()
+        data = json.loads((target_ws / "agent.json").read_text())
+        client = data["mcp"]["clients"]["filtered"]
+        assert client["tools"]["include"] == ["search_*"]
+        assert client["tools"]["exclude"] == ["admin_*"]

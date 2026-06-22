@@ -34,11 +34,18 @@ def detect(source: Path | None = None, agent_id: str = "main") -> SourceInfo:
 
     cron_path = _resolve_cron_path(root, config)
 
+    env_from_config = _parse_config_env(config)
+    merged_env = {**env_from_config, **env}
+
+    auth_keys = _parse_auth_profiles(root, agent_id)
+    for k, v in auth_keys.items():
+        merged_env.setdefault(k, v)
+
     return SourceInfo(
         root=root,
         flavor=flavor,
         config=config,
-        env=env,
+        env=merged_env,
         workspace=workspace,
         agent_id=agent_id,
         sessions_dir=sessions_dir,
@@ -51,6 +58,9 @@ def _find_root(source: Path | None) -> Path:
         resolved = Path(source).expanduser().resolve()
         if resolved.is_dir():
             return resolved
+        raise FileNotFoundError(
+            f"OpenClaw directory not found: {resolved}",
+        )
     for candidate in _CANDIDATE_ROOTS:
         path = Path(candidate).expanduser().resolve()
         if path.is_dir():
@@ -111,6 +121,64 @@ def _resolve_cron_path(root: Path, config: dict) -> Path | None:
     return None
 
 
+def _parse_config_env(config: dict) -> dict[str, str]:
+    """Extract env vars from openclaw.json ``env`` / ``env.vars``."""
+    json_env = config.get("env")
+    if not isinstance(json_env, dict):
+        return {}
+    result: dict[str, str] = {}
+    sources = [json_env]
+    env_vars = json_env.get("vars")
+    if isinstance(env_vars, dict):
+        sources.append(env_vars)
+    for src in sources:
+        for key, val in src.items():
+            if key == "vars":
+                continue
+            if isinstance(val, str) and val.strip():
+                result.setdefault(key, val.strip())
+    return result
+
+
+def _parse_auth_profiles(root: Path, agent_id: str) -> dict[str, str]:
+    """Extract API keys from ``agents/<id>/agent/auth-profiles.json``."""
+    auth_path = root / "agents" / agent_id / "agent" / "auth-profiles.json"
+    if not auth_path.is_file():
+        return {}
+    result: dict[str, str] = {}
+    _name_to_env = {
+        "openrouter": "OPENROUTER_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "deepseek": "DEEPSEEK_API_KEY",
+        "gemini": "GEMINI_API_KEY",
+    }
+    try:
+        import json
+
+        data = json.loads(auth_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return result
+        profiles = (
+            data.get("profiles", data)
+            if isinstance(data.get("profiles"), dict)
+            else data
+        )
+        for name, entry in profiles.items():
+            if not isinstance(entry, dict):
+                continue
+            api_key = entry.get("key", "") or entry.get("apiKey", "")
+            if not isinstance(api_key, str) or not api_key.strip():
+                continue
+            for pattern, env_var in _name_to_env.items():
+                if pattern in name.lower():
+                    result.setdefault(env_var, api_key.strip())
+                    break
+    except (json.JSONDecodeError, OSError):
+        pass
+    return result
+
+
 def _resolve_workspace(root: Path, config: dict, agent_id: str) -> Path:
     try:
         ws = config["agents"]["defaults"]["workspace"]
@@ -122,9 +190,12 @@ def _resolve_workspace(root: Path, config: dict, agent_id: str) -> Path:
 
     candidates = [
         root / "agents" / agent_id / "workspace",
+        root / f"workspace-{agent_id}",
+        root / "workspace-main",
         root / "workspace",
+        root / "workspace.default",
     ]
     for candidate in candidates:
         if candidate.is_dir():
             return candidate
-    return candidates[-1]
+    return root / "workspace"

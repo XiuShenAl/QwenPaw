@@ -104,7 +104,7 @@ class TestRunMigrationDryRun:
             "plan_channel_migration",
             "plan_cron_migration",
             "plan_history_migration",
-            "plan_skill_report",
+            "plan_skill_migration",
         ]
         for name in converters:
             monkeypatch.setattr(
@@ -161,16 +161,13 @@ class TestRunMigrationDryRun:
             "plan_channel_migration",
             "plan_cron_migration",
             "plan_history_migration",
+            "plan_skill_migration",
         ]
         for name in converters:
             monkeypatch.setattr(
                 f"qwenpaw.migrate.openclaw.orchestrator.{name}",
                 _track(name),
             )
-        monkeypatch.setattr(
-            "qwenpaw.migrate.openclaw.orchestrator.plan_skill_report",
-            lambda *_a, **_kw: [],
-        )
 
         run_migration(
             source_path=tmp_path,

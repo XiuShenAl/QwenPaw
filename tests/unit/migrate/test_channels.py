@@ -47,7 +47,14 @@ class TestMapAllowFrom:
         assert _map_allow_from(["123", "456", "*"]) == ["123", "456"]
 
     def test_empty_input(self):
-        assert _map_allow_from(None) == []
+        assert not _map_allow_from(None)
+
+    def test_strips_telegram_prefix(self):
+        assert _map_allow_from(["tg:123", "telegram:456", "789"]) == [
+            "123",
+            "456",
+            "789",
+        ]
 
 
 class TestExtractTelegram:
@@ -83,7 +90,7 @@ class TestPlanChannelMigration:
         target_ws = tmp_path / "target"
         target_ws.mkdir()
 
-        config = {"channels": {"slack": {"token": "xoxb-123"}}}
+        config = {"channels": {"whatsapp": {"allowFrom": ["123"]}}}
         source = _make_source(source_ws, source_ws, config=config)
         items = plan_channel_migration(source, target_ws, overwrite=False)
 

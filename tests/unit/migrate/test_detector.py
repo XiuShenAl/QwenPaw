@@ -143,7 +143,7 @@ class TestDetect:
             info.config["agents"]["defaults"]["model"]
             == "anthropic/claude-sonnet-4-6"
         )
-        assert info.env == {"OPENAI_API_KEY": "test-key"}
+        assert info.env["OPENAI_API_KEY"] == "test-key"
         assert info.workspace == ws
         assert info.agent_id == "main"
         assert info.sessions_dir is None

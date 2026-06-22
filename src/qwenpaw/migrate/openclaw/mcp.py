@@ -56,6 +56,20 @@ def _build_client_config(srv: dict) -> dict:
     if cwd:
         client_config["cwd"] = cwd
 
+    if srv.get("timeout"):
+        client_config["timeout"] = srv["timeout"]
+    if srv.get("connectTimeout"):
+        client_config["connect_timeout"] = srv["connectTimeout"]
+
+    tools_cfg = srv.get("toolFilter") or srv.get("tools") or {}
+    if tools_cfg.get("include") or tools_cfg.get("exclude"):
+        tool_filter: dict = {}
+        if tools_cfg.get("include"):
+            tool_filter["include"] = tools_cfg["include"]
+        if tools_cfg.get("exclude"):
+            tool_filter["exclude"] = tools_cfg["exclude"]
+        client_config["tools"] = tool_filter
+
     return client_config
 
 

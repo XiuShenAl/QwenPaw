@@ -27,6 +27,31 @@ class SourceInfo:
     sessions_dir: Path | None = field(default=None)
     cron_path: Path | None = field(default=None)
 
+    def source_candidate(self, *relative_paths: str) -> Path | None:
+        """Find first existing path among workspace-relative candidates.
+
+        Tries each path against the resolved workspace, then falls back to
+        ``workspace-main/`` and ``workspace.default/`` variants (OpenClaw
+        renamed ``workspace/`` in recent versions).
+        """
+        for rel in relative_paths:
+            candidate = self.root / rel
+            if candidate.exists():
+                return candidate
+            if rel.startswith("workspace/"):
+                suffix = rel[len("workspace/") :]
+                for variant in ("workspace-main", "workspace.default"):
+                    alt = self.root / variant / suffix
+                    if alt.exists():
+                        return alt
+        for rel in relative_paths:
+            if rel.startswith("workspace/"):
+                suffix = rel[len("workspace/") :]
+                alt = self.workspace / suffix
+                if alt.exists():
+                    return alt
+        return None
+
 
 @dataclass
 class MigrationItem:

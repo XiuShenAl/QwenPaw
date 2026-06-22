@@ -159,10 +159,15 @@ class TestPlanProviderMigration:
             overwrite=False,
         )
         secret_items = [i for i in items if i.category == "secret"]
-        assert len(secret_items) == 2
-        assert all(i.status == ItemStatus.OK for i in secret_items)
-        providers = {i.target_path.split(":")[-1] for i in secret_items}
-        assert providers == {"anthropic", "openai"}
+        assert len(secret_items) == 1
+        assert secret_items[0].status == ItemStatus.OK
+        assert "ANTHROPIC_API_KEY" in secret_items[0].detail
+        assert "OPENAI_API_KEY" in secret_items[0].detail
+
+        secret_items[0].write_fn()
+        env_content = (target_ws / ".env").read_text()
+        assert "ANTHROPIC_API_KEY=sk-ant-xxx" in env_content
+        assert "OPENAI_API_KEY=sk-oai-xxx" in env_content
 
     def test_api_key_not_included_without_secrets(self, tmp_path: Path):
         src_ws = tmp_path / "source" / "ws"
@@ -220,27 +225,24 @@ class TestPlanProviderMigration:
             config={
                 "models": {
                     "providers": {
-                        "custom-llm": {
-                            "baseUrl": "https://llm.example.com/v1",
-                            "apiKey": {"source": "env", "id": "CUSTOM_KEY"},
+                        "openai": {
+                            "baseUrl": "https://api.openai.com/v1",
+                            "apiKey": {"source": "env", "id": "MY_OPENAI_KEY"},
                         },
                     },
                 },
             },
-            env={"CUSTOM_KEY": "resolved-secret"},
+            env={"MY_OPENAI_KEY": "resolved-secret"},
         )
 
         items = plan_provider_migration(
             source,
             target_ws,
-            migrate_secrets=False,
+            migrate_secrets=True,
             overwrite=False,
         )
-        custom = [i for i in items if "custom_providers" in i.target_path]
-        assert len(custom) == 1
-        custom[0].write_fn()
-        agent_json = json.loads((target_ws / "agent.json").read_text())
-        assert (
-            agent_json["custom_providers"]["custom-llm"]["api_key"]
-            == "resolved-secret"
-        )
+        secret = [i for i in items if i.category == "secret"]
+        assert len(secret) == 1
+        secret[0].write_fn()
+        env_content = (target_ws / ".env").read_text()
+        assert "resolved-secret" in env_content

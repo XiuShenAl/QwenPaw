@@ -58,7 +58,10 @@ def plan_persona_migration(
     ws = source.workspace
 
     for name in ("SOUL.md", "AGENTS.md"):
-        src = ws / name
+        src = source.source_candidate(
+            f"workspace/{name}",
+            f"workspace.default/{name}",
+        ) or (ws / name)
         dst = target_workspace / name
         if not src.exists():
             items.append(
@@ -94,8 +97,14 @@ def plan_persona_migration(
         )
 
     # IDENTITY.md + USER.md → PROFILE.md
-    identity_src = ws / "IDENTITY.md"
-    user_src = ws / "USER.md"
+    identity_src = source.source_candidate(
+        "workspace/IDENTITY.md",
+        "workspace.default/IDENTITY.md",
+    ) or (ws / "IDENTITY.md")
+    user_src = source.source_candidate(
+        "workspace/USER.md",
+        "workspace.default/USER.md",
+    ) or (ws / "USER.md")
     profile_dst = target_workspace / "PROFILE.md"
     identity_md = (
         identity_src.read_text(encoding="utf-8")
@@ -142,7 +151,10 @@ def plan_persona_migration(
 
     # TOOLS.md, BOOTSTRAP.md → archive
     for name in ("TOOLS.md", "BOOTSTRAP.md", "HEARTBEAT.md"):
-        src = ws / name
+        src = source.source_candidate(
+            f"workspace/{name}",
+            f"workspace.default/{name}",
+        ) or (ws / name)
         if not src.exists():
             continue
         dst = archive_dir / name
