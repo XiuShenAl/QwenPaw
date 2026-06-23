@@ -18,11 +18,16 @@ class MissionMode(AgentMode):
     name = "mission"
 
     def hooks(self) -> list[HookBase]:
-        from .hooks import MissionStateLoadHook, MissionStateSaveHook
+        from .hooks import (
+            MissionExecutionHook,
+            MissionStateLoadHook,
+            MissionStateSaveHook,
+        )
 
         return [
             MissionStateLoadHook(owner_mode=self),
             MissionStateSaveHook(owner_mode=self),
+            MissionExecutionHook(owner_mode=self),
         ]
 
     def prompt_contributors(self) -> list:
@@ -31,7 +36,15 @@ class MissionMode(AgentMode):
         return [MissionPromptContributor(owner_mode=self)]
 
     def is_active(self, ctx: HookContext) -> bool:
-        return bool((ctx.session_state or {}).get("mission_active"))
+        # Check session state (subsequent requests)
+        if (ctx.session_state or {}).get("mission_active"):
+            return True
+        # Check extras from slash command adapter (first request)
+        extras = getattr(ctx, "extras", None) or {}
+        mission_start = extras.get("_mission_start")
+        if mission_start and mission_start.get("mission_active"):
+            return True
+        return False
 
 
 __all__ = ["MissionMode"]

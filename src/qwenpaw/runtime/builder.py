@@ -306,6 +306,7 @@ class AgentBuilder:
                 "env_context": self._build_env_context(ctx, agent_config),
                 "agent_config": agent_config,
                 "driver_prompt_hints": self._get_driver_prompt_hints(ctx),
+                **self._get_mission_prompt_extras(ctx),
             },
         )
 
@@ -513,6 +514,37 @@ class AgentBuilder:
         extras = getattr(ctx, "extras", {}) or {}
         hints = extras.get("driver_prompt_hints") or []
         return [str(hint) for hint in hints if hint]
+
+    @staticmethod
+    def _get_mission_prompt_extras(ctx: Any) -> dict[str, Any]:
+        """Extract mission state for prompt contributors."""
+        result: dict[str, Any] = {}
+        extras = getattr(ctx, "extras", None) or {}
+
+        # From slash command adapter (first request)
+        mission_start = extras.get("_mission_start")
+        if mission_start:
+            result["_mission_start"] = mission_start
+
+        # From session state (subsequent requests)
+        session_state = getattr(ctx, "session_state", None) or {}
+        if session_state.get("mission_active"):
+            result["mission_state"] = {
+                "mission_active": True,
+                "mission_loop_dir": session_state.get(
+                    "mission_loop_dir",
+                    "",
+                ),
+                "mission_current_phase": session_state.get(
+                    "mission_current_phase",
+                    "",
+                ),
+                "mission_max_iterations": session_state.get(
+                    "mission_max_iterations",
+                    20,
+                ),
+            }
+        return result
 
     @staticmethod
     async def _collect_driver_tools_and_prompts(

@@ -117,11 +117,21 @@ class Runtime:
 
             if not skip_agent:
                 # --- [fixed 3] execute agent ---
-                async for ev in envelope.emit_response_created():
-                    yield ev
-                executor = AgentExecutor(ctx.agent, envelope)
-                async for ev in executor.run(ctx.input_msgs):
-                    yield ev
+                # Check for mission Phase 2 execution override
+                _mission_exec = (ctx.extras or {}).get("_mission_phase2")
+                if _mission_exec:
+                    async for ev in self._run_mission_phase2(
+                        ctx,
+                        envelope,
+                        _mission_exec,
+                    ):
+                        yield ev
+                else:
+                    async for ev in envelope.emit_response_created():
+                        yield ev
+                    executor = AgentExecutor(ctx.agent, envelope)
+                    async for ev in executor.run(ctx.input_msgs):
+                        yield ev
 
             # --- [phase 6] POST_RESPONSE ---
             await hooks.run(Phase.POST_RESPONSE, ctx)
@@ -169,6 +179,44 @@ class Runtime:
             await hooks.run(Phase.FINALLY, ctx)
 
     # ----------------------------------------------------------------- helpers
+
+    async def _run_mission_phase2(
+        self,
+        ctx: Any,
+        envelope: Any,
+        mission_exec: dict,
+    ) -> AsyncGenerator[Any, None]:
+        """Drive mission Phase 2 iteration loop as an alternate executor."""
+        from pathlib import Path
+        from ..agents.mission.mission_runner import run_mission_phase2
+
+        loop_dir = Path(mission_exec["loop_dir"])
+        max_iterations = mission_exec.get("max_iterations", 20)
+        agent_id = getattr(ctx, "agent_id", "default")
+
+        async for ev in envelope.emit_response_created():
+            yield ev
+
+        async for msg, _is_last in run_mission_phase2(
+            agent=ctx.agent,
+            msgs=ctx.input_msgs,
+            loop_dir=loop_dir,
+            max_iterations=max_iterations,
+            agent_id=agent_id,
+        ):
+            async for ev in envelope.from_msg(msg):
+                yield ev
+
+        # Update session state to reflect mission completion
+        session_state = ctx.session_state or {}
+        from ..agents.mission.state import read_loop_config
+
+        cfg = read_loop_config(loop_dir)
+        phase = cfg.get("current_phase", "")
+        if phase in ("completed", "max_iterations_reached"):
+            session_state["mission_active"] = False
+        session_state["mission_current_phase"] = phase
+        ctx.session_state = session_state
 
     @staticmethod
     def _normalize(request: Any) -> Any:

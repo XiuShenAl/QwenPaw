@@ -625,20 +625,117 @@ async def _skill_fallback_handler(
 
 
 # ======================================================================
+# Mission command adapter
+# ======================================================================
+
+
+def _make_mission_adapter() -> CommandSpec:
+    """Wrap :func:`handle_mission_command` as a :class:`CommandSpec`.
+
+    Return semantics:
+    - ``Msg`` for info sub-commands (status, list, help) — short-circuits.
+    - ``None`` for a new mission start — lets the agent run with the
+      rewritten prompt while signalling mission metadata via ``ctx.extras``.
+    """
+
+    async def _handler(ctx: Any, args: str) -> "Msg | None":
+        from agentscope.message import Msg, TextBlock
+
+        from ..agents.mission.handler import handle_mission_command
+
+        workspace = getattr(ctx, "workspace", None)
+        workspace_dir = (
+            getattr(workspace, "workspace_dir", None) if workspace else None
+        )
+        if workspace_dir is None:
+            workspace_dir = getattr(ctx, "workspace_dir", None)
+        if workspace_dir is None:
+            return Msg(
+                name="system",
+                role="assistant",
+                content=[
+                    TextBlock(
+                        type="text",
+                        text="Mission Mode requires a workspace directory.",
+                    ),
+                ],
+            )
+
+        workspace_dir = Path(workspace_dir)
+        agent_id = getattr(ctx, "agent_id", "default") or "default"
+        session_id = getattr(ctx, "session_id", "") or ""
+
+        full_query = f"/mission {args}" if args else "/mission"
+
+        def _rewrite_fn(
+            msgs: list,  # pylint: disable=unused-argument
+            new_text: str,
+        ) -> None:
+            """Replace user message content for mission prompt injection."""
+            ctx.input_msgs.clear()
+            ctx.input_msgs.append(
+                Msg(
+                    name="user",
+                    role="user",
+                    content=[TextBlock(type="text", text=new_text)],
+                ),
+            )
+
+        result = await handle_mission_command(
+            query=full_query,
+            msgs=ctx.input_msgs,
+            workspace_dir=workspace_dir,
+            agent_id=agent_id,
+            rewrite_fn=_rewrite_fn,
+            session_id=session_id,
+        )
+
+        if isinstance(result, str):
+            return Msg(
+                name="system",
+                role="assistant",
+                content=[TextBlock(type="text", text=result)],
+            )
+
+        if isinstance(result, dict):
+            if not hasattr(ctx, "extras") or ctx.extras is None:
+                ctx.extras = {}
+            ctx.extras["_mission_start"] = {
+                "mission_active": True,
+                "mission_loop_dir": result.get("loop_dir", ""),
+                "mission_max_iterations": result.get("max_iterations", 20),
+                "mission_current_phase": "prd_generation",
+            }
+            return None
+
+        return None
+
+    return CommandSpec(
+        name="mission",
+        handler=_handler,
+        category="conversation",
+        help_text="Launch mission mode for complex autonomous tasks",
+    )
+
+
+# ======================================================================
 # Factory
 # ======================================================================
 
 
 def collect_builtin_command_specs() -> list[CommandSpec]:
-    """Return all built-in command specs (daemon, control, conversation).
+    """Return all built-in command specs.
 
-    These are registered into each workspace's :class:`SlashCommandRegistry`
-    via ``bootstrap_plugins(builtin_command_specs=...)``.
+    Includes daemon, control, conversation, and mission commands.
+    These are registered into each workspace's
+    :class:`SlashCommandRegistry` via
+    ``bootstrap_plugins(builtin_command_specs=...)``.
     """
     specs: list[CommandSpec] = []
     specs.extend(_collect_daemon_specs())
     specs.extend(_collect_control_specs())
     specs.extend(_collect_conversation_specs())
+    specs.append(_make_mission_adapter())
     return specs
 
 

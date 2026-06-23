@@ -866,3 +866,53 @@ def build_master_prompt(
         verifier_prompt_template=verifier_tpl,
         **gsec,
     )
+
+
+def build_mission_system_prompt(
+    mission_state: dict,
+    *,
+    workspace_dir: str = "",
+    agent_id: str = "default",
+) -> str | None:
+    """Build a mission-mode system prompt supplement from session state.
+
+    For Phase 1 (prd_generation), produces a brief context header.
+    For Phase 2 (execution), produces the full master prompt so the
+    agent knows how to orchestrate workers and verify results.
+
+    Args:
+        mission_state: Dict with keys like ``mission_loop_dir``,
+            ``mission_current_phase``, ``mission_max_iterations``.
+        workspace_dir: Workspace root path (for master prompt rendering).
+        agent_id: Current agent identifier.
+
+    Returns:
+        A prompt string to inject, or None if state is insufficient.
+    """
+    loop_dir = mission_state.get("mission_loop_dir", "")
+    if not loop_dir:
+        return None
+
+    phase = mission_state.get("mission_current_phase", "prd_generation")
+    max_iterations = mission_state.get("mission_max_iterations", 20)
+
+    if phase in ("execution_confirmed", "execution"):
+        return build_master_prompt(
+            loop_dir=loop_dir,
+            agent_id=agent_id,
+            max_iterations=max_iterations,
+            workspace_dir=workspace_dir or loop_dir,
+        )
+
+    # Phase 1: brief context header (the full prompt is in the user message
+    # via rewrite_fn from the slash command adapter)
+    lines = [
+        "You are currently in **Mission Mode** (Phase 1: Task Decomposition).",
+        f"- Loop directory: `{loop_dir}`",
+        f"- Max iterations: {max_iterations}",
+        "",
+        "Explore the workspace and generate prd.json with user stories. "
+        "After writing prd.json, report to the user and wait for "
+        "confirmation.",
+    ]
+    return "\n".join(lines)
