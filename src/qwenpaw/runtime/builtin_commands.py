@@ -667,13 +667,14 @@ def _make_mission_adapter() -> CommandSpec:
 
         full_query = f"/mission {args}" if args else "/mission"
 
-        def _rewrite_fn(
-            msgs: list,  # pylint: disable=unused-argument
-            new_text: str,
-        ) -> None:
-            """Replace user message content for mission prompt injection."""
-            ctx.input_msgs.clear()
-            ctx.input_msgs.append(
+        def _rewrite_fn(msgs: list, new_text: str) -> None:
+            """Replace user message content for mission prompt injection.
+
+            ``msgs`` is the same list as ``ctx.input_msgs`` — mutating it
+            in-place is the intended mechanism for prompt rewriting.
+            """
+            msgs.clear()
+            msgs.append(
                 Msg(
                     name="user",
                     role="user",
@@ -703,7 +704,7 @@ def _make_mission_adapter() -> CommandSpec:
             ctx.extras["_mission_start"] = {
                 "mission_active": True,
                 "mission_loop_dir": result.get("loop_dir", ""),
-                "mission_max_iterations": result.get("max_iterations", 20),
+                "mission_max_iterations": result.get("max_iterations"),
                 "mission_current_phase": "prd_generation",
             }
             return None

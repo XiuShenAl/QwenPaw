@@ -518,6 +518,8 @@ class AgentBuilder:
     @staticmethod
     def _get_mission_prompt_extras(ctx: Any) -> dict[str, Any]:
         """Extract mission state for prompt contributors."""
+        from ..agents.mission.constants import DEFAULT_MAX_ITERATIONS
+
         result: dict[str, Any] = {}
         extras = getattr(ctx, "extras", None) or {}
 
@@ -541,7 +543,7 @@ class AgentBuilder:
                 ),
                 "mission_max_iterations": session_state.get(
                     "mission_max_iterations",
-                    20,
+                    DEFAULT_MAX_ITERATIONS,
                 ),
             }
         return result

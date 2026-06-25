@@ -38,6 +38,7 @@ from typing import Any, AsyncGenerator
 from agentscope.message import Msg, TextBlock
 
 from .state import read_loop_config, read_prd, write_loop_config
+from .constants import DEFAULT_MAX_ITERATIONS
 from ...config.config import load_agent_config
 
 logger = logging.getLogger(__name__)
@@ -337,7 +338,7 @@ async def run_mission_phase1(
     agent: Any,
     msgs: list,
     loop_dir: Path,
-    max_iterations: int = 20,
+    max_iterations: int = DEFAULT_MAX_ITERATIONS,
     agent_id: str = None,
 ) -> AsyncGenerator[tuple[Msg, bool], None]:
     """Execute Phase 1 (PRD generation / user follow-up).
@@ -507,7 +508,7 @@ async def run_mission_phase2(
     agent: Any,
     msgs: list,
     loop_dir: Path,
-    max_iterations: int = 20,
+    max_iterations: int = DEFAULT_MAX_ITERATIONS,
     agent_id: str = None,
 ) -> AsyncGenerator[tuple[Msg, bool], None]:
     """Execute Phase 2 (iteration loop with code-level control).

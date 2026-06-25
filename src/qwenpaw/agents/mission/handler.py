@@ -17,6 +17,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from .constants import DEFAULT_MAX_ITERATIONS
 from .prompts import build_master_prompt
 from .state import (
     create_loop_dir,
@@ -44,7 +45,7 @@ MISSION_COMMAND_DESCRIPTIONS: dict[str, str] = {
 }
 
 # Defaults and limits for --max-iterations
-_DEFAULT_MAX_ITERATIONS = 20
+_DEFAULT_MAX_ITERATIONS = DEFAULT_MAX_ITERATIONS
 _MIN_MAX_ITERATIONS = 1
 _MAX_MAX_ITERATIONS = 100
 

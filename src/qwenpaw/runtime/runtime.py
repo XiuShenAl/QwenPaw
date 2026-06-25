@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from pathlib import Path
 from typing import Any, AsyncGenerator
 
 from .builder import AgentBuilder
@@ -186,37 +187,47 @@ class Runtime:
         envelope: Any,
         mission_exec: dict,
     ) -> AsyncGenerator[Any, None]:
-        """Drive mission Phase 2 iteration loop as an alternate executor."""
-        from pathlib import Path
+        """Drive mission Phase 2 iteration loop as alternate executor.
+
+        Note: run_mission_phase2 uses agent._reply() internally
+        (non-streaming). Each iteration's result is emitted as a
+        complete Msg. A follow-up should migrate to reply_stream
+        for token-level streaming.
+        """
+        # TODO(streaming): Replace agent._reply() with reply_stream in
+        # mission_runner.py to enable token-level streaming for Phase 2.
         from ..agents.mission.mission_runner import run_mission_phase2
+        from ..agents.mission.state import read_loop_config
+        from ..agents.mission.constants import DEFAULT_MAX_ITERATIONS
 
         loop_dir = Path(mission_exec["loop_dir"])
-        max_iterations = mission_exec.get("max_iterations", 20)
+        max_iterations = mission_exec.get(
+            "max_iterations",
+            DEFAULT_MAX_ITERATIONS,
+        )
         agent_id = getattr(ctx, "agent_id", "default")
 
-        async for ev in envelope.emit_response_created():
-            yield ev
-
-        async for msg, _is_last in run_mission_phase2(
-            agent=ctx.agent,
-            msgs=ctx.input_msgs,
-            loop_dir=loop_dir,
-            max_iterations=max_iterations,
-            agent_id=agent_id,
-        ):
-            async for ev in envelope.from_msg(msg):
+        try:
+            async for ev in envelope.emit_response_created():
                 yield ev
 
-        # Update session state to reflect mission completion
-        session_state = ctx.session_state or {}
-        from ..agents.mission.state import read_loop_config
-
-        cfg = read_loop_config(loop_dir)
-        phase = cfg.get("current_phase", "")
-        if phase in ("completed", "max_iterations_reached"):
-            session_state["mission_active"] = False
-        session_state["mission_current_phase"] = phase
-        ctx.session_state = session_state
+            async for msg, _is_last in run_mission_phase2(
+                agent=ctx.agent,
+                msgs=ctx.input_msgs,
+                loop_dir=loop_dir,
+                max_iterations=max_iterations,
+                agent_id=agent_id,
+            ):
+                async for ev in envelope.from_msg(msg):
+                    yield ev
+        finally:
+            session_state = ctx.session_state or {}
+            cfg = read_loop_config(loop_dir)
+            phase = cfg.get("current_phase", "")
+            if phase in ("completed", "max_iterations_reached"):
+                session_state["mission_active"] = False
+            session_state["mission_current_phase"] = phase
+            ctx.session_state = session_state
 
     @staticmethod
     def _normalize(request: Any) -> Any:

@@ -39,7 +39,10 @@ class MissionMode(AgentMode):
         # Check session state (subsequent requests)
         if (ctx.session_state or {}).get("mission_active"):
             return True
-        # Check extras from slash command adapter (first request)
+        # Check extras from slash command adapter (first request only).
+        # This is safe because extras is per-request — a new HookContext
+        # is created for every Runtime.run() invocation, so stale extras
+        # from a previous request cannot leak.
         extras = getattr(ctx, "extras", None) or {}
         mission_start = extras.get("_mission_start")
         if mission_start and mission_start.get("mission_active"):

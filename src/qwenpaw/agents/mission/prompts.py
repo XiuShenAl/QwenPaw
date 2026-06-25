@@ -7,6 +7,8 @@ See design/ralph/LICENSE for the full license text.
 """
 from __future__ import annotations
 
+from .constants import DEFAULT_MAX_ITERATIONS
+
 # ---------------------------------------------------------------------------
 # Master prompt — injected into the *main* agent that orchestrates the loop.
 # ---------------------------------------------------------------------------
@@ -825,7 +827,7 @@ def build_master_prompt(
     *,
     loop_dir: str,
     agent_id: str,
-    max_iterations: int = 20,
+    max_iterations: int = DEFAULT_MAX_ITERATIONS,
     verify_commands: str = "",
     prd_path: str = "",
     progress_path: str = "",
@@ -873,46 +875,97 @@ def build_mission_system_prompt(
     *,
     workspace_dir: str = "",
     agent_id: str = "default",
+    language: str = "en",
 ) -> str | None:
     """Build a mission-mode system prompt supplement from session state.
 
     For Phase 1 (prd_generation), produces a brief context header.
-    For Phase 2 (execution), produces the full master prompt so the
-    agent knows how to orchestrate workers and verify results.
+    For Phase 2 (execution), produces the full master prompt (including
+    worker/verifier templates with verify_commands and git_context read
+    from loop_config.json on disk).
 
     Args:
         mission_state: Dict with keys like ``mission_loop_dir``,
             ``mission_current_phase``, ``mission_max_iterations``.
         workspace_dir: Workspace root path (for master prompt rendering).
         agent_id: Current agent identifier.
+        language: Agent language setting (e.g. "en", "zh").
 
     Returns:
         A prompt string to inject, or None if state is insufficient.
     """
+    from pathlib import Path
+    from .state import read_loop_config
+
     loop_dir = mission_state.get("mission_loop_dir", "")
     if not loop_dir:
         return None
 
     phase = mission_state.get("mission_current_phase", "prd_generation")
-    max_iterations = mission_state.get("mission_max_iterations", 20)
+    max_iterations = mission_state.get(
+        "mission_max_iterations",
+        DEFAULT_MAX_ITERATIONS,
+    )
 
     if phase in ("execution_confirmed", "execution"):
+        cfg = read_loop_config(Path(loop_dir))
+        verify_commands = cfg.get("verify_commands", "")
+        git_context: dict | None = None
+        if cfg.get("git_installed"):
+            git_context = {
+                "git_installed": True,
+                "is_git_repo": cfg.get("is_git_repo", False),
+                "default_branch": cfg.get("default_branch", ""),
+                "repo_root": cfg.get("repo_root", ""),
+            }
         return build_master_prompt(
             loop_dir=loop_dir,
             agent_id=agent_id,
             max_iterations=max_iterations,
-            workspace_dir=workspace_dir or loop_dir,
+            verify_commands=verify_commands,
+            git_context=git_context,
+            workspace_dir=workspace_dir or cfg.get("workspace_dir", loop_dir),
         )
 
     # Phase 1: brief context header (the full prompt is in the user message
     # via rewrite_fn from the slash command adapter)
-    lines = [
-        "You are currently in **Mission Mode** (Phase 1: Task Decomposition).",
-        f"- Loop directory: `{loop_dir}`",
-        f"- Max iterations: {max_iterations}",
-        "",
-        "Explore the workspace and generate prd.json with user stories. "
-        "After writing prd.json, report to the user and wait for "
-        "confirmation.",
-    ]
-    return "\n".join(lines)
+    return _build_phase1_header(loop_dir, max_iterations, language)
+
+
+def _build_phase1_header(
+    loop_dir: str,
+    max_iterations: int,
+    language: str,
+) -> str:
+    """Build a localized Phase 1 system prompt header."""
+    if language.startswith("zh"):
+        # fmt: off
+        zh_instruction = (
+            "探索工作区并生成包含用户故事的 prd.json。"
+            + "生成 prd.json 后，向用户汇报并等待确认。"
+        )
+        # fmt: on
+        return "\n".join(
+            [
+                "你当前处于 **Mission Mode**（阶段 1：任务分解）。",
+                f"- 循环目录：`{loop_dir}`",
+                f"- 最大迭代次数：{max_iterations}",
+                "",
+                zh_instruction,
+            ],
+        )
+
+    # fmt: off
+    return "\n".join(
+        [
+            "You are in **Mission Mode** "
+            + "(Phase 1: Task Decomposition).",
+            f"- Loop directory: `{loop_dir}`",
+            f"- Max iterations: {max_iterations}",
+            "",
+            "Explore the workspace and generate prd.json "
+            + "with user stories. After writing prd.json, "
+            + "report to the user and wait for confirmation.",
+        ],
+    )
+    # fmt: on

@@ -4,12 +4,22 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from ..base import ModeGatedHook
 from ...runtime.hooks import HookContext, HookResult
 from ...runtime.phases import Phase
+from ...agents.mission.constants import DEFAULT_MAX_ITERATIONS
 
 logger = logging.getLogger(__name__)
+
+_TERMINAL_PHASES = frozenset(
+    (
+        "completed",
+        "max_iterations_reached",
+        "aborted",
+    ),
+)
 
 
 class MissionStateLoadHook(ModeGatedHook):
@@ -58,25 +68,30 @@ class MissionStateSaveHook(ModeGatedHook):
             except Exception:
                 logger.debug("mission_state_save: failed", exc_info=True)
 
-        # Detect phase transitions by reading loop_config.json
-        loop_dir = ctx.session_state.get("mission_loop_dir", "")
-        if loop_dir:
-            try:
-                from pathlib import Path
-                from ...agents.mission.state import read_loop_config
+        # Detect Phase 1→2 transition by reading loop_config.json from disk.
+        # Only needed when current phase is prd_generation (waiting for user
+        # confirmation). Phase 2 updates are handled by _run_mission_phase2.
+        current_phase = ctx.session_state.get("mission_current_phase", "")
+        if current_phase == "prd_generation":
+            loop_dir = ctx.session_state.get("mission_loop_dir", "")
+            if loop_dir:
+                try:
+                    from ...agents.mission.state import read_loop_config
 
-                cfg = read_loop_config(Path(loop_dir))
-                if cfg:
-                    disk_phase = cfg.get("current_phase", "")
-                    if disk_phase:
-                        ctx.session_state["mission_current_phase"] = disk_phase
-                    if disk_phase in ("completed", "max_iterations_reached"):
-                        ctx.session_state["mission_active"] = False
-            except Exception:
-                logger.debug(
-                    "mission_state_save: phase detection failed",
-                    exc_info=True,
-                )
+                    cfg = read_loop_config(Path(loop_dir))
+                    if cfg:
+                        disk_phase = cfg.get("current_phase", "")
+                        if disk_phase:
+                            ctx.session_state[
+                                "mission_current_phase"
+                            ] = disk_phase
+                        if disk_phase in _TERMINAL_PHASES:
+                            ctx.session_state["mission_active"] = False
+                except Exception:
+                    logger.debug(
+                        "mission_state_save: phase detection failed",
+                        exc_info=True,
+                    )
 
         return HookResult()
 
@@ -117,8 +132,8 @@ class MissionExecutionHook(ModeGatedHook):
         if current_phase == "prd_generation" or not current_phase:
             return HookResult()
 
-        # Completed/aborted missions: clear flag, run normally
-        if current_phase in ("completed", "max_iterations_reached"):
+        # Terminal states: clear flag, run normally
+        if current_phase in _TERMINAL_PHASES:
             session_state["mission_active"] = False
             ctx.session_state = session_state
             return HookResult()
@@ -128,7 +143,7 @@ class MissionExecutionHook(ModeGatedHook):
             loop_dir = session_state.get("mission_loop_dir", "")
             max_iterations = session_state.get(
                 "mission_max_iterations",
-                20,
+                DEFAULT_MAX_ITERATIONS,
             )
             if loop_dir:
                 if ctx.extras is None:

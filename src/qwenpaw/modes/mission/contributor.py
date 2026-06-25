@@ -34,49 +34,31 @@ class MissionPromptContributor(SyncPromptContributor):
         extras = getattr(ctx, "extras", None) or {}
         workspace_dir = str(getattr(ctx, "workspace_dir", "") or "")
         agent_id = str(getattr(ctx, "agent_id", "default") or "default")
+        language = extras.get("language", "en")
 
-        # Check if mission is active via agent_config session state
-        # or via the _mission_start signal from slash command
-        mission_start = extras.get("_mission_start")
-        if mission_start and mission_start.get("mission_active"):
-            try:
-                from ...agents.mission.prompts import (
-                    build_mission_system_prompt,
-                )
+        # _mission_start is set by the slash command adapter (first request);
+        # mission_state is injected by AgentBuilder (subsequent requests).
+        state = extras.get("_mission_start") or extras.get("mission_state")
+        if not state or not state.get("mission_active"):
+            return None
 
-                return build_mission_system_prompt(
-                    mission_start,
-                    workspace_dir=workspace_dir,
-                    agent_id=agent_id,
-                )
-            except Exception:
-                logger.debug(
-                    "mission_prompt: contribute failed",
-                    exc_info=True,
-                )
-                return None
+        try:
+            from ...agents.mission.prompts import (
+                build_mission_system_prompt,
+            )
 
-        # Try reading from session state stored in extras
-        mission_state = extras.get("mission_state")
-        if mission_state and mission_state.get("mission_active"):
-            try:
-                from ...agents.mission.prompts import (
-                    build_mission_system_prompt,
-                )
-
-                return build_mission_system_prompt(
-                    mission_state,
-                    workspace_dir=workspace_dir,
-                    agent_id=agent_id,
-                )
-            except Exception:
-                logger.debug(
-                    "mission_prompt: contribute failed",
-                    exc_info=True,
-                )
-                return None
-
-        return None
+            return build_mission_system_prompt(
+                state,
+                workspace_dir=workspace_dir,
+                agent_id=agent_id,
+                language=language,
+            )
+        except Exception:
+            logger.debug(
+                "mission_prompt: contribute failed",
+                exc_info=True,
+            )
+            return None
 
 
 __all__ = ["MissionPromptContributor"]
