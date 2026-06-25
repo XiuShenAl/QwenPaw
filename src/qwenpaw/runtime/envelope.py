@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict
 
 from .message_convert import _media_type_to_block_type
@@ -45,7 +45,9 @@ class Envelope:
         self._response = AgentResponse(output=[], status=RunStatus.Created)
         self._response.object = "response"
         self._response.id = "response_" + uuid.uuid4().hex
-        self._response.created_at = int(time.time())
+        self._response.created_at = datetime.now(timezone.utc).isoformat(
+            timespec="seconds",
+        )
         self._response.session_id = session_id
 
         self._message_id = _gen_msg_id()
@@ -716,7 +718,9 @@ class Envelope:
         yield self._tag_seq(self._completed_message)
 
         self._response.status = RunStatus.Completed
-        self._response.completed_at = int(time.time())
+        self._response.completed_at = datetime.now(timezone.utc).isoformat(
+            timespec="seconds",
+        )
         yield self._tag_seq(self._response)
         self._finalized = True
 
@@ -762,7 +766,9 @@ class Envelope:
             self._response.error = self._error_text
         else:
             self._response.status = RunStatus.Completed
-        self._response.completed_at = int(time.time())
+        self._response.completed_at = datetime.now(timezone.utc).isoformat(
+            timespec="seconds",
+        )
         yield self._tag_seq(self._response)
         self._finalized = True
 

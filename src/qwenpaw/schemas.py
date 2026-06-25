@@ -268,8 +268,8 @@ class AgentResponse(BaseModel):
     id: Optional[str] = None
     output: List[Message] = Field(default_factory=list)
     status: RunStatus = RunStatus.Completed
-    created_at: Optional[int] = None
-    completed_at: Optional[int] = None
+    created_at: Optional[str] = None
+    completed_at: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
 
 
