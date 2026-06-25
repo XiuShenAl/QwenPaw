@@ -499,3 +499,46 @@ class ToolResultPruningMiddleware(MiddlewareBase):
             file_path=saved_path,
             encoding=encoding,
         )
+
+
+class LangfuseToolSpanMiddleware(MiddlewareBase):
+    """Record each tool execution as a Langfuse tool observation."""
+
+    async def on_acting(
+        self,
+        agent: "Agent",  # pylint: disable=unused-argument
+        input_kwargs: dict[str, Any],
+        next_handler: Callable[..., AsyncGenerator[Any, None]],
+    ) -> AsyncGenerator[Any, None]:
+        from ..observability.langfuse import get_current_trace, tool_span
+
+        if get_current_trace() is None:
+            async for event in next_handler():
+                yield event
+            return
+
+        from agentscope.tool import ToolResponse
+
+        tool_call = input_kwargs.get("tool_call")
+        tool_name = getattr(tool_call, "name", "unknown")
+        tool_input = getattr(tool_call, "input", None)
+
+        async with tool_span(
+            name=tool_name,
+            input=tool_input,
+            metadata={"tool_call_id": getattr(tool_call, "id", None)},
+        ) as observation:
+            final_response = None
+            async for event in next_handler():
+                if isinstance(event, ToolResponse):
+                    final_response = event
+                yield event
+            if observation is not None and final_response is not None:
+                observation.update(
+                    output={
+                        "content": [
+                            getattr(b, "text", str(b))
+                            for b in (final_response.content or [])
+                        ],
+                    },
+                )

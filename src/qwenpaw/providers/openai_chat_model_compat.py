@@ -365,6 +365,19 @@ class OpenAIChatModelCompat(OpenAIChatModel):
         self._extra_generate_kwargs = extra_generate_kwargs or {}
         super().__init__(**kwargs)
 
+    async def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        try:
+            from qwenpaw.observability.langfuse import (
+                current_generation_kwargs,
+            )
+
+            langfuse_kwargs = current_generation_kwargs(self.model)
+            if langfuse_kwargs:
+                kwargs = {**langfuse_kwargs, **kwargs}
+        except Exception:
+            pass
+        return await super().__call__(*args, **kwargs)
+
     async def _call_api(
         self,
         model_name: str,
