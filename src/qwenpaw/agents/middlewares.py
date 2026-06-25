@@ -502,7 +502,12 @@ class ToolResultPruningMiddleware(MiddlewareBase):
 
 
 class LangfuseToolSpanMiddleware(MiddlewareBase):
-    """Record each tool execution as a Langfuse tool observation."""
+    """Record each tool execution as a Langfuse tool observation.
+
+    Yields ``None`` from ``tool_span`` when Langfuse is disabled or the
+    client is unavailable; the ``observation is not None`` guard handles
+    this gracefully.
+    """
 
     async def on_acting(
         self,
@@ -510,14 +515,14 @@ class LangfuseToolSpanMiddleware(MiddlewareBase):
         input_kwargs: dict[str, Any],
         next_handler: Callable[..., AsyncGenerator[Any, None]],
     ) -> AsyncGenerator[Any, None]:
+        from agentscope.tool import ToolResponse
+
         from ..observability.langfuse import get_current_trace, tool_span
 
         if get_current_trace() is None:
             async for event in next_handler():
                 yield event
             return
-
-        from agentscope.tool import ToolResponse
 
         tool_call = input_kwargs.get("tool_call")
         tool_name = getattr(tool_call, "name", "unknown")

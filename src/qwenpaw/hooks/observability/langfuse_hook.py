@@ -23,6 +23,8 @@ class LangfuseTraceHook(LifecycleHook):
 
     phase = Phase.PRE_EXECUTE
     name = "langfuse_trace"
+    # After ContextVarsSetupHook(10) so session/agent metadata is available,
+    # before BootstrapHook(20) which injects guidance into messages.
     priority = 12
 
     async def run(self, ctx: HookContext) -> HookResult:
@@ -36,7 +38,7 @@ class LangfuseTraceHook(LifecycleHook):
 
         from ...runtime.message_convert import _get_last_user_text
 
-        trace_id = uuid.uuid4().hex
+        trace_id = str(uuid.uuid4())
         metadata = {
             "session_id": ctx.session_id,
             "root_session_id": ctx.root_session_id,
@@ -54,8 +56,11 @@ class LangfuseTraceHook(LifecycleHook):
                 "messages_count": len(ctx.input_msgs),
             },
         )
-        await scope.__aenter__()
-        ctx.extras[_LANGFUSE_SCOPE_KEY] = scope
+        try:
+            await scope.__aenter__()
+            ctx.extras[_LANGFUSE_SCOPE_KEY] = scope
+        except Exception:
+            logger.debug("langfuse trace scope open failed", exc_info=True)
         return HookResult()
 
 
@@ -64,6 +69,8 @@ class LangfuseTraceCleanupHook(LifecycleHook):
 
     phase = Phase.FINALLY
     name = "langfuse_trace_cleanup"
+    # After SkillEnvCleanupHook(40); trace closure does not depend on
+    # other cleanup hooks so a later priority is safe.
     priority = 50
 
     async def run(self, ctx: HookContext) -> HookResult:

@@ -357,11 +357,10 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
                 )
 
                 # pylint: disable=protected-access
-                workspace_registry._bootstrap_kwargs[
-                    "builtin_hook_clses"
-                ].extend(
-                    [LangfuseTraceHook, LangfuseTraceCleanupHook],
-                )
+                workspace_registry._bootstrap_kwargs.setdefault(
+                    "builtin_hook_clses",
+                    [],
+                ).extend([LangfuseTraceHook, LangfuseTraceCleanupHook])
             except Exception:
                 logger.debug(
                     "Langfuse hooks not available",
