@@ -40,8 +40,13 @@ def check_plugin_version_compat(
     """
     from .__version__ import __version__ as current_version_str
 
-    # Strip pre-release suffixes for comparison (e.g. "1.1.10b1" -> "1.1.10")
     current = Version(current_version_str)
+
+    # Pre-release versions (e.g. 2.0.0b2) should be treated as their base
+    # release for compatibility purposes — developers on a pre-release build
+    # must be able to load plugins targeting the upcoming release.
+    if current.pre is not None:
+        current = Version(f"{current.major}.{current.minor}.{current.micro}")
 
     qv = manifest.qwenpaw_version
     if qv is not None:
