@@ -196,9 +196,9 @@ class Runtime:
         """
         # TODO(streaming): Replace agent._reply() with reply_stream in
         # mission_runner.py to enable token-level streaming for Phase 2.
-        from ..agents.mission.mission_runner import run_mission_phase2
-        from ..agents.mission.state import read_loop_config
-        from ..agents.mission.constants import DEFAULT_MAX_ITERATIONS
+        from ..modes.mission.mission_runner import run_mission_phase2
+        from ..modes.mission.state import read_loop_config
+        from ..modes.mission.constants import DEFAULT_MAX_ITERATIONS
 
         loop_dir = Path(mission_exec["loop_dir"])
         max_iterations = mission_exec.get(

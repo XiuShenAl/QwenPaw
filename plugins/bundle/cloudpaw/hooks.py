@@ -781,8 +781,8 @@ def _patch_mission_master_prompt() -> None:
     builder is called unchanged.
     """
     try:
-        from qwenpaw.agents.mission import prompts as mission_prompts
-        from qwenpaw.agents.mission.prompts import (
+        from qwenpaw.modes.mission import prompts as mission_prompts
+        from qwenpaw.modes.mission.prompts import (
             WORKER_PROMPT_TEMPLATE,
             _build_git_sections,
             build_master_prompt as _original_build_master_prompt,
@@ -877,7 +877,7 @@ def _patch_mission_master_prompt() -> None:
     mission_prompts.build_master_prompt = _patched_build_master_prompt
 
     try:
-        from qwenpaw.agents.mission import handler as mission_handler
+        from qwenpaw.modes.mission import handler as mission_handler
 
         mission_handler.build_master_prompt = _patched_build_master_prompt
     except (ImportError, AttributeError):
@@ -887,7 +887,7 @@ def _patch_mission_master_prompt() -> None:
     # validation fails, the fix prompt tells the agent to use manage_prd
     # instead of write_file.
     try:
-        from qwenpaw.agents.mission import mission_runner
+        from qwenpaw.modes.mission import mission_runner
 
         mission_runner._PRD_FIX_PROMPT = _CLOUDPAW_PRD_FIX_PROMPT
         logger.info("[CloudPaw] Patched _PRD_FIX_PROMPT to use manage_prd")

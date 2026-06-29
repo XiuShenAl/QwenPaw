@@ -9,7 +9,7 @@ Returns:
       the user immediately.
     - ``dict`` for a new mission start — contains ``mission_phase``,
       ``loop_dir``, ``max_iterations`` so the runner can delegate to
-      :mod:`~qwenpaw.agents.mission.mission_runner`.
+      :mod:`~qwenpaw.modes.mission.mission_runner`.
 """
 from __future__ import annotations
 

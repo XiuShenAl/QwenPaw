@@ -301,10 +301,9 @@ def test_acp_bootstrap_includes_runtime_slash_commands():
         spec.name for spec in kwargs.get("builtin_command_specs", [])
     }
 
-    assert {"clear", "compact", "skills", "model"}.issubset(
+    assert {"clear", "compact", "skills", "model", "mission"}.issubset(
         command_names,
     )
-    assert "mission" not in command_names
     assert kwargs.get("builtin_hook_clses")
 
 

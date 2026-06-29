@@ -165,7 +165,7 @@ class TestMissionAdapter:
         ctx.input_msgs = []
 
         with patch(
-            "qwenpaw.agents.mission.handler.handle_mission_command",
+            "qwenpaw.modes.mission.handler.handle_mission_command",
             new_callable=AsyncMock,
             return_value="**Mission Status**: No active mission",
         ):
@@ -184,7 +184,7 @@ class TestMissionAdapter:
         ctx.input_msgs = []
 
         with patch(
-            "qwenpaw.agents.mission.handler.handle_mission_command",
+            "qwenpaw.modes.mission.handler.handle_mission_command",
             new_callable=AsyncMock,
             return_value={
                 "mission_phase": 1,
@@ -225,7 +225,7 @@ class TestBuildMissionSystemPrompt:
     """Test the prompt generation for different phases."""
 
     def test_returns_none_when_no_loop_dir(self):
-        from qwenpaw.agents.mission.prompts import build_mission_system_prompt
+        from qwenpaw.modes.mission.prompts import build_mission_system_prompt
 
         result = build_mission_system_prompt(
             {"mission_active": True, "mission_loop_dir": ""},
@@ -233,7 +233,7 @@ class TestBuildMissionSystemPrompt:
         assert result is None
 
     def test_phase1_english(self):
-        from qwenpaw.agents.mission.prompts import build_mission_system_prompt
+        from qwenpaw.modes.mission.prompts import build_mission_system_prompt
 
         result = build_mission_system_prompt(
             {
@@ -250,7 +250,7 @@ class TestBuildMissionSystemPrompt:
         assert "/tmp/loop" in result
 
     def test_phase1_chinese(self):
-        from qwenpaw.agents.mission.prompts import build_mission_system_prompt
+        from qwenpaw.modes.mission.prompts import build_mission_system_prompt
 
         result = build_mission_system_prompt(
             {
@@ -265,13 +265,13 @@ class TestBuildMissionSystemPrompt:
         assert "prd.json" in result
 
     def test_phase2_calls_build_master_prompt(self):
-        from qwenpaw.agents.mission.prompts import build_mission_system_prompt
+        from qwenpaw.modes.mission.prompts import build_mission_system_prompt
 
         with patch(
-            "qwenpaw.agents.mission.prompts.build_master_prompt",
+            "qwenpaw.modes.mission.prompts.build_master_prompt",
             return_value="<master prompt>",
         ) as mock_bmp, patch(
-            "qwenpaw.agents.mission.state.read_loop_config",
+            "qwenpaw.modes.mission.state.read_loop_config",
             return_value={
                 "verify_commands": "pytest",
                 "git_installed": True,

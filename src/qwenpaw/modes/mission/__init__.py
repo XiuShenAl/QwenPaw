@@ -2,8 +2,8 @@
 """Mission mode — ``AgentMode`` for autonomous iterative tasks.
 
 Exposes hooks and a prompt contributor so the Runtime lifecycle drives
-mission state load/save.  Domain logic (state machine, PRD generation,
-iteration loop) lives in ``agents.mission``.
+mission state load/save.  All mission domain logic (state machine, PRD
+generation, iteration loop, handler, prompts) is co-located in this package.
 """
 
 from __future__ import annotations

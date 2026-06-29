@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Mission mode prompt contributor.
 
-Delegates to ``agents/mission/prompts.py``.
+Delegates to ``modes/mission/prompts.py``.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ class MissionPromptContributor(SyncPromptContributor):
             return None
 
         try:
-            from ...agents.mission.prompts import (
+            from .prompts import (
                 build_mission_system_prompt,
             )
 

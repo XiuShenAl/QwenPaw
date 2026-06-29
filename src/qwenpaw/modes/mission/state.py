@@ -22,11 +22,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ...utils.command_runner import (
+from qwenpaw.utils.command_runner import (
     CommandExecutionError,
     run_command_async,
 )
-from ...utils.json_utils import safe_json_loads
+from qwenpaw.utils.json_utils import safe_json_loads
 
 logger = logging.getLogger(__name__)
 

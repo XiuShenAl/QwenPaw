@@ -9,7 +9,7 @@ from pathlib import Path
 from ..base import ModeGatedHook
 from ...runtime.hooks import HookContext, HookResult
 from ...runtime.phases import Phase
-from ...agents.mission.constants import DEFAULT_MAX_ITERATIONS
+from .constants import DEFAULT_MAX_ITERATIONS
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ class MissionStateSaveHook(ModeGatedHook):
             loop_dir = ctx.session_state.get("mission_loop_dir", "")
             if loop_dir:
                 try:
-                    from ...agents.mission.state import read_loop_config
+                    from .state import read_loop_config
 
                     cfg = read_loop_config(Path(loop_dir))
                     if cfg:

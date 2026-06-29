@@ -641,7 +641,7 @@ def _make_mission_adapter() -> CommandSpec:
     async def _handler(ctx: Any, args: str) -> "Msg | None":
         from agentscope.message import Msg, TextBlock
 
-        from ..agents.mission.handler import handle_mission_command
+        from ..modes.mission.handler import handle_mission_command
 
         workspace = getattr(ctx, "workspace", None)
         workspace_dir = (
