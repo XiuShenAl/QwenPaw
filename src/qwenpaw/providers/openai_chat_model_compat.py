@@ -370,7 +370,7 @@ class OpenAIChatModelCompat(OpenAIChatModel):
 
     async def __call__(self, *args: Any, **kwargs: Any) -> Any:
         try:
-            from qwenpaw.observability.langfuse import (
+            from ..observability.langfuse import (
                 current_generation_kwargs,
             )
         except ImportError:
