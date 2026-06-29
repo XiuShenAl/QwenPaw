@@ -81,6 +81,11 @@ class OllamaProvider(OpenAIProvider):
             temperature=gen_kwargs.pop("temperature", None),
             top_p=gen_kwargs.pop("top_p", None),
         )
+
+        from ._openai_params import route_non_standard_to_extra_body
+
+        route_non_standard_to_extra_body(gen_kwargs)
+
         return OpenAIChatModelCompat(
             credential=credential,
             model=model_id,

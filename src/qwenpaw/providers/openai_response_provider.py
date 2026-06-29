@@ -123,6 +123,16 @@ class OpenAIResponseProvider(OpenAIProvider):
             temperature=gen_kwargs.pop("temperature", None),
         )
 
+        from ._openai_params import (
+            OPENAI_RESPONSE_CREATE_PARAMS,
+            route_non_standard_to_extra_body,
+        )
+
+        route_non_standard_to_extra_body(
+            gen_kwargs,
+            OPENAI_RESPONSE_CREATE_PARAMS,
+        )
+
         client_kwargs: dict[str, Any] = {}
         if merged_headers:
             client_kwargs["default_headers"] = merged_headers

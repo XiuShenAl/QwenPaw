@@ -359,7 +359,9 @@ class OpenRouterProvider(Provider):
 
     def get_chat_model_instance(self, model_id: str) -> ChatModelBase:
         from agentscope.credential._openai import OpenAICredential
+        from agentscope.model import OpenAIChatModel
 
+        from ._openai_params import route_non_standard_to_extra_body
         from .openai_chat_model_compat import OpenAIChatModelCompat
 
         credential = OpenAICredential(
@@ -367,11 +369,22 @@ class OpenRouterProvider(Provider):
             api_key=self.api_key,
             base_url=self.base_url,
         )
+
+        gen_kwargs = self.get_effective_generate_kwargs(model_id)
+        parameters = OpenAIChatModel.Parameters(
+            max_tokens=gen_kwargs.pop("max_tokens", None),
+            temperature=gen_kwargs.pop("temperature", None),
+            top_p=gen_kwargs.pop("top_p", None),
+        )
+        route_non_standard_to_extra_body(gen_kwargs)
+
         return OpenAIChatModelCompat(
             credential=credential,
             model=model_id,
+            parameters=parameters,
             stream=True,
             default_headers=self._build_default_headers() or None,
+            extra_generate_kwargs=gen_kwargs or None,
             context_size=self._get_context_size(model_id),
             formatter=_CappingOpenAIFormatter(
                 max_bytes=self.max_inline_media_bytes,
