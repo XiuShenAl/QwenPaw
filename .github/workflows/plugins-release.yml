@@ -57,6 +57,7 @@ jobs:
 
       - name: Sync plugin zips to OSS (long-cache, immutable)
         run: |
+          # nullglob ensures empty globs expand to nothing in this bash session
           shopt -s nullglob
           for kind in bundle tool; do
             while IFS= read -r -d '' f; do
@@ -69,10 +70,9 @@ jobs:
                 --meta "Cache-Control:public, max-age=31536000, immutable"
             done < <(find "dist/plugins/${kind}" -type f -name '*.zip' -print0 2>/dev/null || true)
           done
-          # Remove zips that no longer exist locally so deletions propagate.
+          # One-time cleanup: remove legacy flat zips (pre per-plugin directory layout).
+          # This only targets {kind}/*.zip (flat files), not {kind}/{plugin_id}/*.zip (versioned).
           for kind in bundle tool; do
-            kind_root="dist/plugins/${kind}"
-            # Drop legacy flat zips at {kind}/ (pre per-plugin directory layout).
             remote_flat=$(ossutil ls "oss://qwenpaw-download/files/plugins/${kind}/" -s 2>/dev/null \
               | grep -E "^oss://qwenpaw-download/files/plugins/${kind}/[^/]+\.zip$" \
               | sed 's|.*/||' \
@@ -83,24 +83,51 @@ jobs:
                 "oss://qwenpaw-download/files/plugins/${kind}/${name}" \
                 --force
             done
-            for plugin_dir in "$kind_root"/*/; do
-              [ -d "$plugin_dir" ] || continue
-              plugin_id=$(basename "$plugin_dir")
-              local_names=$(find "$plugin_dir" -maxdepth 1 -type f -name '*.zip' -exec basename {} \; 2>/dev/null | sort || true)
-              remote_names=$(ossutil ls "oss://qwenpaw-download/files/plugins/${kind}/${plugin_id}/" -s 2>/dev/null \
-                | grep -E "^oss://qwenpaw-download/files/plugins/${kind}/${plugin_id}/[^/]+\.zip$" \
-                | sed 's|.*/||' \
-                | sort -u || true)
-              for name in $remote_names; do
-                if ! echo "$local_names" | grep -qx "$name"; then
-                  echo "Removing stale OSS object: ${kind}/${plugin_id}/${name}"
-                  ossutil rm \
-                    "oss://qwenpaw-download/files/plugins/${kind}/${plugin_id}/${name}" \
-                    --force
-                fi
-              done
-            done
           done
+
+      - name: Merge historical versions into index
+        run: |
+          ossutil cp "oss://qwenpaw-download/metadata/plugins/index.json" \
+            existing-index.json 2>/dev/null || echo '{}' > existing-index.json
+
+          python3 << 'PYTHON'
+          import json
+
+          with open("dist/plugins/index.json") as f:
+              new_index = json.load(f)
+          with open("existing-index.json") as f:
+              old_index = json.load(f)
+
+          # files: same file_id ({plugin_id}-{version}) is overwritten by new;
+          # different file_ids from old are preserved.
+          # Old entries keep their original updated_at (by design).
+          old_files = old_index.get("files", {})
+          new_files = new_index.get("files", {})
+          merged_files = {**old_files, **new_files}
+          new_index["files"] = merged_files
+
+          # platforms.versions: merge version lists (union of all kinds),
+          # new versions first, old versions appended with deduplication.
+          old_platforms = old_index.get("platforms", {})
+          all_kinds = set(list(new_index.get("platforms", {}).keys()) + list(old_platforms.keys()))
+          for kind in all_kinds:
+              old_versions = old_platforms.get(kind, {}).get("versions", [])
+              new_versions = new_index.get("platforms", {}).get(kind, {}).get("versions", [])
+              seen = set(new_versions)
+              merged = list(new_versions)
+              for v in old_versions:
+                  if v not in seen:
+                      merged.append(v)
+                      seen.add(v)
+              if "platforms" not in new_index:
+                  new_index["platforms"] = {}
+              if kind not in new_index["platforms"]:
+                  new_index["platforms"][kind] = {}
+              new_index["platforms"][kind]["versions"] = merged
+
+          with open("dist/plugins/index.json", "w") as f:
+              json.dump(new_index, f, indent=2, ensure_ascii=False)
+          PYTHON
 
       - name: Upload plugins index (short-cache)
         run: |
