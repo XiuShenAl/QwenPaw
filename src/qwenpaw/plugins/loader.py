@@ -418,6 +418,13 @@ class PluginLoader:
 
             plugin_def = module.plugin
 
+            if manifest.qwenpaw_version is not None:
+                qv_dict = manifest.qwenpaw_version.model_dump()
+            else:
+                qv_dict = {
+                    "min": manifest.min_version,
+                    "max": manifest.max_version,
+                }
             manifest_dict = {
                 "id": manifest.id,
                 "name": manifest.name,
@@ -425,13 +432,7 @@ class PluginLoader:
                 "description": manifest.description,
                 "author": manifest.author,
                 "dependencies": manifest.dependencies,
-                "min_version": manifest.min_version,
-                "max_version": manifest.max_version,
-                "qwenpaw_version": (
-                    manifest.qwenpaw_version.model_dump()
-                    if manifest.qwenpaw_version
-                    else None
-                ),
+                "qwenpaw_version": qv_dict,
                 "meta": manifest.meta,
             }
             api = PluginApi(plugin_id, config or {}, manifest_dict)
