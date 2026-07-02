@@ -469,6 +469,12 @@ class PluginLoader:
         ``sys.modules``, ``sys.path``) so that a failed load leaves no
         orphan state that could interfere with other plugins or a
         subsequent retry.
+
+        .. note::
+            NOT thread-safe.  ``sys.modules`` and ``sys.path`` mutations
+            are not guarded by a lock.  This is fine because
+            ``load_all_plugins`` loads plugins sequentially, but callers
+            must not invoke this method concurrently.
         """
         logger.warning(
             "Cleaning up failed plugin load for '%s'",
@@ -489,7 +495,7 @@ class PluginLoader:
         # 3. sys.modules — by __file__ path (catches bare imports that
         #    bypassed the plugin_<id> namespace, e.g. ``import utils``
         #    after the plugin inserted its dir into sys.path).
-        source_resolved = str(source_path.resolve()) + os.sep
+        source_resolved = os.path.realpath(str(source_path)) + os.sep
         stale_by_file = [
             k
             for k, mod in list(sys.modules.items())

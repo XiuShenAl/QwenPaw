@@ -90,44 +90,10 @@ jobs:
           ossutil cp "oss://qwenpaw-download/metadata/plugins/index.json" \
             existing-index.json 2>/dev/null || echo '{}' > existing-index.json
 
-          python3 << 'PYTHON'
-          import json
-
-          with open("dist/plugins/index.json") as f:
-              new_index = json.load(f)
-          with open("existing-index.json") as f:
-              old_index = json.load(f)
-
-          # files: same file_id ({plugin_id}-{version}) is overwritten by new;
-          # different file_ids from old are preserved.
-          # Old entries keep their original updated_at (by design).
-          old_files = old_index.get("files", {})
-          new_files = new_index.get("files", {})
-          merged_files = {**old_files, **new_files}
-          new_index["files"] = merged_files
-
-          # platforms.versions: merge version lists (union of all kinds),
-          # new versions first, old versions appended with deduplication.
-          old_platforms = old_index.get("platforms", {})
-          all_kinds = set(list(new_index.get("platforms", {}).keys()) + list(old_platforms.keys()))
-          for kind in all_kinds:
-              old_versions = old_platforms.get(kind, {}).get("versions", [])
-              new_versions = new_index.get("platforms", {}).get(kind, {}).get("versions", [])
-              seen = set(new_versions)
-              merged = list(new_versions)
-              for v in old_versions:
-                  if v not in seen:
-                      merged.append(v)
-                      seen.add(v)
-              if "platforms" not in new_index:
-                  new_index["platforms"] = {}
-              if kind not in new_index["platforms"]:
-                  new_index["platforms"][kind] = {}
-              new_index["platforms"][kind]["versions"] = merged
-
-          with open("dist/plugins/index.json", "w") as f:
-              json.dump(new_index, f, indent=2, ensure_ascii=False)
-          PYTHON
+          python3 scripts/pack/merge_plugin_index.py \
+            --new dist/plugins/index.json \
+            --old existing-index.json \
+            --out dist/plugins/index.json
 
       - name: Upload plugins index (short-cache)
         run: |
@@ -148,23 +114,9 @@ jobs:
           }
           EOF
 
-          python3 << 'PYTHON'
-          import json
-          from datetime import datetime, timezone
-
-          with open("main-index.json", "r", encoding="utf-8") as f:
-              index = json.load(f)
-
-          index.setdefault("products", {})
-          index["products"]["plugins"] = {
-              "name": {"zh-CN": "插件", "en-US": "Plugins"},
-              "index_url": "/metadata/plugins/index.json",
-          }
-          index["updated_at"] = datetime.now(timezone.utc).isoformat()
-
-          with open("main-index.json", "w", encoding="utf-8") as f:
-              json.dump(index, f, indent=2, ensure_ascii=False)
-          PYTHON
+          python3 scripts/pack/patch_main_index.py \
+            --index main-index.json \
+            --out   main-index.json
 
           ossutil cp main-index.json \
             "oss://qwenpaw-download/metadata/index.json" \

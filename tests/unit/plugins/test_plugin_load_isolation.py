@@ -393,7 +393,13 @@ class TestLoadAllPluginsIsolation:
         tmp_path,
     ):
         """A failing plugin does not prevent subsequent plugins from loading,
-        and leaves no residue in the registry."""
+        and leaves no residue in the registry.
+
+        The directory names (aaa-bad, zzz-good) do NOT imply a required
+        load order — Path.iterdir() order is filesystem-dependent.  The
+        assertions only check presence/absence in the loaded dict and
+        registry, which are order-independent.
+        """
         # Plugin that fails during register()
         bad_dir = tmp_path / "aaa-bad"
         _write_plugin(
