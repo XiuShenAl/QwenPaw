@@ -1,4 +1,4 @@
-# OMQ Role Tool Configuration
+# OMP Role Tool Configuration
 
 When using spawn_subagent (single or batch mode) to dispatch sub-agents,
 set the corresponding allowed_tools and skills parameters based on the

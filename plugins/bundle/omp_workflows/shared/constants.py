@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Shared constants for OMQ workflow modes."""
+"""Shared constants for OMP workflow modes."""
 
 DEFAULT_MAX_ITERATIONS = 30
 

@@ -64,11 +64,11 @@ class AutopilotMode(AgentMode):
                 plugins.stop_handlers = []
             plugins.stop_handlers.append(
                 StopHandlerRegistration(
-                    plugin_id="__omq_autopilot__",
+                    plugin_id="__omp_autopilot__",
                     handler=handler,
                     priority=0,
                     name="autopilot-stop-handler",
-                    scope="omq-autopilot",
+                    scope="omp-autopilot",
                 ),
             )
 

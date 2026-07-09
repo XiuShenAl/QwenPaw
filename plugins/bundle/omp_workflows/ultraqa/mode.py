@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""UltraworkMode — parallel execution engine."""
+"""UltraQAMode — QA cycle engine with 3-agent collaboration."""
 
 from __future__ import annotations
 
 import logging
+import shlex
 from typing import TYPE_CHECKING, Optional
 
 from agentscope.message import Msg, TextBlock
@@ -14,30 +15,32 @@ from qwenpaw.runtime.slash_command_registry import CommandSpec
 if TYPE_CHECKING:
     from typing import Any
 
-    from .gate import UltraworkGate
+    from .gate import UltraQAGate
 
 logger = logging.getLogger(__name__)
 
 _HELP = (
-    "**Ultrawork** — parallel task execution engine\n\n"
-    "Usage: `/ultrawork <task description>`\n\n"
-    "Decomposes the task into independent sub-tasks and executes\n"
-    "them in parallel via spawn_subagent batch mode."
+    "**UltraQA** — automated QA cycle engine\n\n"
+    "Usage:\n"
+    "  `/ultraqa [--tests|--build|--lint|--typecheck|--custom \"cmd\"]"
+    " [--interactive] [target]`\n\n"
+    "Runs repeated QA cycles: check → diagnose → fix → re-check.\n"
+    "Stops when all checks pass or max cycles reached."
 )
 
 
-class UltraworkMode(AgentMode):
-    """AgentMode for Ultrawork parallel execution."""
+class UltraQAMode(AgentMode):
+    """AgentMode for the UltraQA workflow."""
 
-    name = "ultrawork"
+    name = "ultraqa"
 
     def __init__(self) -> None:
-        self._gate: UltraworkGate | None = None
+        self._gate: UltraQAGate | None = None
 
     def commands(self) -> list[CommandSpec]:
         return [
             CommandSpec(
-                name="ultrawork",
+                name="ultraqa",
                 handler=self._handler,
                 category="builtin",
                 help_text=_HELP,
@@ -49,7 +52,7 @@ class UltraworkMode(AgentMode):
         super().setup(workspace)
         from qwenpaw.loop.gates import StopHandler, StopHandlerRegistration
 
-        from .gate import UltraworkGate as _G
+        from .gate import UltraQAGate as _G
 
         handler = StopHandler()
         gate = _G()
@@ -62,11 +65,11 @@ class UltraworkMode(AgentMode):
                 plugins.stop_handlers = []
             plugins.stop_handlers.append(
                 StopHandlerRegistration(
-                    plugin_id="__omq_ultrawork__",
+                    plugin_id="__omp_ultraqa__",
                     handler=handler,
                     priority=0,
-                    name="ultrawork-stop-handler",
-                    scope="omq-ultrawork",
+                    name="ultraqa-stop-handler",
+                    scope="omp-ultraqa",
                 ),
             )
 
@@ -74,9 +77,12 @@ class UltraworkMode(AgentMode):
         return self._gate is not None and self._gate._state() is not None
 
     async def _handler(self, ctx: "Any", args: str) -> Optional[Msg]:
-        task = (args or "").strip()
-        if not task or len(task) < 5 or task.lower() == "help":
+        if not args or not args.strip() or args.strip().lower() == "help":
             return _info(_HELP)
+
+        parsed = _parse_args(args)
+        if parsed is None:
+            return _info("Invalid arguments. " + _HELP)
 
         workspace_dir = getattr(ctx, "workspace_dir", None)
         if not workspace_dir:
@@ -84,20 +90,58 @@ class UltraworkMode(AgentMode):
 
         from pathlib import Path
 
-        loop_dir = self._gate.activate_for_work(
+        loop_dir = self._gate.activate_for_qa(
             workspace_dir=Path(workspace_dir),
+            goal_type=parsed["goal_type"],
+            custom_cmd=parsed["custom_cmd"],
+            interactive=parsed["interactive"],
         )
 
         prompt = (
-            f"Ultrawork activated.\n"
-            f"Task: {task}\n"
+            f"UltraQA activated. Goal: {parsed['goal_type']}.\n"
             f"State directory: {loop_dir}\n"
-            f"Decompose this task into independent sub-tasks and use "
-            f"spawn_subagent batch mode to execute them in parallel."
+            f"Read {loop_dir}/state.json and begin the QA cycle."
         )
         _rewrite(ctx, prompt)
-        logger.info("Ultrawork started: %s", loop_dir)
+        logger.info("UltraQA started: %s", loop_dir)
         return None
+
+
+def _parse_args(raw: str) -> dict | None:
+    """Parse /ultraqa arguments."""
+    try:
+        tokens = shlex.split(raw)
+    except ValueError:
+        return None
+
+    goal_type = "tests"
+    custom_cmd = ""
+    interactive = False
+
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t == "--tests":
+            goal_type = "tests"
+        elif t == "--build":
+            goal_type = "build"
+        elif t == "--lint":
+            goal_type = "lint"
+        elif t == "--typecheck":
+            goal_type = "typecheck"
+        elif t == "--interactive":
+            interactive = True
+        elif t == "--custom" and i + 1 < len(tokens):
+            goal_type = "custom"
+            i += 1
+            custom_cmd = tokens[i]
+        i += 1
+
+    return {
+        "goal_type": goal_type,
+        "custom_cmd": custom_cmd,
+        "interactive": interactive,
+    }
 
 
 def _info(text: str) -> Msg:

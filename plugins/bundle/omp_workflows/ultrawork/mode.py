@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
-"""RalphMode — PRD-driven continuous implementation loop."""
+"""UltraworkMode — parallel execution engine."""
 
 from __future__ import annotations
 
 import logging
-import shlex
 from typing import TYPE_CHECKING, Optional
 
 from agentscope.message import Msg, TextBlock
@@ -15,31 +14,30 @@ from qwenpaw.runtime.slash_command_registry import CommandSpec
 if TYPE_CHECKING:
     from typing import Any
 
-    from .gate import RalphGate
+    from .gate import UltraworkGate
 
 logger = logging.getLogger(__name__)
 
 _HELP = (
-    "**Ralph** — PRD-driven continuous implementation loop\n\n"
-    "Usage: `/ralph [--no-deslop] "
-    "[--critic=architect|critic|codex] <task>`\n\n"
-    "Creates a PRD with user stories, implements each one,\n"
-    "verifies acceptance criteria, and runs reviewer verification."
+    "**Ultrawork** — parallel task execution engine\n\n"
+    "Usage: `/ultrawork <task description>`\n\n"
+    "Decomposes the task into independent sub-tasks and executes\n"
+    "them in parallel via spawn_subagent batch mode."
 )
 
 
-class RalphMode(AgentMode):
-    """AgentMode for the Ralph workflow."""
+class UltraworkMode(AgentMode):
+    """AgentMode for Ultrawork parallel execution."""
 
-    name = "ralph"
+    name = "ultrawork"
 
     def __init__(self) -> None:
-        self._gate: RalphGate | None = None
+        self._gate: UltraworkGate | None = None
 
     def commands(self) -> list[CommandSpec]:
         return [
             CommandSpec(
-                name="ralph",
+                name="ultrawork",
                 handler=self._handler,
                 category="builtin",
                 help_text=_HELP,
@@ -51,7 +49,7 @@ class RalphMode(AgentMode):
         super().setup(workspace)
         from qwenpaw.loop.gates import StopHandler, StopHandlerRegistration
 
-        from .gate import RalphGate as _G
+        from .gate import UltraworkGate as _G
 
         handler = StopHandler()
         gate = _G()
@@ -64,11 +62,11 @@ class RalphMode(AgentMode):
                 plugins.stop_handlers = []
             plugins.stop_handlers.append(
                 StopHandlerRegistration(
-                    plugin_id="__omq_ralph__",
+                    plugin_id="__omp_ultrawork__",
                     handler=handler,
                     priority=0,
-                    name="ralph-stop-handler",
-                    scope="omq-ralph",
+                    name="ultrawork-stop-handler",
+                    scope="omp-ultrawork",
                 ),
             )
 
@@ -76,13 +74,9 @@ class RalphMode(AgentMode):
         return self._gate is not None and self._gate._state() is not None
 
     async def _handler(self, ctx: "Any", args: str) -> Optional[Msg]:
-        if not args or not args.strip() or args.strip().lower() == "help":
+        task = (args or "").strip()
+        if not task or len(task) < 5 or task.lower() == "help":
             return _info(_HELP)
-
-        parsed = _parse_args(args)
-        task = parsed["task"]
-        if len(task) < 5:
-            return _info("Please provide a task description.\n\n" + _HELP)
 
         workspace_dir = getattr(ctx, "workspace_dir", None)
         if not workspace_dir:
@@ -90,49 +84,20 @@ class RalphMode(AgentMode):
 
         from pathlib import Path
 
-        loop_dir = self._gate.activate_for_ralph(
+        loop_dir = self._gate.activate_for_work(
             workspace_dir=Path(workspace_dir),
-            no_deslop=parsed["no_deslop"],
-            critic_type=parsed["critic_type"],
         )
 
-        from .prompts import build_initial_prd_prompt
-
-        prompt = build_initial_prd_prompt(task, loop_dir)
+        prompt = (
+            f"Ultrawork activated.\n"
+            f"Task: {task}\n"
+            f"State directory: {loop_dir}\n"
+            f"Decompose this task into independent sub-tasks and use "
+            f"spawn_subagent batch mode to execute them in parallel."
+        )
         _rewrite(ctx, prompt)
-        logger.info("Ralph started: %s", loop_dir)
+        logger.info("Ultrawork started: %s", loop_dir)
         return None
-
-
-def _parse_args(raw: str) -> dict:
-    """Parse /ralph arguments."""
-    try:
-        tokens = shlex.split(raw)
-    except ValueError:
-        return {"task": raw, "no_deslop": False, "critic_type": "architect"}
-
-    no_deslop = False
-    critic_type = "architect"
-    task_parts: list[str] = []
-
-    i = 0
-    while i < len(tokens):
-        t = tokens[i]
-        if t == "--no-deslop":
-            no_deslop = True
-        elif t.startswith("--critic="):
-            critic_type = t.split("=", 1)[1]
-            if critic_type not in ("architect", "critic", "codex"):
-                critic_type = "architect"
-        else:
-            task_parts.append(t)
-        i += 1
-
-    return {
-        "task": " ".join(task_parts),
-        "no_deslop": no_deslop,
-        "critic_type": critic_type,
-    }
 
 
 def _info(text: str) -> Msg:

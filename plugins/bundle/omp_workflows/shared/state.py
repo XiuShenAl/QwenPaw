@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""WorkflowState — state directory and file management for OMQ modes."""
+"""WorkflowState — state directory and file management for OMP modes."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ class WorkflowState:
     """Manage per-instance state directory and files.
 
     Path convention:
-        {workspace_dir}/.qwenpaw/omq_workflows/{mode_name}-{timestamp}/
+        {workspace_dir}/.qwenpaw/omp_workflows/{mode_name}-{timestamp}/
     """
 
     def __init__(self, workspace_dir: Path, mode_name: str) -> None:
@@ -27,7 +27,7 @@ class WorkflowState:
     def create_instance(self) -> Path:
         """Create a timestamped instance directory."""
         ts = time.strftime("%Y%m%d-%H%M%S")
-        base = self.workspace_dir / ".qwenpaw" / "omq_workflows"
+        base = self.workspace_dir / ".qwenpaw" / "omp_workflows"
         self._instance_dir = base / f"{self.mode_name}-{ts}"
         self._instance_dir.mkdir(parents=True, exist_ok=True)
         return self._instance_dir

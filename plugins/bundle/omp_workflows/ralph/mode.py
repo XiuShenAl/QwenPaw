@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
-"""TeamMode — multi-agent collaboration pipeline."""
+"""RalphMode — PRD-driven continuous implementation loop."""
 
 from __future__ import annotations
 
 import logging
-import re
 import shlex
 from typing import TYPE_CHECKING, Optional
 
@@ -16,32 +15,31 @@ from qwenpaw.runtime.slash_command_registry import CommandSpec
 if TYPE_CHECKING:
     from typing import Any
 
-    from .gate import TeamPipelineGate
+    from .gate import RalphGate
 
 logger = logging.getLogger(__name__)
 
 _HELP = (
-    "**Team** — multi-agent collaboration pipeline\n\n"
-    "Usage: `/team [N:role] <task>`\n\n"
-    "Examples:\n"
-    "  `/team 3:executor Implement authentication`\n"
-    "  `/team ralph Build the REST API`\n\n"
-    "Phases: plan -> prd -> exec -> verify -> fix (retry)"
+    "**Ralph** — PRD-driven continuous implementation loop\n\n"
+    "Usage: `/ralph [--no-deslop] "
+    "[--critic=architect|critic|codex] <task>`\n\n"
+    "Creates a PRD with user stories, implements each one,\n"
+    "verifies acceptance criteria, and runs reviewer verification."
 )
 
 
-class TeamMode(AgentMode):
-    """AgentMode for the Team pipeline."""
+class RalphMode(AgentMode):
+    """AgentMode for the Ralph workflow."""
 
-    name = "team"
+    name = "ralph"
 
     def __init__(self) -> None:
-        self._gate: TeamPipelineGate | None = None
+        self._gate: RalphGate | None = None
 
     def commands(self) -> list[CommandSpec]:
         return [
             CommandSpec(
-                name="team",
+                name="ralph",
                 handler=self._handler,
                 category="builtin",
                 help_text=_HELP,
@@ -53,7 +51,7 @@ class TeamMode(AgentMode):
         super().setup(workspace)
         from qwenpaw.loop.gates import StopHandler, StopHandlerRegistration
 
-        from .gate import TeamPipelineGate as _G
+        from .gate import RalphGate as _G
 
         handler = StopHandler()
         gate = _G()
@@ -66,11 +64,11 @@ class TeamMode(AgentMode):
                 plugins.stop_handlers = []
             plugins.stop_handlers.append(
                 StopHandlerRegistration(
-                    plugin_id="__omq_team__",
+                    plugin_id="__omp_ralph__",
                     handler=handler,
                     priority=0,
-                    name="team-stop-handler",
-                    scope="omq-team",
+                    name="ralph-stop-handler",
+                    scope="omp-ralph",
                 ),
             )
 
@@ -92,51 +90,48 @@ class TeamMode(AgentMode):
 
         from pathlib import Path
 
-        loop_dir = self._gate.activate_for_team(
+        loop_dir = self._gate.activate_for_ralph(
             workspace_dir=Path(workspace_dir),
-            agent_count=parsed["agent_count"],
-            agent_role=parsed["agent_role"],
+            no_deslop=parsed["no_deslop"],
+            critic_type=parsed["critic_type"],
         )
 
-        prompt = (
-            f"Team pipeline activated.\n"
-            f"Task: {task}\n"
-            f"Workers: {parsed['agent_count']}, Role: {parsed['agent_role']}\n"
-            f"State directory: {loop_dir}\n"
-            f"Phase: plan — explore the codebase and create a task breakdown."
-        )
+        from .prompts import build_initial_prd_prompt
+
+        prompt = build_initial_prd_prompt(task, loop_dir)
         _rewrite(ctx, prompt)
-        logger.info("Team started: %s", loop_dir)
+        logger.info("Ralph started: %s", loop_dir)
         return None
 
 
-_TEAM_SPEC_RE = re.compile(r"^(\d+):(\w[\w-]*)$")
-
-
 def _parse_args(raw: str) -> dict:
+    """Parse /ralph arguments."""
     try:
         tokens = shlex.split(raw)
     except ValueError:
-        return {"task": raw, "agent_count": 3, "agent_role": "executor"}
+        return {"task": raw, "no_deslop": False, "critic_type": "architect"}
 
-    agent_count = 3
-    agent_role = "executor"
+    no_deslop = False
+    critic_type = "architect"
     task_parts: list[str] = []
 
-    for i, t in enumerate(tokens):
-        m = _TEAM_SPEC_RE.match(t)
-        if m and i == 0:
-            agent_count = int(m.group(1))
-            agent_role = m.group(2)
-        elif t in ("executor", "ralph") and i == 0:
-            agent_role = t
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t == "--no-deslop":
+            no_deslop = True
+        elif t.startswith("--critic="):
+            critic_type = t.split("=", 1)[1]
+            if critic_type not in ("architect", "critic", "codex"):
+                critic_type = "architect"
         else:
             task_parts.append(t)
+        i += 1
 
     return {
         "task": " ".join(task_parts),
-        "agent_count": max(1, min(agent_count, 10)),
-        "agent_role": agent_role,
+        "no_deslop": no_deslop,
+        "critic_type": critic_type,
     }
 
 
