@@ -38,7 +38,7 @@ class AgentBuilder:
         agent_config: Any,
         *,
         agent_id: str | None = None,
-        request_context: dict[str, str] | None = None,
+        request_context: dict[str, Any] | None = None,
         active_modes: Iterable[str] | None = None,
         effective_skills: Iterable[str] | None = None,
         enabled_features: Iterable[str] | None = None,
@@ -174,6 +174,10 @@ class AgentBuilder:
             )
         except Exception:
             effective_skills = []
+
+        subagent_skills = request_context.get("subagent_skills")
+        if subagent_skills is not None:
+            effective_skills = list(subagent_skills)
 
         # Compute active modes.
         active_modes: set[str] = set()
