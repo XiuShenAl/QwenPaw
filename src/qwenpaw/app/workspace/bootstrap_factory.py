@@ -61,7 +61,11 @@ class WorkspaceBootstrapFactory:
 
         try:
             from ...hooks.bootstrap.bootstrap_hook import BootstrapHook
-            from ...hooks.cron.cron_hook import CronContextHook
+            from ...hooks.cron.cron_hook import (
+                CronContextHook,
+                CronMemoryIsolateHook,
+                CronMemoryRestoreHook,
+            )
             from ...hooks.error.error_hook import (
                 CancelCleanupHook,
                 ErrorNormalizeHook,
@@ -81,6 +85,8 @@ class WorkspaceBootstrapFactory:
 
             hook_clses: list[type] = [
                 CronContextHook,
+                CronMemoryIsolateHook,
+                CronMemoryRestoreHook,
                 SessionLoadHook,
                 SessionSaveHook,
                 BootstrapHook,

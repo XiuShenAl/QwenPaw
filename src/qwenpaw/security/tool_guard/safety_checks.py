@@ -39,14 +39,20 @@ def is_command_destructive(command: str) -> bool:
 def is_path_outside_boundary(path: str, cwd: str) -> bool:
     """Return ``True`` if *path* resolves outside *cwd*.
 
-    Mirrors the original logic in ``permissions.py``:
-    expanduser → resolve → prefix check.
+    Uses :py:meth:`Path.is_relative_to` rather than string-prefix
+    matching, which is vulnerable to sibling-directory bypasses
+    (``/foo/bar_evil/...`` would prefix-match ``/foo/bar``).
     """
+    cwd_resolved = Path(cwd).resolve()
     candidate = Path(path).expanduser()
     if not candidate.is_absolute():
-        candidate = Path(cwd) / candidate
+        candidate = cwd_resolved / candidate
     try:
         resolved = candidate.resolve()
     except OSError:
         return True
-    return not str(resolved).startswith(cwd)
+    try:
+        resolved.relative_to(cwd_resolved)
+        return False
+    except ValueError:
+        return True

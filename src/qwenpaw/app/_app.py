@@ -230,12 +230,6 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
             # pylint: disable-next=protected-access
             workspace_registry._bootstrap_kwargs[key] = value
 
-        if _api_action_command_specs:
-            # pylint: disable-next=protected-access
-            workspace_registry._bootstrap_kwargs[
-                "builtin_command_specs"
-            ] = _api_action_command_specs
-
     except Exception:
         logger.debug(
             "Runtime infrastructure init skipped",

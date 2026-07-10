@@ -96,9 +96,14 @@ class _HangingApprovalConn(_FakeConn):
 
 
 async def _drain() -> None:
-    """Let the fire-and-forget advertise task run to completion."""
-    for _ in range(5):
-        await asyncio.sleep(0)
+    """Let the fire-and-forget advertise task run to completion.
+
+    ``_advertise_commands`` now awaits ``_ensure_workspace()`` to
+    guarantee the registry is populated, so we need enough time for
+    the workspace to boot before commands are advertised.
+    """
+    for _ in range(50):
+        await asyncio.sleep(0.02)
 
 
 def test_build_available_commands_set():

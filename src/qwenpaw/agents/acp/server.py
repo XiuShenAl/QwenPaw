@@ -1142,8 +1142,15 @@ class QwenPawACPAgent(Agent):
         return _GENERIC_PROMPT_ERROR
 
     async def _advertise_commands(self, session_id: str) -> None:
-        """Send the ``available_commands_update`` for a session."""
+        """Send the ``available_commands_update`` for a session.
+
+        Awaits ``_ensure_workspace()`` so the registry is fully
+        populated before querying.  Since this method runs inside an
+        ``asyncio.create_task`` (not awaited by the session handler),
+        the wait does not block ``new_session`` / ``load_session``.
+        """
         try:
+            await self._ensure_workspace()
             await self._conn.session_update(
                 session_id=session_id,
                 update=AvailableCommandsUpdate(

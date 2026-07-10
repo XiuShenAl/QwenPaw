@@ -86,7 +86,25 @@ class TestIsPathOutsideBoundary:
         cwd = str(tmp_path)
         assert is_path_outside_boundary("~/some_file", cwd) is True
 
-    def test_nonexistent_path_returns_true(self, tmp_path) -> None:
-        # resolve() on a non-symlink path still works, but broken symlinks
-        # raise OSError which should be treated as outside boundary.
+    def test_sibling_directory_bypass_blocked(self, tmp_path) -> None:
+        """A sibling whose name shares a prefix must NOT pass the check.
+
+        String-prefix matching (``startswith``) would incorrectly allow
+        ``/tmp/project_evil/file`` when cwd is ``/tmp/project`` because
+        the string starts with the cwd prefix.  ``is_relative_to``
+        handles this correctly.
+        """
+        project = tmp_path / "project"
+        project.mkdir()
+        evil = tmp_path / "project_evil"
+        evil.mkdir()
+        target = evil / "secret.txt"
+        target.touch()
+        assert is_path_outside_boundary(str(target), str(project)) is True
+
+    def test_exact_cwd_path_is_inside(self, tmp_path) -> None:
+        cwd = str(tmp_path)
+        assert is_path_outside_boundary(cwd, cwd) is False
+
+    def test_nonexistent_path_inside_cwd(self, tmp_path) -> None:
         assert is_path_outside_boundary("nonexistent", str(tmp_path)) is False
