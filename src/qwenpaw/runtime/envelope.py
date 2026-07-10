@@ -19,6 +19,8 @@ from .message_convert import _media_type_to_block_type
 
 logger = logging.getLogger(__name__)
 
+_TOOL_ERROR_STATES = frozenset({"error", "interrupted", "denied"})
+
 
 def _gen_msg_id() -> str:
     return "msg_" + uuid.uuid4().hex
@@ -508,10 +510,18 @@ class Envelope:
                 out_message.name = "assistant"
                 out_message.object = "message"
 
+            msg_status = (
+                RunStatus.Failed
+                if tool_state in _TOOL_ERROR_STATES
+                else RunStatus.Completed
+            )
+
             out_message.add_content(new_content=final_content)
-            yield self._tag_seq(final_content.completed())
+            final_content.status = msg_status
+            yield self._tag_seq(final_content)
             self._response.output.append(out_message)
-            yield self._tag_seq(out_message.completed())
+            out_message.status = msg_status
+            yield self._tag_seq(out_message)
 
         # === DATA BLOCK ===
         elif evt_type == EventType.DATA_BLOCK_START.value:
