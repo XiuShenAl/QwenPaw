@@ -130,6 +130,25 @@ class ACPHostedClient:
                 return opt
         return None
 
+    async def _emit_hard_block_cancel(self, suspended: Any) -> None:
+        """Emit a ``permission_cancelled`` status for a hard-blocked call."""
+        await self._emit_message(
+            {
+                "type": "status",
+                "status": "permission_cancelled",
+                "summary": (
+                    "The command matched an ACP hard-block rule and "
+                    "was prevented from running. To continue the "
+                    "external agent task, reply with "
+                    '`delegate_external_agent(action="respond", '
+                    "runner=..., message=...)`."
+                ),
+                "tool_kind": suspended.tool_kind,
+                "tool_name": suspended.tool_name,
+            },
+            True,
+        )
+
     async def request_permission(
         self,
         options: list[Any],
@@ -151,22 +170,7 @@ class ACPHostedClient:
                     tool_call=tool_call,
                     options=options,
                 )
-                await self._emit_message(
-                    {
-                        "type": "status",
-                        "status": "permission_cancelled",
-                        "summary": (
-                            "The command matched an ACP hard-block rule and "
-                            "was prevented from running. To continue the "
-                            "external agent task, reply with "
-                            '`delegate_external_agent(action="respond", '
-                            "runner=..., message=...)`."
-                        ),
-                        "tool_kind": suspended.tool_kind,
-                        "tool_name": suspended.tool_name,
-                    },
-                    True,
-                )
+                await self._emit_hard_block_cancel(suspended)
                 return adapter.cancelled_response()
 
             # Auto-approve: pick the most permissive allow option
@@ -187,22 +191,7 @@ class ACPHostedClient:
         )
 
         if adapter.is_hard_blocked(tool_call):
-            await self._emit_message(
-                {
-                    "type": "status",
-                    "status": "permission_cancelled",
-                    "summary": (
-                        "The command matched an ACP hard-block rule and "
-                        "was prevented from running. To continue the "
-                        "external agent task, reply with "
-                        '`delegate_external_agent(action="respond", '
-                        "runner=..., message=...)`."
-                    ),
-                    "tool_kind": suspended.tool_kind,
-                    "tool_name": suspended.tool_name,
-                },
-                True,
-            )
+            await self._emit_hard_block_cancel(suspended)
             return adapter.cancelled_response()
 
         await self._emit_message(

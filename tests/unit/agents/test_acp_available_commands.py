@@ -95,15 +95,24 @@ class _HangingApprovalConn(_FakeConn):
             raise
 
 
-async def _drain() -> None:
-    """Let the fire-and-forget advertise task run to completion.
+async def _drain(conn: _FakeConn, *, timeout: float = 5.0) -> None:
+    """Wait until at least one ``session_update`` has been recorded.
 
-    ``_advertise_commands`` now awaits ``_ensure_workspace()`` to
-    guarantee the registry is populated, so we need enough time for
-    the workspace to boot before commands are advertised.
+    Uses polling with an exponential-ish back-off instead of a fixed
+    sleep so the test finishes quickly on fast machines and doesn't
+    flake on slow CI runners.
     """
-    for _ in range(50):
-        await asyncio.sleep(0.02)
+    elapsed = 0.0
+    interval = 0.01
+    while elapsed < timeout:
+        if conn.updates:
+            return
+        await asyncio.sleep(interval)
+        elapsed += interval
+        interval = min(interval * 1.5, 0.2)
+    raise TimeoutError(
+        f"_advertise_commands did not fire within {timeout}s",
+    )
 
 
 def test_build_available_commands_set():
@@ -122,7 +131,7 @@ async def test_new_session_advertises_commands():
     agent.on_connect(conn)
 
     response = await agent.new_session(cwd="/tmp")
-    await _drain()
+    await _drain(conn)
 
     assert conn.updates, "expected an available_commands_update notification"
     session_id, update = conn.updates[0]
@@ -140,7 +149,7 @@ async def test_load_session_advertises_commands():
     agent.on_connect(conn)
 
     await agent.load_session(cwd="/tmp", session_id="sess-123")
-    await _drain()
+    await _drain(conn)
 
     assert conn.updates
     session_id, update = conn.updates[0]

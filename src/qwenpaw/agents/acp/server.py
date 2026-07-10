@@ -252,6 +252,7 @@ class QwenPawACPAgent(Agent):
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._workspace: Any | None = None
         self._workspace_ready = False
+        self._workspace_lock = asyncio.Lock()
         self._app_services: Any | None = None
         self._app_services_started = False
 
@@ -351,34 +352,45 @@ class QwenPawACPAgent(Agent):
         )
 
     async def _ensure_workspace(self) -> Any:
-        """Boot a full ``Workspace`` (once) and return it."""
+        """Boot a full ``Workspace`` (once) and return it.
+
+        Protected by ``_workspace_lock`` so concurrent callers (e.g.
+        multiple ``_advertise_commands`` tasks) don't race to create
+        duplicate workspaces.
+        """
         if self._workspace is not None and self._workspace_ready:
             return self._workspace
 
-        from ...app.workspace.workspace import Workspace
+        async with self._workspace_lock:
+            # Double-check after acquiring the lock.
+            if self._workspace is not None and self._workspace_ready:
+                return self._workspace
 
-        agent_id = self._resolve_agent_id()
-        workspace_dir = self._resolve_workspace_dir(agent_id)
+            from ...app.workspace.workspace import Workspace
 
-        workspace = Workspace(
-            agent_id=agent_id,
-            workspace_dir=str(workspace_dir),
-        )
-        app_services = await self._ensure_app_services()
-        workspace.bootstrap_plugins(
-            **self._build_bootstrap_kwargs(app_services),
-        )
-        workspace.set_app_services(app_services)
-        await workspace.start()
+            agent_id = self._resolve_agent_id()
+            workspace_dir = self._resolve_workspace_dir(agent_id)
 
-        self._workspace = workspace
-        self._workspace_ready = True
-        logger.info(
-            "QwenPaw ACP Agent workspace started: agent_id=%s workspace=%s",
-            agent_id,
-            workspace_dir,
-        )
-        return workspace
+            workspace = Workspace(
+                agent_id=agent_id,
+                workspace_dir=str(workspace_dir),
+            )
+            app_services = await self._ensure_app_services()
+            workspace.bootstrap_plugins(
+                **self._build_bootstrap_kwargs(app_services),
+            )
+            workspace.set_app_services(app_services)
+            await workspace.start()
+
+            self._workspace = workspace
+            self._workspace_ready = True
+            logger.info(
+                "QwenPaw ACP Agent workspace started:"
+                " agent_id=%s workspace=%s",
+                agent_id,
+                workspace_dir,
+            )
+            return workspace
 
     async def _shutdown_workspace(self) -> None:
         """Gracefully stop the workspace."""

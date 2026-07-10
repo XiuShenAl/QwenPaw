@@ -39,9 +39,17 @@ def is_command_destructive(command: str) -> bool:
 def is_path_outside_boundary(path: str, cwd: str) -> bool:
     """Return ``True`` if *path* resolves outside *cwd*.
 
-    Uses :py:meth:`Path.is_relative_to` rather than string-prefix
-    matching, which is vulnerable to sibling-directory bypasses
-    (``/foo/bar_evil/...`` would prefix-match ``/foo/bar``).
+    Uses :py:meth:`pathlib.PurePath.relative_to` rather than
+    string-prefix matching, which is vulnerable to sibling-directory
+    bypasses (``/foo/bar_evil/...`` would prefix-match ``/foo/bar``).
+
+    *cwd* may already be resolved; ``resolve()`` is idempotent so
+    the extra call is safe (one additional stat syscall at most).
+
+    **Cross-platform note:** On Windows, paths on different drive
+    letters (e.g. ``C:\\workspace`` vs ``D:\\evil``) are correctly
+    rejected because ``relative_to()`` raises ``ValueError`` when
+    the drives differ.
     """
     cwd_resolved = Path(cwd).resolve()
     candidate = Path(path).expanduser()
