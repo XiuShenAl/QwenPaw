@@ -33,4 +33,10 @@ def make_offload_hint_msg(entry: Any) -> Any:
         name="system",
         role="assistant",
         content=[notification] + result_blocks,
+        metadata={
+            "hint_type": "tool_completed",
+            "tool_call_id": entry.ctx.tool_call_id,
+            "tool_name": entry.ctx.tool_name,
+            "end_state": end,
+        },
     )

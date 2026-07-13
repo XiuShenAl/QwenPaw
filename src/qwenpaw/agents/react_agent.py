@@ -587,21 +587,102 @@ class QwenPawAgent(CodingModeMixin, Agent):
         """Return the ToolCoordinator from request_context, or None."""
         return (self._request_context or {}).get("tool_coordinator")
 
-    async def _inject_pending_hints(self) -> None:
-        """Pop background-tool hints and append them to agent context."""
+    async def _inject_pending_hints_with_events(self) -> list[Any]:
+        """Pop background-tool hints, append to context, and build
+        tool-result events so the SSE stream renders them inline.
+
+        Returns a list of AgentEvents that the caller should yield
+        before proceeding with the normal reply flow.
+        """
+        from agentscope.event import (
+            ToolCallEndEvent,
+            ToolCallStartEvent,
+            ToolResultEndEvent,
+            ToolResultStartEvent,
+            ToolResultTextDeltaEvent,
+        )
+        from agentscope.message import ToolResultState
+
         mgr = self._get_tool_coordinator()
         if mgr is None:
-            return
+            return []
         session_id = (self._request_context or {}).get("session_id", "")
         if not session_id:
-            return
+            return []
+
         hints = await mgr.pop_pending_hints(session_id)
+        if not hints:
+            return []
+
+        events: list[Any] = []
         for hint in hints:
             self.state.context.append(hint)
 
+            meta = getattr(hint, "metadata", None) or {}
+            if meta.get("hint_type") != "tool_completed":
+                continue
+
+            tool_name = meta.get("tool_name", "unknown")
+            end_state = meta.get("end_state", "unknown")
+
+            hint_reply_id = uuid.uuid4().hex
+            new_call_id = f"bg-{uuid.uuid4().hex[:24]}"
+
+            result_text_parts: list[str] = []
+            for block in (hint.content or [])[1:]:
+                text = getattr(block, "text", None)
+                if text is not None:
+                    result_text_parts.append(text)
+                else:
+                    result_text_parts.append(str(block))
+            result_text = "\n".join(result_text_parts) or "(no output)"
+
+            state = (
+                ToolResultState.SUCCESS
+                if end_state == "success"
+                else ToolResultState.ERROR
+            )
+
+            events.extend(
+                [
+                    ToolCallStartEvent(
+                        reply_id=hint_reply_id,
+                        tool_call_id=new_call_id,
+                        tool_call_name=tool_name,
+                    ),
+                    ToolCallEndEvent(
+                        reply_id=hint_reply_id,
+                        tool_call_id=new_call_id,
+                    ),
+                    ToolResultStartEvent(
+                        reply_id=hint_reply_id,
+                        tool_call_id=new_call_id,
+                        tool_call_name=tool_name,
+                    ),
+                    ToolResultTextDeltaEvent(
+                        reply_id=hint_reply_id,
+                        tool_call_id=new_call_id,
+                        delta=result_text,
+                    ),
+                    ToolResultEndEvent(
+                        reply_id=hint_reply_id,
+                        tool_call_id=new_call_id,
+                        state=state,
+                    ),
+                ],
+            )
+
+        return events
+
     async def _reply(self, **kwargs: Any) -> Any:
-        """Override to inject pending background-tool hints before reply."""
-        await self._inject_pending_hints()
+        """Override to inject pending background-tool hints before reply.
+
+        Hint events use their own reply_id (generated per hint) so they
+        render as independent tool cards in the SSE stream, separate from
+        the main reply that follows.
+        """
+        for evt in await self._inject_pending_hints_with_events():
+            yield evt
         async for evt in super()._reply(**kwargs):
             yield evt
 
