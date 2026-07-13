@@ -243,15 +243,18 @@ async def test_background_completion_hint_uses_finalized_response(tmp_path):
         _wait_for_hint(coordinator, "session-bg"),
         timeout=1,
     )
-    tool_result = next(
-        block
-        for block in hint.content
-        if getattr(block, "type", None) == "tool_result"
-    )
 
     assert events[-1].metadata["offloaded"] is True
     assert hint.role == "assistant"
-    assert _tool_result_output_text_bytes(tool_result) <= 512
+    # After the flatten fix, result blocks are inlined directly into
+    # hint.content (no ToolResultBlock wrapper).  The first block is the
+    # notification TextBlock; the remaining blocks are the finalized result.
+    result_text_bytes = sum(
+        len(block.text.encode("utf-8"))
+        for block in hint.content[1:]
+        if getattr(block, "type", None) == "text"
+    )
+    assert result_text_bytes <= 512
     assert finalizer_calls == 1
 
 
