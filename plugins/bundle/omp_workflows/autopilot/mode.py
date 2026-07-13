@@ -73,6 +73,7 @@ class AutopilotMode(AgentMode):
             )
 
     def is_active(self, ctx: Any) -> bool:
+        # pylint: disable=protected-access
         return self._gate is not None and self._gate._state() is not None
 
     async def _handler(self, ctx: "Any", args: str) -> Optional[Msg]:

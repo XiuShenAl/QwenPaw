@@ -761,6 +761,7 @@ def _build_subagent_request_context(
     return rc
 
 
+<<<<<<< HEAD
 @tool_descriptor(
     async_execution=True,
     tool_type="internal",
@@ -769,6 +770,10 @@ def _build_subagent_request_context(
     ui_icon="🔀",
 )
 async def spawn_subagent(
+=======
+@tool_descriptor(async_execution=True)
+async def spawn_subagent(  # pylint: disable=too-many-return-statements
+>>>>>>> b9fc4e66 (fix(omp): resolve pre-commit lint failures in OMP workflow plugins)
     task: str = "",
     fork: bool = False,
     background: bool = False,
@@ -1112,9 +1117,7 @@ async def _spawn_forked_subagent(
     worktree_path = fork_result.get("worktree_path", "")
     worktree_branch = fork_result.get("worktree_branch", "")
 
-    fork_extra = (
-        {"fork_project_dir": worktree_path} if worktree_path else None
-    )
+    fork_extra = {"fork_project_dir": worktree_path} if worktree_path else None
     request_context = _build_subagent_request_context(
         current_agent_id,
         allowed_tools=allowed_tools,

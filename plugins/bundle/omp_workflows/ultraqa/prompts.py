@@ -76,7 +76,7 @@ def _interactive_step() -> str:
         "   spawn_subagent(\n"
         '       task="TEST:\\nGoal: <goal>\\nService: <how to start>\\n'
         'Test cases: <scenarios>",\n'
-        "       allowed_tools=[\"read_file\",\n"
+        '       allowed_tools=["read_file",\n'
         '                      "grep_search",\n'
         '                      "glob_search",\n'
         '                      "execute_shell_command"],\n'

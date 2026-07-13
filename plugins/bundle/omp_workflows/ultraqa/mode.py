@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 _HELP = (
     "**UltraQA** — automated QA cycle engine\n\n"
     "Usage:\n"
-    "  `/ultraqa [--tests|--build|--lint|--typecheck|--custom \"cmd\"]"
+    '  `/ultraqa [--tests|--build|--lint|--typecheck|--custom "cmd"]'
     " [--interactive] [target]`\n\n"
     "Runs repeated QA cycles: check → diagnose → fix → re-check.\n"
     "Stops when all checks pass or max cycles reached."
@@ -74,6 +74,7 @@ class UltraQAMode(AgentMode):
             )
 
     def is_active(self, ctx: Any) -> bool:
+        # pylint: disable=protected-access
         return self._gate is not None and self._gate._state() is not None
 
     async def _handler(self, ctx: "Any", args: str) -> Optional[Msg]:

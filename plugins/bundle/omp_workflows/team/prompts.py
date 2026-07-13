@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def build_continuation(
+def build_continuation(  # pylint: disable=unused-argument
     phase: str,
     iteration: int,
     max_iterations: int,

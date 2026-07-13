@@ -38,7 +38,10 @@ class WorkflowState:
 
     @classmethod
     def from_existing(
-        cls, workspace_dir: Path, mode_name: str, instance_dir: Path,
+        cls,
+        workspace_dir: Path,
+        mode_name: str,
+        instance_dir: Path,
     ) -> WorkflowState:
         """Attach to an already-created instance directory."""
         wf = cls(workspace_dir, mode_name)

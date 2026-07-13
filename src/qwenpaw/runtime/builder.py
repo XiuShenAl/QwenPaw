@@ -122,7 +122,7 @@ class AgentBuilder:
 
     # ----------------------------------------------------------------- build
 
-    async def build(  # pylint: disable=too-many-statements
+    async def build(  # pylint: disable=too-many-statements,too-many-branches
         self,
         ctx: Any,
     ) -> Any:
