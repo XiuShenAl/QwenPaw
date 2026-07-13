@@ -87,7 +87,7 @@ class RalphGate(LoopGate):
             self.deactivate()
             return StopHandlerResult(
                 action=StopAction.TERMINATE,
-                reason=("Reached max iterations " f"({st.max_iterations})"),
+                reason=f"Reached max iterations ({st.max_iterations})",
             )
 
         if data.get("completed", False):

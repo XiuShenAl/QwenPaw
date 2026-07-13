@@ -74,6 +74,7 @@ class UltraQAMode(AgentMode):
             )
 
     def is_active(self, ctx: Any) -> bool:
+        # Follows upstream MissionMode pattern (LoopGate lacks public API)
         # pylint: disable=protected-access
         return self._gate is not None and self._gate._state() is not None
 

@@ -75,6 +75,7 @@ class TeamMode(AgentMode):
             )
 
     def is_active(self, ctx: Any) -> bool:
+        # Follows upstream MissionMode pattern (LoopGate lacks public API)
         # pylint: disable=protected-access
         return self._gate is not None and self._gate._state() is not None
 
@@ -104,7 +105,8 @@ class TeamMode(AgentMode):
             f"Task: {task}\n"
             f"Workers: {parsed['agent_count']}, Role: {parsed['agent_role']}\n"
             f"State directory: {loop_dir}\n"
-            f"Phase: plan — explore the codebase and create a task breakdown."
+            "Phase: plan \u2014 explore the codebase and "
+            "create a task breakdown."
         )
         _rewrite(ctx, prompt)
         logger.info("Team started: %s", loop_dir)

@@ -96,7 +96,7 @@ class TeamPipelineGate(LoopGate):
             self.deactivate()
             return StopHandlerResult(
                 action=StopAction.TERMINATE,
-                reason=("Iteration limit " f"({st.max_iterations})"),
+                reason=f"Iteration limit ({st.max_iterations})",
             )
 
         phase = data.get("current_phase", "plan")
@@ -121,7 +121,7 @@ class TeamPipelineGate(LoopGate):
                 self.deactivate()
                 return StopHandlerResult(
                     action=StopAction.TERMINATE,
-                    reason=("Fix retry limit " f"({st.max_fix_attempts})"),
+                    reason=f"Fix retry limit ({st.max_fix_attempts})",
                 )
             wf.write_state(
                 {

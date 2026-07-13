@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def build_continuation(  # pylint: disable=unused-argument
+def build_continuation(
     phase: str,
     iteration: int,
     max_iterations: int,
@@ -29,6 +29,8 @@ def build_continuation(  # pylint: disable=unused-argument
         return f"Unknown phase: {phase}. Update state.json."
     return fn(
         loop_dir=loop_dir,
+        iteration=iteration,
+        max_iterations=max_iterations,
         agent_count=agent_count,
         agent_role=agent_role,
         fix_attempts=fix_attempts,
@@ -36,9 +38,10 @@ def build_continuation(  # pylint: disable=unused-argument
     )
 
 
-def _plan(loop_dir: Path, **_kw) -> str:
+def _plan(loop_dir: Path, iteration: int, max_iterations: int, **_kw) -> str:
     return f"""\
 Team Pipeline Controller — phase: plan.
+Pipeline iteration: {iteration}/{max_iterations}
 
 Execute:
 1. Dispatch an explore subagent to map the codebase:
@@ -61,9 +64,10 @@ Execute:
 4. Update {loop_dir}/state.json: set current_phase="prd"."""
 
 
-def _prd(loop_dir: Path, **_kw) -> str:
+def _prd(loop_dir: Path, iteration: int, max_iterations: int, **_kw) -> str:
     return f"""\
 Team Pipeline Controller — phase: prd.
+Pipeline iteration: {iteration}/{max_iterations}
 
 Execute:
 1. Read {loop_dir}/handoffs/plan.md for the task breakdown.
@@ -81,12 +85,15 @@ Execute:
 
 def _exec(
     loop_dir: Path,
+    iteration: int,
+    max_iterations: int,
     agent_count: int = 3,
     agent_role: str = "executor",
     **_kw,
 ) -> str:
     return f"""\
 Team Pipeline Controller — phase: exec.
+Pipeline iteration: {iteration}/{max_iterations}
 Workers: {agent_count}, Role: {agent_role}
 
 Execute:
@@ -107,9 +114,10 @@ Write your result to {loop_dir}/results/agent-001.json",
 6. Update {loop_dir}/state.json: set current_phase="verify"."""
 
 
-def _verify(loop_dir: Path, **_kw) -> str:
+def _verify(loop_dir: Path, iteration: int, max_iterations: int, **_kw) -> str:
     return f"""\
 Team Pipeline Controller — phase: verify.
+Pipeline iteration: {iteration}/{max_iterations}
 
 Execute:
 1. Read {loop_dir}/handoffs/exec-summary.md.
@@ -142,12 +150,15 @@ Execute:
 
 def _fix(
     loop_dir: Path,
+    iteration: int,
+    max_iterations: int,
     fix_attempts: int = 0,
     max_fix_attempts: int = 3,
     **_kw,
 ) -> str:
     return f"""\
 Team Pipeline Controller — phase: fix.
+Pipeline iteration: {iteration}/{max_iterations}
 Fix attempt: {fix_attempts}/{max_fix_attempts}
 
 Execute:

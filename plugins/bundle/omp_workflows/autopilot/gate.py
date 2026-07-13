@@ -94,7 +94,7 @@ class AutopilotGate(LoopGate):
             self.deactivate()
             return StopHandlerResult(
                 action=StopAction.TERMINATE,
-                reason=("Total iteration limit " f"({st.max_iterations})"),
+                reason=f"Total iteration limit ({st.max_iterations})",
             )
 
         phase = data.get("phase", "expansion")

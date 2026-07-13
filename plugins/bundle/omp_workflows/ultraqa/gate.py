@@ -106,7 +106,7 @@ class UltraQAGate(LoopGate):
             self.deactivate()
             return StopHandlerResult(
                 action=StopAction.TERMINATE,
-                reason=(f"Reached max cycles ({st.max_cycles})"),
+                reason=f"Reached max cycles ({st.max_cycles})",
             )
 
         if _repeated_failure(

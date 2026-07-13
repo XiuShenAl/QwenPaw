@@ -382,7 +382,8 @@ def format_background_submission_text(
             f"[SESSION: {session_id}]",
             "",
             "Task submitted successfully.",
-            "The subagent is working autonomously — do NOT poll immediately.",
+            "The subagent is working autonomously"
+            " \u2014 do NOT poll immediately.",
             "Wait at least 30 seconds, then check with:",
             f"  check_agent_task(task_id='{task_id}')",
         ],
