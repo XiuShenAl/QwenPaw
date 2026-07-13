@@ -13,7 +13,7 @@ from qwenpaw.loop.gates.loop_gate import LoopGate
 
 from ..shared.constants import ULTRAQA_MAX_CYCLES, ULTRAQA_MAX_SAME_FAILURE
 from ..shared.state import WorkflowState
-from .prompts import build_continuation
+from .prompts import build_continuation as _build_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -62,29 +62,42 @@ class UltraQAGate(LoopGate):
             custom_cmd=custom_cmd,
             interactive=interactive,
         )
-        wf.write_state({"cycle": 0, "qa_passed": False, "last_failures": []})
+        wf.write_state(
+            {
+                "cycle": 0,
+                "qa_passed": False,
+                "last_failures": [],
+            },
+        )
         self.activate(state)
         return loop_dir
 
-    async def check(self, ctx: Any) -> Optional[StopHandlerResult]:
+    async def check(self, _ctx: Any) -> Optional[StopHandlerResult]:
         st: _UltraQAState | None = self._state()
         if st is None:
-            return None
+            return StopHandlerResult(
+                action=StopAction.BYPASS,
+            )
 
         wf = WorkflowState.from_existing(
-            st.workspace_dir, "ultraqa", st.loop_dir,
+            st.workspace_dir,
+            "ultraqa",
+            st.loop_dir,
         )
         data = wf.read_state()
 
         st.qa_passed = data.get("qa_passed", False)
-        st.last_failures = data.get("last_failures", st.last_failures)
+        st.last_failures = data.get(
+            "last_failures",
+            st.last_failures,
+        )
         st.cycle = data.get("cycle", st.cycle)
 
         if st.qa_passed:
             wf.cleanup()
             self.deactivate()
             return StopHandlerResult(
-                action=StopAction.STOP,
+                action=StopAction.TERMINATE,
                 reason="QA goals achieved",
             )
 
@@ -92,26 +105,41 @@ class UltraQAGate(LoopGate):
             wf.cleanup()
             self.deactivate()
             return StopHandlerResult(
-                action=StopAction.STOP,
-                reason=f"Reached max cycles ({st.max_cycles})",
+                action=StopAction.TERMINATE,
+                reason=(f"Reached max cycles ({st.max_cycles})"),
             )
 
-        if _repeated_failure(st.last_failures, ULTRAQA_MAX_SAME_FAILURE):
+        if _repeated_failure(
+            st.last_failures,
+            ULTRAQA_MAX_SAME_FAILURE,
+        ):
             wf.cleanup()
             self.deactivate()
             return StopHandlerResult(
-                action=StopAction.STOP,
+                action=StopAction.TERMINATE,
                 reason="Same failure repeated too many times",
             )
 
         st.cycle += 1
-        wf.write_state({
-            "cycle": st.cycle,
-            "qa_passed": False,
-            "last_failures": st.last_failures,
-        })
+        wf.write_state(
+            {
+                "cycle": st.cycle,
+                "qa_passed": False,
+                "last_failures": st.last_failures,
+            },
+        )
 
-        msg = build_continuation(
+        return StopHandlerResult(
+            action=StopAction.INTERRUPT_AND_CONTINUE,
+            reason="QA cycle in progress",
+        )
+
+    def build_continuation(self) -> str:
+        """Build QA cycle continuation from gate state."""
+        st: _UltraQAState | None = self._state()
+        if st is None:
+            return ""
+        return _build_prompt(
             cycle=st.cycle,
             max_cycles=st.max_cycles,
             goal_type=st.goal_type,
@@ -120,14 +148,13 @@ class UltraQAGate(LoopGate):
             loop_dir=st.loop_dir,
             interactive=st.interactive,
         )
-        return StopHandlerResult(
-            action=StopAction.CONTINUE,
-            continuation_message=msg,
-        )
 
 
-def _repeated_failure(failures: list[str], threshold: int) -> bool:
-    """Check if the most recent failure has repeated >= threshold times."""
+def _repeated_failure(
+    failures: list[str],
+    threshold: int,
+) -> bool:
+    """Check if the most recent failure repeated >= threshold."""
     if len(failures) < threshold:
         return False
     last = failures[-1]

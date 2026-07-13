@@ -13,7 +13,7 @@ from qwenpaw.loop.gates.loop_gate import LoopGate
 
 from ..shared.constants import RALPH_MAX_ITERATIONS
 from ..shared.state import WorkflowState
-from .prompts import build_continuation
+from .prompts import build_continuation as _build_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,7 @@ class _RalphState:
     max_iterations: int = RALPH_MAX_ITERATIONS
     no_deslop: bool = False
     critic_type: str = "architect"
+    prd_summary: str = ""
 
 
 class RalphGate(LoopGate):
@@ -56,20 +57,26 @@ class RalphGate(LoopGate):
             no_deslop=no_deslop,
             critic_type=critic_type,
         )
-        wf.write_state({
-            "iteration": 0,
-            "completed": False,
-        })
+        wf.write_state(
+            {
+                "iteration": 0,
+                "completed": False,
+            },
+        )
         self.activate(state)
         return loop_dir
 
-    async def check(self, ctx: Any) -> Optional[StopHandlerResult]:
+    async def check(self, _ctx: Any) -> Optional[StopHandlerResult]:
         st: _RalphState | None = self._state()
         if st is None:
-            return None
+            return StopHandlerResult(
+                action=StopAction.BYPASS,
+            )
 
         wf = WorkflowState.from_existing(
-            st.workspace_dir, "ralph", st.loop_dir,
+            st.workspace_dir,
+            "ralph",
+            st.loop_dir,
         )
         data = wf.read_state()
 
@@ -79,34 +86,40 @@ class RalphGate(LoopGate):
             wf.cleanup()
             self.deactivate()
             return StopHandlerResult(
-                action=StopAction.STOP,
-                reason=f"Reached max iterations ({st.max_iterations})",
+                action=StopAction.TERMINATE,
+                reason=("Reached max iterations " f"({st.max_iterations})"),
             )
 
         if data.get("completed", False):
             wf.cleanup()
             self.deactivate()
             return StopHandlerResult(
-                action=StopAction.STOP,
+                action=StopAction.TERMINATE,
                 reason="All stories completed and verified",
             )
 
         wf.write_state({**data, "iteration": st.iteration})
 
         prd = wf.read_prd()
-        prd_summary = _summarize_prd(prd)
+        st.prd_summary = _summarize_prd(prd)
 
-        msg = build_continuation(
+        return StopHandlerResult(
+            action=StopAction.INTERRUPT_AND_CONTINUE,
+            reason="Ralph iteration in progress",
+        )
+
+    def build_continuation(self) -> str:
+        """Build Ralph continuation from gate state."""
+        st: _RalphState | None = self._state()
+        if st is None:
+            return ""
+        return _build_prompt(
             iteration=st.iteration,
             max_iterations=st.max_iterations,
             critic_type=st.critic_type,
             no_deslop=st.no_deslop,
             loop_dir=st.loop_dir,
-            prd_summary=prd_summary,
-        )
-        return StopHandlerResult(
-            action=StopAction.CONTINUE,
-            continuation_message=msg,
+            prd_summary=st.prd_summary,
         )
 
 
@@ -116,4 +129,4 @@ def _summarize_prd(prd: dict) -> str:
     if not stories:
         return "PRD: not yet created."
     done = sum(1 for s in stories if s.get("passes"))
-    return f"PRD progress: {done}/{len(stories)} stories completed."
+    return f"PRD progress: {done}/{len(stories)} " "stories completed."

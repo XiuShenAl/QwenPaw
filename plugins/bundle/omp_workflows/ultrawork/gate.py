@@ -12,7 +12,7 @@ from qwenpaw.loop.gates.base import StopAction, StopHandlerResult
 from qwenpaw.loop.gates.loop_gate import LoopGate
 
 from ..shared.state import WorkflowState
-from .prompts import build_continuation
+from .prompts import build_continuation as _build_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -40,18 +40,25 @@ class UltraworkGate(LoopGate):
         """Create state directory and activate."""
         wf = WorkflowState(workspace_dir, "ultrawork")
         loop_dir = wf.create_instance()
-        state = _UltraworkState(loop_dir=loop_dir, workspace_dir=workspace_dir)
+        state = _UltraworkState(
+            loop_dir=loop_dir,
+            workspace_dir=workspace_dir,
+        )
         wf.write_state({"phase": "working"})
         self.activate(state)
         return loop_dir
 
-    async def check(self, ctx: Any) -> Optional[StopHandlerResult]:
+    async def check(self, _ctx: Any) -> Optional[StopHandlerResult]:
         st: _UltraworkState | None = self._state()
         if st is None:
-            return None
+            return StopHandlerResult(
+                action=StopAction.BYPASS,
+            )
 
         wf = WorkflowState.from_existing(
-            st.workspace_dir, "ultrawork", st.loop_dir,
+            st.workspace_dir,
+            "ultrawork",
+            st.loop_dir,
         )
         data = wf.read_state()
 
@@ -62,11 +69,18 @@ class UltraworkGate(LoopGate):
             wf.cleanup()
             self.deactivate()
             return StopHandlerResult(
-                action=StopAction.STOP,
+                action=StopAction.TERMINATE,
                 reason="Ultrawork completed",
             )
 
         return StopHandlerResult(
-            action=StopAction.CONTINUE,
-            continuation_message=build_continuation(st.loop_dir),
+            action=StopAction.INTERRUPT_AND_CONTINUE,
+            reason="Ultrawork in progress",
         )
+
+    def build_continuation(self) -> str:
+        """Build Ultrawork continuation from gate state."""
+        st: _UltraworkState | None = self._state()
+        if st is None:
+            return ""
+        return _build_prompt(st.loop_dir)

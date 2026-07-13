@@ -17,7 +17,7 @@ from ..shared.constants import (
     DEFAULT_MAX_ITERATIONS,
 )
 from ..shared.state import WorkflowState
-from .prompts import build_continuation
+from .prompts import build_continuation as _build_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +29,14 @@ class _AutopilotState:
     active: bool = True
     iteration: int = 0
     max_iterations: int = DEFAULT_MAX_ITERATIONS * 2
-    phase_entry_iteration: dict[str, int] = field(default_factory=dict)
+    phase_entry_iteration: dict[str, int] = field(
+        default_factory=dict,
+    )
     skip_qa: bool = False
     skip_validation: bool = False
     validation_round: int = 0
     max_validation_rounds: int = AUTOPILOT_MAX_VALIDATION_ROUNDS
+    phase: str = "expansion"
 
 
 class AutopilotGate(LoopGate):
@@ -61,17 +64,26 @@ class AutopilotGate(LoopGate):
             skip_qa=skip_qa,
             skip_validation=skip_validation,
         )
-        wf.write_state({"phase": "expansion", "validation_round": 0})
+        wf.write_state(
+            {
+                "phase": "expansion",
+                "validation_round": 0,
+            },
+        )
         self.activate(state)
         return loop_dir
 
-    async def check(self, ctx: Any) -> Optional[StopHandlerResult]:
+    async def check(self, _ctx: Any) -> Optional[StopHandlerResult]:
         st: _AutopilotState | None = self._state()
         if st is None:
-            return None
+            return StopHandlerResult(
+                action=StopAction.BYPASS,
+            )
 
         wf = WorkflowState.from_existing(
-            st.workspace_dir, "autopilot", st.loop_dir,
+            st.workspace_dir,
+            "autopilot",
+            st.loop_dir,
         )
         data = wf.read_state()
 
@@ -81,18 +93,22 @@ class AutopilotGate(LoopGate):
             wf.cleanup()
             self.deactivate()
             return StopHandlerResult(
-                action=StopAction.STOP,
-                reason=f"Total iteration limit ({st.max_iterations})",
+                action=StopAction.TERMINATE,
+                reason=("Total iteration limit " f"({st.max_iterations})"),
             )
 
         phase = data.get("phase", "expansion")
-        st.validation_round = data.get("validation_round", st.validation_round)
+        st.phase = phase
+        st.validation_round = data.get(
+            "validation_round",
+            st.validation_round,
+        )
 
         if phase == "cleanup":
             wf.cleanup()
             self.deactivate()
             return StopHandlerResult(
-                action=StopAction.STOP,
+                action=StopAction.TERMINATE,
                 reason="Autopilot completed",
             )
 
@@ -105,12 +121,22 @@ class AutopilotGate(LoopGate):
             wf.cleanup()
             self.deactivate()
             return StopHandlerResult(
-                action=StopAction.STOP,
+                action=StopAction.TERMINATE,
                 reason=f"Phase '{phase}' stalled",
             )
 
-        msg = build_continuation(
-            phase=phase,
+        return StopHandlerResult(
+            action=StopAction.INTERRUPT_AND_CONTINUE,
+            reason="Autopilot in progress",
+        )
+
+    def build_continuation(self) -> str:
+        """Build Autopilot continuation from gate state."""
+        st: _AutopilotState | None = self._state()
+        if st is None:
+            return ""
+        return _build_prompt(
+            phase=st.phase,
             iteration=st.iteration,
             max_iterations=st.max_iterations,
             loop_dir=st.loop_dir,
@@ -118,8 +144,4 @@ class AutopilotGate(LoopGate):
             skip_validation=st.skip_validation,
             validation_round=st.validation_round,
             max_validation_rounds=st.max_validation_rounds,
-        )
-        return StopHandlerResult(
-            action=StopAction.CONTINUE,
-            continuation_message=msg,
         )

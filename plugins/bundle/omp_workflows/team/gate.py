@@ -11,9 +11,12 @@ from typing import Any, Optional
 from qwenpaw.loop.gates.base import StopAction, StopHandlerResult
 from qwenpaw.loop.gates.loop_gate import LoopGate
 
-from ..shared.constants import TEAM_MAX_FIX_ATTEMPTS, TEAM_MAX_ITERATIONS
+from ..shared.constants import (
+    TEAM_MAX_FIX_ATTEMPTS,
+    TEAM_MAX_ITERATIONS,
+)
 from ..shared.state import WorkflowState
-from .prompts import build_continuation
+from .prompts import build_continuation as _build_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,7 @@ class _TeamState:
     agent_role: str = "executor"
     fix_attempts: int = 0
     max_fix_attempts: int = TEAM_MAX_FIX_ATTEMPTS
+    phase: str = "plan"
 
 
 class TeamPipelineGate(LoopGate):
@@ -62,19 +66,27 @@ class TeamPipelineGate(LoopGate):
             agent_count=agent_count,
             agent_role=agent_role,
         )
-        wf.write_state({
-            "current_phase": "plan",
-            "fix_attempts": 0,
-        })
+        wf.write_state(
+            {
+                "current_phase": "plan",
+                "fix_attempts": 0,
+            },
+        )
         self.activate(state)
         return loop_dir
 
-    async def check(self, ctx: Any) -> Optional[StopHandlerResult]:
+    async def check(self, _ctx: Any) -> Optional[StopHandlerResult]:
         st: _TeamState | None = self._state()
         if st is None:
-            return None
+            return StopHandlerResult(
+                action=StopAction.BYPASS,
+            )
 
-        wf = WorkflowState.from_existing(st.workspace_dir, "team", st.loop_dir)
+        wf = WorkflowState.from_existing(
+            st.workspace_dir,
+            "team",
+            st.loop_dir,
+        )
         data = wf.read_state()
 
         st.iteration += 1
@@ -83,18 +95,22 @@ class TeamPipelineGate(LoopGate):
             wf.cleanup()
             self.deactivate()
             return StopHandlerResult(
-                action=StopAction.STOP,
-                reason=f"Iteration limit ({st.max_iterations})",
+                action=StopAction.TERMINATE,
+                reason=("Iteration limit " f"({st.max_iterations})"),
             )
 
         phase = data.get("current_phase", "plan")
-        st.fix_attempts = data.get("fix_attempts", st.fix_attempts)
+        st.phase = phase
+        st.fix_attempts = data.get(
+            "fix_attempts",
+            st.fix_attempts,
+        )
 
         if phase == "completed":
             wf.cleanup()
             self.deactivate()
             return StopHandlerResult(
-                action=StopAction.STOP,
+                action=StopAction.TERMINATE,
                 reason="Team pipeline completed",
             )
 
@@ -104,13 +120,28 @@ class TeamPipelineGate(LoopGate):
                 wf.cleanup()
                 self.deactivate()
                 return StopHandlerResult(
-                    action=StopAction.STOP,
-                    reason=f"Fix retry limit ({st.max_fix_attempts})",
+                    action=StopAction.TERMINATE,
+                    reason=("Fix retry limit " f"({st.max_fix_attempts})"),
                 )
-            wf.write_state({**data, "fix_attempts": st.fix_attempts})
+            wf.write_state(
+                {
+                    **data,
+                    "fix_attempts": st.fix_attempts,
+                },
+            )
 
-        msg = build_continuation(
-            phase=phase,
+        return StopHandlerResult(
+            action=StopAction.INTERRUPT_AND_CONTINUE,
+            reason="Team pipeline in progress",
+        )
+
+    def build_continuation(self) -> str:
+        """Build Team continuation from gate state."""
+        st: _TeamState | None = self._state()
+        if st is None:
+            return ""
+        return _build_prompt(
+            phase=st.phase,
             iteration=st.iteration,
             max_iterations=st.max_iterations,
             agent_count=st.agent_count,
@@ -118,8 +149,4 @@ class TeamPipelineGate(LoopGate):
             loop_dir=st.loop_dir,
             fix_attempts=st.fix_attempts,
             max_fix_attempts=st.max_fix_attempts,
-        )
-        return StopHandlerResult(
-            action=StopAction.CONTINUE,
-            continuation_message=msg,
         )
