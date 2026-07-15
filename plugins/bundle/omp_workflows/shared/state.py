@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -27,8 +28,9 @@ class WorkflowState:
     def create_instance(self) -> Path:
         """Create a timestamped instance directory."""
         ts = time.strftime("%Y%m%d-%H%M%S")
+        suffix = uuid.uuid4().hex[:6]
         base = self.workspace_dir / ".qwenpaw" / "omp_workflows"
-        self._instance_dir = base / f"{self.mode_name}-{ts}"
+        self._instance_dir = base / f"{self.mode_name}-{ts}-{suffix}"
         self._instance_dir.mkdir(parents=True, exist_ok=True)
         return self._instance_dir
 

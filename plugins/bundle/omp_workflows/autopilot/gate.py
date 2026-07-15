@@ -12,9 +12,9 @@ from qwenpaw.loop.gates.base import StopAction, StopHandlerResult
 from qwenpaw.loop.gates.loop_gate import LoopGate
 
 from ..shared.constants import (
+    AUTOPILOT_MAX_ITERATIONS,
     AUTOPILOT_MAX_PHASE_ITERATIONS,
     AUTOPILOT_MAX_VALIDATION_ROUNDS,
-    DEFAULT_MAX_ITERATIONS,
 )
 from ..shared.state import WorkflowState
 from .prompts import build_continuation as _build_prompt
@@ -28,7 +28,7 @@ class _AutopilotState:
     workspace_dir: Path
     active: bool = True
     iteration: int = 0
-    max_iterations: int = DEFAULT_MAX_ITERATIONS * 2
+    max_iterations: int = AUTOPILOT_MAX_ITERATIONS
     phase_entry_iteration: dict[str, int] = field(
         default_factory=dict,
     )
@@ -73,7 +73,10 @@ class AutopilotGate(LoopGate):
         self.activate(state)
         return loop_dir
 
-    async def check(self, _ctx: Any) -> Optional[StopHandlerResult]:
+    async def check(self, ctx: Any) -> Optional[StopHandlerResult]:
+        if isinstance(ctx, dict) and ctx.get("has_tool_calls"):
+            return StopHandlerResult(action=StopAction.BYPASS)
+
         st: _AutopilotState | None = self._state()
         if st is None:
             return StopHandlerResult(

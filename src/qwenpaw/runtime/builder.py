@@ -176,8 +176,9 @@ class AgentBuilder:
             effective_skills = []
 
         subagent_skills = request_context.get("subagent_skills")
-        if subagent_skills is not None:
-            effective_skills = list(subagent_skills)
+        if isinstance(subagent_skills, list):
+            parent_set = set(effective_skills)
+            effective_skills = [s for s in subagent_skills if s in parent_set]
 
         # Compute active modes.
         active_modes: set[str] = set()

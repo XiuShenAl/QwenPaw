@@ -70,7 +70,7 @@ class QwenPawLocalWorkspace(AgentScopeLocalWorkspace):
         subagent_whitelist = (request_context or {}).get(
             "subagent_allowed_tools",
         )
-        if subagent_whitelist is not None:
+        if isinstance(subagent_whitelist, list):
             sa_set = set(subagent_whitelist)
             allowed = (allowed & sa_set) if allowed is not None else sa_set
 

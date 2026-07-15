@@ -66,7 +66,10 @@ class RalphGate(LoopGate):
         self.activate(state)
         return loop_dir
 
-    async def check(self, _ctx: Any) -> Optional[StopHandlerResult]:
+    async def check(self, ctx: Any) -> Optional[StopHandlerResult]:
+        if isinstance(ctx, dict) and ctx.get("has_tool_calls"):
+            return StopHandlerResult(action=StopAction.BYPASS)
+
         st: _RalphState | None = self._state()
         if st is None:
             return StopHandlerResult(
