@@ -1,22 +1,24 @@
-import React from "react";
-import { Button, Popover, Space, Tag } from "antd";
-import {
-  CloudUploadOutlined,
-  StopOutlined,
-  ClockCircleOutlined,
-  FieldTimeOutlined,
-  CloseCircleOutlined,
-  SettingOutlined,
-} from "@ant-design/icons";
-import { toolCallsApi } from "../../../../api/modules/toolCalls";
+/**
+ * OffloadBanner — renders below the tool card as a horizontal panel.
+ *
+ * Shows a circular countdown ring, action buttons, and a note about
+ * the default offload policy.
+ */
 
-interface Props {
+import React, { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { toolCallsApi } from "../../../../api/modules/toolCalls";
+import styles from "./offloadBanner.module.less";
+
+const CIRCUMFERENCE = 2 * Math.PI * 10;
+
+interface OffloadBannerProps {
   sessionId: string;
   toolCallId: string;
   offloadRemaining: number | null;
   killRemaining: number | null;
-  open: boolean;
-  onToggle: () => void;
+  totalSeconds: number;
+  defaultPolicy: "offload" | "keep_foreground";
   onClose: () => void;
   onUpdateRemaining: (
     offload: number | null,
@@ -24,118 +26,208 @@ interface Props {
   ) => void;
 }
 
-function formatTime(secs: number | null): string {
-  if (secs === null) return "\u221E";
-  return `${Math.ceil(secs)}s`;
-}
-
-export const ToolCallControlPopover: React.FC<Props> = ({
+export const OffloadBanner: React.FC<OffloadBannerProps> = ({
   sessionId,
   toolCallId,
   offloadRemaining,
   killRemaining,
-  open,
-  onToggle,
+  totalSeconds,
+  defaultPolicy,
   onClose,
   onUpdateRemaining,
 }) => {
-  const handleOffload = async () => {
-    await toolCallsApi.offload(sessionId, toolCallId);
-    onClose();
-  };
-
-  const handlePrevent = async () => {
-    const res = await toolCallsApi.preventOffload(sessionId, toolCallId);
-    onUpdateRemaining(res.offload_remaining, res.kill_remaining);
-    onClose();
-  };
-
-  const handleExtendOffload = async () => {
-    const res = await toolCallsApi.extendOffload(sessionId, toolCallId, 30);
-    onUpdateRemaining(res.offload_remaining, res.kill_remaining);
-  };
-
-  const handleExtendKill = async () => {
-    const res = await toolCallsApi.extendKill(sessionId, toolCallId, 30);
-    onUpdateRemaining(res.offload_remaining, res.kill_remaining);
-  };
-
-  const handleCancel = async () => {
-    await toolCallsApi.cancel(sessionId, toolCallId);
-    onClose();
-  };
-
-  const content = (
-    <Space direction="vertical" size="small" style={{ width: 240 }}>
-      {offloadRemaining !== null && (
-        <Tag color={offloadRemaining <= 10 ? "red" : "blue"}>
-          Offload in: {formatTime(offloadRemaining)}
-        </Tag>
-      )}
-      {killRemaining !== null && (
-        <Tag>Timeout: {formatTime(killRemaining)}</Tag>
-      )}
-      <Button
-        block
-        size="small"
-        icon={<CloudUploadOutlined />}
-        onClick={handleOffload}
-      >
-        Move to background
-      </Button>
-      <Button
-        block
-        size="small"
-        icon={<StopOutlined />}
-        onClick={handlePrevent}
-      >
-        Prevent offload
-      </Button>
-      <Button
-        block
-        size="small"
-        icon={<ClockCircleOutlined />}
-        onClick={handleExtendOffload}
-      >
-        Extend offload (+30s)
-      </Button>
-      <Button
-        block
-        size="small"
-        icon={<FieldTimeOutlined />}
-        onClick={handleExtendKill}
-      >
-        Extend timeout (+30s)
-      </Button>
-      <Button
-        block
-        size="small"
-        danger
-        icon={<CloseCircleOutlined />}
-        onClick={handleCancel}
-      >
-        Cancel execution
-      </Button>
-    </Space>
+  const { t } = useTranslation();
+  const [collapsing, setCollapsing] = useState(false);
+  const [displaySecs, setDisplaySecs] = useState(
+    offloadRemaining !== null ? Math.ceil(offloadRemaining) : 0,
   );
+  const startTimeRef = useRef(performance.now());
+  const startSecsRef = useRef(displaySecs);
+  const timerRef = useRef<ReturnType<typeof setInterval>>();
+  const [busy, setBusy] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (offloadRemaining === null || offloadRemaining <= 0) return;
+    startTimeRef.current = performance.now();
+    startSecsRef.current = Math.ceil(offloadRemaining);
+    setDisplaySecs(startSecsRef.current);
+
+    timerRef.current = setInterval(() => {
+      const elapsed = (performance.now() - startTimeRef.current) / 1000;
+      const remaining = Math.max(0, startSecsRef.current - elapsed);
+      setDisplaySecs(Math.ceil(remaining));
+      if (remaining <= 0) {
+        clearInterval(timerRef.current);
+        dismiss();
+      }
+    }, 1000);
+
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [offloadRemaining]);
+
+  const dismiss = () => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    setCollapsing(true);
+    setTimeout(() => onClose(), 250);
+  };
+
+  const withGuard = async (action: string, fn: () => Promise<void>) => {
+    if (busy) return;
+    setBusy(action);
+    try {
+      await fn();
+    } catch (e) {
+      console.error(`[OffloadBanner] ${action} failed:`, e);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleBackground = () =>
+    withGuard("offload", async () => {
+      await toolCallsApi.offload(sessionId, toolCallId);
+      dismiss();
+    });
+
+  const handleKeep = () =>
+    withGuard("keep", async () => {
+      await toolCallsApi.preventOffload(sessionId, toolCallId);
+      onUpdateRemaining(null, killRemaining);
+      dismiss();
+    });
+
+  const handleExtendOffload = () =>
+    withGuard("extendOffload", async () => {
+      const res = await toolCallsApi.extendOffload(sessionId, toolCallId, 30);
+      onUpdateRemaining(res.offload_remaining, res.kill_remaining);
+    });
+
+  const handleExtendKill = () =>
+    withGuard("extendKill", async () => {
+      const res = await toolCallsApi.extendKill(sessionId, toolCallId, 30);
+      onUpdateRemaining(res.offload_remaining, res.kill_remaining);
+    });
+
+  const handleCancel = () =>
+    withGuard("cancel", async () => {
+      await toolCallsApi.cancel(sessionId, toolCallId);
+      dismiss();
+    });
+
+  const hasCountdown = offloadRemaining !== null && offloadRemaining > 0;
+  const total = hasCountdown ? totalSeconds : 1;
+  const pct = hasCountdown ? displaySecs / total : 0;
+  const offset = CIRCUMFERENCE * (1 - pct);
+  const isUrgent = displaySecs <= 5;
+  const defaultLabel =
+    defaultPolicy === "offload"
+      ? t("tool.control.policyOffload")
+      : t("tool.control.policyKeep");
 
   return (
-    <Popover
-      content={content}
-      title="Tool call control"
-      trigger="click"
-      open={open}
-      onOpenChange={(v) => {
-        if (!v) onClose();
-      }}
+    <div
+      className={`${styles.offloadBanner} ${
+        collapsing ? styles.collapsing : ""
+      }`}
     >
-      <SettingOutlined
-        style={{ cursor: "pointer", marginLeft: 8, fontSize: 12 }}
-        onClick={(e) => {
-          e.stopPropagation();
-          onToggle();
-        }}
-      />
-    </Popover>
+      <div className={styles.offloadBar}>
+        <div className={styles.offloadGear}>⚙️</div>
+        <div className={styles.offloadInfo}>
+          {t("tool.control.title")}
+        </div>
+
+        {hasCountdown && (
+          <div className={styles.timerRing}>
+            <svg viewBox="0 0 26 26" width="26" height="26">
+              <circle className={styles.ringBg} cx="13" cy="13" r="10" />
+              <circle
+                className={`${styles.ringProgress} ${
+                  isUrgent ? styles.urgent : ""
+                }`}
+                cx="13"
+                cy="13"
+                r="10"
+                style={{
+                  strokeDasharray: CIRCUMFERENCE,
+                  strokeDashoffset: offset,
+                }}
+              />
+            </svg>
+            <div
+              className={`${styles.timerCount} ${
+                isUrgent ? styles.urgent : ""
+              }`}
+            >
+              {displaySecs}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className={styles.offloadActions}>
+        <button
+          className={styles.offloadBtn}
+          onClick={handleBackground}
+          disabled={busy !== null}
+        >
+          <span className={styles.ico}>🌙</span>{" "}
+          {t("tool.control.offload")}
+        </button>
+        <button
+          className={styles.offloadBtn}
+          onClick={handleKeep}
+          disabled={busy !== null}
+        >
+          <span className={styles.ico}>⏳</span>{" "}
+          {t("tool.control.keep")}
+        </button>
+        <button
+          className={styles.offloadBtn}
+          onClick={handleExtendOffload}
+          disabled={busy !== null}
+        >
+          <span className={styles.ico}>🔄</span>{" "}
+          {t("tool.control.extendOffload")}
+        </button>
+        <button
+          className={styles.offloadBtn}
+          onClick={handleExtendKill}
+          disabled={busy !== null}
+        >
+          <span className={styles.ico}>⏱️</span>{" "}
+          {t("tool.control.extendKill")}
+        </button>
+        <button
+          className={`${styles.offloadBtn} ${styles.cancelAct}`}
+          onClick={handleCancel}
+          disabled={busy !== null}
+        >
+          <span className={styles.ico}>✕</span>{" "}
+          {t("tool.control.cancel")}
+        </button>
+      </div>
+
+      <div className={styles.offloadNote}>
+        <div className={styles.noteDot} />
+        {hasCountdown ? (
+          <>
+            <span>{displaySecs}</span>s{t("tool.control.autoActionPrefix")}
+          </>
+        ) : (
+          <>{t("tool.control.noCountdown")}</>
+        )}
+        <strong
+          style={{
+            color: "var(--ant-color-text, inherit)",
+            marginLeft: 2,
+          }}
+        >
+          {defaultLabel}
+        </strong>
+      </div>
+    </div>
   );
 };

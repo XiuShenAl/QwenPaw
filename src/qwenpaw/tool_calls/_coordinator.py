@@ -121,7 +121,10 @@ class ToolCoordinator:
                 elif event.type == "stream_closed":
                     break
                 elif event.type == "deadline_reached":
-                    if self._offload_on_deadline:
+                    if (
+                        self._offload_on_deadline
+                        or ctx.offload_reason == OffloadReason.USER
+                    ):
                         self._handle_deadline_reached(ctx)
                         terminal = "offload"
                         break

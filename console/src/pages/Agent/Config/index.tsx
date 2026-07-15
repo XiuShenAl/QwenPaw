@@ -8,6 +8,7 @@ import {
   LlmRetryCard,
   LlmRateLimiterCard,
   ToolExecutionLevelCard,
+  OffloadPolicyCard,
   AgentLoopCard,
 } from "./components";
 import { PageHeader } from "@/components/PageHeader";
@@ -212,6 +213,20 @@ function AgentConfigPage() {
             onChange={setApprovalLevel}
             disabled={saving}
           />
+        </div>
+      ),
+    });
+
+    baseTabs.push({
+      key: "offloadPolicy",
+      label: (
+        <span className={styles.tabLabel}>
+          {t("agentConfig.offloadPolicy.title", "工具后台执行策略")}
+        </span>
+      ),
+      children: (
+        <div className={styles.tabContent}>
+          <OffloadPolicyCard />
         </div>
       ),
     });

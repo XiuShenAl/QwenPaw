@@ -2309,6 +2309,14 @@
     },
     "saveLevelSuccess": "Tool execution security level saved",
     "saveLevelFailed": "Failed to save tool execution security level",
+    "offloadPolicy": {
+      "title": "Tool Background Execution",
+      "alertMessage": "Configure the default behavior when a tool reaches its offload threshold. Users can override this per-call via the tool control panel.",
+      "keepForeground": "Keep Foreground",
+      "keepForegroundDesc": "After the countdown expires, the tool continues running in the foreground without auto-offloading. Suitable for scenarios requiring real-time output monitoring.",
+      "offload": "Auto Offload to Background",
+      "offloadDesc": "After the countdown expires, the tool is automatically moved to background execution, allowing the Agent to continue processing other tasks. Suitable for long-running tools."
+    },
     "maxContextLength": "Max Context Length",
     "maxContextLengthTooltip": "Maximum token count for the model context window, determining how much history fits in each request",
     "maxContextLengthRequired": "Max context length is required",
@@ -3129,7 +3137,20 @@
       "submitted": "Submitted"
     },
     "execute": "Run {{tool}}",
-    "executeDefault": "Run tool"
+    "executeDefault": "Run tool",
+    "control": {
+      "title": "Tool running — offload to background?",
+      "offload": "Offload",
+      "keep": "Keep Foreground",
+      "extendOffload": "Delay Offload",
+      "extendKill": "Extend Timeout",
+      "cancel": "Cancel",
+      "autoActionPrefix": " until default action: ",
+      "noCountdown": "No countdown · Default: ",
+      "policyOffload": "Offload",
+      "policyKeep": "Keep Foreground",
+      "manage": "Manage"
+    }
   },
   "preview": {
     "error": {

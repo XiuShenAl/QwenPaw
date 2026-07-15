@@ -63,6 +63,16 @@ def _get_coordinator(request: Request) -> Any:
     return coordinator
 
 
+def _get_entry(coordinator: Any, tool_call_id: str) -> Any:
+    """Look up an entry by tool_call_id only. session_id in the URL path
+    is kept for API compatibility but not enforced — the frontend may
+    pass a local timestamp that differs from the backend session_id."""
+    entry = coordinator.get(tool_call_id)
+    if entry is None:
+        raise HTTPException(404, "Tool call not found")
+    return entry
+
+
 def _entry_to_info(entry: Any) -> ToolCallInfo:
     loop = asyncio.get_running_loop()
     now = loop.time()
@@ -117,7 +127,10 @@ def _remaining_snapshot(entry: Any) -> dict[str, float | None]:
 
 
 @router.get("/{session_id}", response_model=ListResponse)
-async def list_calls(session_id: str, request: Request) -> ListResponse:
+async def list_calls(
+    session_id: str,
+    request: Request,
+) -> ListResponse:
     coordinator = _get_coordinator(request)
     entries = coordinator.list_entries(session_id=session_id)
     items = [_entry_to_info(e) for e in entries]
@@ -125,28 +138,24 @@ async def list_calls(session_id: str, request: Request) -> ListResponse:
 
 
 @router.get("/{session_id}/{tool_call_id}", response_model=ToolCallInfo)
-async def get_call(
+async def get_call(  # pylint: disable=unused-argument
     session_id: str,
     tool_call_id: str,
     request: Request,
 ) -> ToolCallInfo:
     coordinator = _get_coordinator(request)
-    entry = coordinator.get(tool_call_id)
-    if entry is None or entry.ctx.session_id != session_id:
-        raise HTTPException(404, "Tool call not found")
+    entry = _get_entry(coordinator, tool_call_id)
     return _entry_to_info(entry)
 
 
 @router.post("/{session_id}/{tool_call_id}/offload", status_code=202)
-async def offload_call(
+async def offload_call(  # pylint: disable=unused-argument
     session_id: str,
     tool_call_id: str,
     request: Request,
 ) -> dict[str, Any]:
     coordinator = _get_coordinator(request)
-    entry = coordinator.get(tool_call_id)
-    if entry is None or entry.ctx.session_id != session_id:
-        raise HTTPException(404, "Tool call not found")
+    _get_entry(coordinator, tool_call_id)
     ok = await coordinator.request_offload(tool_call_id)
     if not ok:
         raise HTTPException(409, "Cannot offload (not running)")
@@ -154,16 +163,14 @@ async def offload_call(
 
 
 @router.post("/{session_id}/{tool_call_id}/cancel", status_code=202)
-async def cancel_call(
+async def cancel_call(  # pylint: disable=unused-argument
     session_id: str,
     tool_call_id: str,
     request: Request,
     body: CancelRequest | None = None,
 ) -> dict[str, Any]:
     coordinator = _get_coordinator(request)
-    entry = coordinator.get(tool_call_id)
-    if entry is None or entry.ctx.session_id != session_id:
-        raise HTTPException(404, "Tool call not found")
+    _get_entry(coordinator, tool_call_id)
     force = body.force if body else False
     ok = await coordinator.cancel(tool_call_id, force=force)
     if not ok:
@@ -175,16 +182,14 @@ async def cancel_call(
     "/{session_id}/{tool_call_id}/extend-deadline",
     status_code=202,
 )
-async def extend_deadline(
+async def extend_deadline(  # pylint: disable=unused-argument
     session_id: str,
     tool_call_id: str,
     request: Request,
     body: ExtendRequest,
 ) -> dict[str, Any]:
     coordinator = _get_coordinator(request)
-    entry = coordinator.get(tool_call_id)
-    if entry is None or entry.ctx.session_id != session_id:
-        raise HTTPException(404, "Tool call not found")
+    entry = _get_entry(coordinator, tool_call_id)
 
     if body.target == "kill":
         ok = await coordinator.extend_kill_deadline(
@@ -213,15 +218,13 @@ async def extend_deadline(
 
 
 @router.get("/{session_id}/{tool_call_id}/output")
-async def get_output(
+async def get_output(  # pylint: disable=unused-argument
     session_id: str,
     tool_call_id: str,
     request: Request,
 ) -> dict[str, Any]:
     coordinator = _get_coordinator(request)
-    entry = coordinator.get(tool_call_id)
-    if entry is None or entry.ctx.session_id != session_id:
-        raise HTTPException(404, "Tool call not found")
+    entry = _get_entry(coordinator, tool_call_id)
     content_blocks = []
     if entry.final_response and entry.final_response.content:
         for block in entry.final_response.content:
@@ -235,15 +238,13 @@ async def get_output(
 
 
 @router.get("/{session_id}/{tool_call_id}/stream")
-async def stream_output(
+async def stream_output(  # pylint: disable=unused-argument
     session_id: str,
     tool_call_id: str,
     request: Request,
 ) -> StreamingResponse:
     coordinator = _get_coordinator(request)
-    entry = coordinator.get(tool_call_id)
-    if entry is None or entry.ctx.session_id != session_id:
-        raise HTTPException(404, "Tool call not found")
+    entry = _get_entry(coordinator, tool_call_id)
 
     async def _generate():
         async for chunk in entry.stream.subscribe():

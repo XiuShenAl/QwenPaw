@@ -3,17 +3,25 @@
  *
  * Renders the compact `<details>/<summary>` layout used by ChatV2 tool
  * blocks: icon + label on a single line, expandable body underneath.
+ *
+ * When a tool is actively running (status === "calling"), a gear button
+ * appears in the header. The gear button toggles an offload banner
+ * below the card that lets users control background execution.
+ *
+ * During execution, clicking the card expands a metadata panel showing
+ * tool name, call ID, and parameters.
  */
 
-import React from "react";
+import React, { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import type { ToolCallContent } from "./types";
 import DefaultBlock from "./DefaultBlock";
 import { stringifyResult } from "./utils";
 import { useToolCallSessionId } from "./ToolCallSessionContext";
 import { useToolCallControl } from "../../../../hooks/useToolCallControl";
-import { ToolCallControlPopover } from "./ToolCallControlPopover";
+import { OffloadBanner } from "./ToolCallControlPopover";
 import styles from "./toolCards.module.less";
+import bannerStyles from "./offloadBanner.module.less";
 
 export interface ToolCardShellProps {
   /** Full ToolCallContent (name, params, result, status). */
@@ -31,6 +39,8 @@ export interface ToolCardShellProps {
   /** Expandable body content. */
   children?: React.ReactNode;
 }
+
+const AUTO_POPUP_TOTAL_SECS = 30;
 
 const ToolCardShell: React.FC<ToolCardShellProps> = ({
   content,
@@ -50,83 +60,142 @@ const ToolCardShell: React.FC<ToolCardShellProps> = ({
     ? `${inputProgress.truncated ? "…\n" : ""}${inputProgress.preview}`
     : "";
 
-  const control = useToolCallControl(
-    sessionId,
+  const showGear = content.status === "calling" && !!sessionId;
+
+  const control = useToolCallControl(sessionId, content.id, content.status);
+
+  const gearDotClass = useMemo(() => {
+    if (!control.bannerVisible) return "";
+    return `${bannerStyles.show}`;
+  }, [control.bannerVisible]);
+
+  const metadataBlock = useMemo(() => {
+    if (!content.params || Object.keys(content.params).length === 0)
+      return null;
+    const lines: string[] = [];
+    if (content.id) lines.push(`tool_call_id: ${content.id}`);
+    if (content.name) lines.push(`tool: ${content.name}`);
+    const hiddenKeys = new Set(
+      control.killRemaining !== null ? ["timeout"] : [],
+    );
+    for (const [k, v] of Object.entries(content.params)) {
+      if (hiddenKeys.has(k)) continue;
+      const val =
+        typeof v === "string" ? v : JSON.stringify(v, null, 2);
+      lines.push(`${k}: ${val}`);
+    }
+    if (control.offloadRemaining !== null) {
+      lines.push(
+        `offload_remaining: ${Math.ceil(control.offloadRemaining)}s`,
+      );
+    }
+    if (control.killRemaining !== null) {
+      lines.push(`timeout: ${Math.ceil(control.killRemaining)}s`);
+    }
+    return lines.join("\n");
+  }, [
     content.id,
-    content.status,
-  );
+    content.name,
+    content.params,
+    control.offloadRemaining,
+    control.killRemaining,
+  ]);
 
   return (
-    <details
-      className={`${styles.toolCallCompact} ${
-        isLoading ? styles.toolCallCompactLoading : ""
-      } ${isError ? styles.toolCallCompactError : ""}`}
-    >
-      <summary className={styles.toolCallCompactSummary}>
-        {isLoading ? (
-          <span className={styles.toolCallSpinner} />
-        ) : (
-          <span
-            className={`${styles.toolCallIcon} ${
-              isError ? styles.toolCallIconError : styles.toolCallIconSuccess
-            }`}
-          >
-            {icon}
-          </span>
-        )}
-        <span className={styles.toolCallLabel} title={title}>
-          {title}
-          {isLoading && ` ${t("tool.loading")}`}
-        </span>
-        {isLoading && inputProgress && (
-          <span className={styles.toolCallInputProgress}>
-            {t("tool.inputProgress", {
-              count: inputProgress.characterCount,
-            })}
-          </span>
-        )}
-        {!isLoading && !isError && badges}
-        {inlineResult && (
-          <span className={styles.toolCallInlineResult} title={inlineResult}>
-            {inlineResult}
-          </span>
-        )}
-        {content.status === "calling" && sessionId && (
-          <ToolCallControlPopover
-            sessionId={sessionId}
-            toolCallId={content.id}
-            offloadRemaining={control.offloadRemaining}
-            killRemaining={control.killRemaining}
-            open={control.showPopup}
-            onToggle={control.togglePopup}
-            onClose={control.closePopup}
-            onUpdateRemaining={control.updateRemaining}
-          />
-        )}
-      </summary>
-      {isError ? (
-        <>
-          <DefaultBlock
-            title="Input"
-            content={JSON.stringify(content.params, null, 2)}
-          />
-          <DefaultBlock
-            title="Error"
-            content={stringifyResult(content.result)}
-          />
-        </>
-      ) : (
-        <>
-          {isLoading && inputPreview && (
-            <DefaultBlock
-              title={t("tool.rawInputPreview")}
-              content={inputPreview}
-            />
+    <div>
+      <details
+        className={`${styles.toolCallCompact} ${
+          isLoading ? styles.toolCallCompactLoading : ""
+        } ${isError ? styles.toolCallCompactError : ""}`}
+      >
+        <summary className={styles.toolCallCompactSummary}>
+          {isLoading ? (
+            <span className={styles.toolCallSpinner} />
+          ) : (
+            <span
+              className={`${styles.toolCallIcon} ${
+                isError ? styles.toolCallIconError : styles.toolCallIconSuccess
+              }`}
+            >
+              {icon}
+            </span>
           )}
-          {children}
-        </>
+          <span className={styles.toolCallLabel} title={title}>
+            {title}
+            {isLoading && ` ${t("tool.loading")}`}
+          </span>
+          {isLoading && inputProgress && (
+            <span className={styles.toolCallInputProgress}>
+              {t("tool.inputProgress", {
+                count: inputProgress.characterCount,
+              })}
+            </span>
+          )}
+          {!isLoading && !isError && badges}
+          {inlineResult && (
+            <span className={styles.toolCallInlineResult} title={inlineResult}>
+              {inlineResult}
+            </span>
+          )}
+
+          {showGear && (
+            <button
+              className={`${bannerStyles.gearBtn} ${
+                control.bannerVisible ? bannerStyles.active : ""
+              }`}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                control.toggleBanner();
+              }}
+              title={t("tool.control.manage")}
+            >
+              <span>⚙️</span>
+              <div className={`${bannerStyles.gearDot} ${gearDotClass}`} />
+            </button>
+          )}
+        </summary>
+
+        {isError ? (
+          <>
+            <DefaultBlock
+              title="Input"
+              content={JSON.stringify(content.params, null, 2)}
+            />
+            <DefaultBlock
+              title="Error"
+              content={stringifyResult(content.result)}
+            />
+          </>
+        ) : (
+          <>
+            {isLoading && inputPreview && (
+              <DefaultBlock
+                title={t("tool.rawInputPreview")}
+                content={inputPreview}
+              />
+            )}
+            {isLoading && metadataBlock && (
+              <DefaultBlock title="Parameters" content={metadataBlock} />
+            )}
+            {children}
+          </>
+        )}
+      </details>
+
+      {control.bannerVisible && showGear && (
+        <OffloadBanner
+          sessionId={sessionId}
+          toolCallId={content.id}
+          offloadRemaining={control.offloadRemaining}
+          killRemaining={control.killRemaining}
+          totalSeconds={AUTO_POPUP_TOTAL_SECS}
+          defaultPolicy={control.defaultPolicy}
+          onClose={control.closeBanner}
+          onUpdateRemaining={control.updateRemaining}
+        />
       )}
-    </details>
+    </div>
   );
 };
 

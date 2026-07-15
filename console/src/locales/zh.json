@@ -2168,6 +2168,14 @@
     },
     "saveLevelSuccess": "工具执行安全级别已保存",
     "saveLevelFailed": "保存工具执行安全级别失败",
+    "offloadPolicy": {
+      "title": "工具后台执行策略",
+      "alertMessage": "配置工具执行达到转入后台时限后的默认行为。用户可在工具执行时通过控制面板实时覆盖此设置。",
+      "keepForeground": "保持前台执行",
+      "keepForegroundDesc": "倒计时结束后工具继续在前台运行，不自动转入后台。适合需要实时查看输出的场景。",
+      "offload": "自动转入后台",
+      "offloadDesc": "倒计时结束后工具自动转入后台执行，Agent 可继续处理其他任务。适合长时间运行的工具。"
+    },
     "maxContextLength": "最大上下文长度",
     "maxContextLengthTooltip": "模型上下文窗口的最大 token 数，决定每次请求能携带的最大历史长度",
     "maxContextLengthRequired": "最大上下文长度为必填项",
@@ -3148,7 +3156,20 @@
       "submitted": "已提交"
     },
     "execute": "执行 {{tool}}",
-    "executeDefault": "执行 工具"
+    "executeDefault": "执行 工具",
+    "control": {
+      "title": "工具执行中 · 是否转后台？",
+      "offload": "转入后台",
+      "keep": "保持前台",
+      "extendOffload": "推迟转后台",
+      "extendKill": "延长执行超时",
+      "cancel": "取消执行",
+      "autoActionPrefix": "后自动执行默认操作：",
+      "noCountdown": "无倒计时 · 默认操作：",
+      "policyOffload": "转入后台",
+      "policyKeep": "不转后台",
+      "manage": "后台管理"
+    }
   },
   "preview": {
     "error": {

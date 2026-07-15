@@ -1,0 +1,397 @@
+// Offload banner — renders below the tool card when a tool is running.
+// Uses CSS variables for light/dark theme adaptation.
+
+.offloadBanner {
+  margin-top: 6px;
+  max-width: 440px;
+  background: var(--ant-color-bg-elevated, #fff);
+  border: 1px solid var(--ant-color-warning-border, rgba(245, 158, 11, 0.2));
+  border-radius: 10px;
+  overflow: hidden;
+  animation: bannerIn 0.3s cubic-bezier(0.34, 1.3, 0.64, 1);
+}
+
+.offloadBanner.bgMode {
+  border-color: var(--ant-color-primary-border, rgba(139, 139, 255, 0.25));
+}
+
+.offloadBanner.collapsing {
+  animation: bannerOut 0.25s ease forwards;
+}
+
+@keyframes bannerIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scaleY(0.95);
+    max-height: 0;
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scaleY(1);
+    max-height: 400px;
+  }
+}
+
+@keyframes bannerOut {
+  from {
+    opacity: 1;
+    transform: scaleY(1);
+    max-height: 400px;
+  }
+  to {
+    opacity: 0;
+    transform: scaleY(0.95);
+    max-height: 0;
+  }
+}
+
+.offloadBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--ant-color-warning-bg, rgba(245, 158, 11, 0.05));
+}
+
+.bgMode .offloadBar {
+  background: var(--ant-color-primary-bg, rgba(139, 139, 255, 0.05));
+}
+
+.offloadGear {
+  font-size: 15px;
+  flex-shrink: 0;
+  animation: gearSpin 4s linear infinite;
+}
+
+.offloadGear.stopped {
+  animation: none;
+}
+
+@keyframes gearSpin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.offloadInfo {
+  flex: 1;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ant-color-warning, #d48806);
+}
+
+.bgMode .offloadInfo {
+  color: var(--ant-color-primary, #1677ff);
+}
+
+// Circular countdown ring
+.timerRing {
+  position: relative;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+}
+
+.timerRing svg {
+  transform: rotate(-90deg);
+  position: absolute;
+  inset: 0;
+}
+
+.ringBg {
+  fill: none;
+  stroke: var(--ant-color-border, #d9d9d9);
+  stroke-width: 2.5;
+}
+
+.ringProgress {
+  fill: none;
+  stroke: var(--ant-color-warning, #d48806);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 1s linear, stroke 0.5s;
+}
+
+.ringProgress.urgent {
+  stroke: var(--ant-color-error, #ff4d4f);
+}
+
+.timerCount {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--ant-color-warning, #d48806);
+}
+
+.timerCount.urgent {
+  color: var(--ant-color-error, #ff4d4f);
+}
+
+// Action buttons row
+.offloadActions {
+  padding: 6px 10px 8px;
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.offloadBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--ant-color-border, #d9d9d9);
+  background: var(--ant-color-bg-container, #fff);
+  cursor: pointer;
+  transition: all 0.15s;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ant-color-text, #000);
+  white-space: nowrap;
+
+  &:hover {
+    transform: translateY(-1px);
+  }
+
+  &:active {
+    transform: scale(0.97);
+  }
+}
+
+.offloadBtn .ico {
+  font-size: 12px;
+}
+
+.offloadBtn:hover {
+  background: var(--ant-color-fill-secondary, #f5f5f5);
+  border-color: var(--ant-color-border-secondary, #bfbfbf);
+}
+
+.cancelAct {
+  color: var(--ant-color-text-secondary, #8c8c8c);
+
+  &:hover {
+    background: var(--ant-color-error-bg, rgba(255, 77, 79, 0.06));
+    border-color: var(--ant-color-error-border, rgba(255, 77, 79, 0.3));
+    color: var(--ant-color-error, #ff4d4f);
+  }
+}
+
+.offloadNote {
+  padding: 0 12px 6px;
+  font-size: 10px;
+  color: var(--ant-color-text-quaternary, #bfbfbf);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.noteDot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--ant-color-text-quaternary, #bfbfbf);
+}
+
+// Background status row (when tool is already in background)
+.bgStatusRow {
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ant-color-primary, #1677ff);
+}
+
+.bgPulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ant-color-primary, #1677ff);
+  animation: pulseDot 1.4s infinite;
+}
+
+@keyframes pulseDot {
+  0% {
+    box-shadow: 0 0 0 0 var(--ant-color-primary-bg, rgba(22, 119, 255, 0.5));
+  }
+  70% {
+    box-shadow: 0 0 0 5px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+.bgElapsed {
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 11px;
+  color: var(--ant-color-primary-text, #1677ff);
+  font-weight: 600;
+}
+
+// Gear button in tool card header
+.gearBtn {
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  color: var(--ant-color-text-secondary, #8c8c8c);
+  transition: all 0.15s;
+  position: relative;
+  flex-shrink: 0;
+  margin-left: 4px;
+
+  &:hover {
+    background: var(--ant-color-fill-secondary, #f5f5f5);
+    color: var(--ant-color-text, #000);
+  }
+
+  &.active {
+    background: var(--ant-color-primary-bg, rgba(22, 119, 255, 0.06));
+    color: var(--ant-color-primary, #1677ff);
+  }
+}
+
+.gearDot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ant-color-warning, #faad14);
+  display: none;
+  animation: pulseDotOrange 1.4s infinite;
+
+  &.show {
+    display: block;
+  }
+
+  &.bgDot {
+    background: var(--ant-color-primary, #1677ff);
+    animation: pulseDot 1.4s infinite;
+  }
+}
+
+@keyframes pulseDotOrange {
+  0% {
+    box-shadow: 0 0 0 0 var(--ant-color-warning-bg, rgba(250, 173, 20, 0.5));
+  }
+  70% {
+    box-shadow: 0 0 0 5px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+// ─── Dark mode overrides ───
+:global(.dark-mode) {
+  .offloadBanner {
+    background: #181825;
+    border-color: rgba(245, 158, 11, 0.2);
+  }
+
+  .offloadBanner.bgMode {
+    border-color: rgba(139, 139, 255, 0.25);
+  }
+
+  .offloadBar {
+    background: rgba(245, 158, 11, 0.05);
+  }
+
+  .bgMode .offloadBar {
+    background: rgba(139, 139, 255, 0.05);
+  }
+
+  .offloadInfo {
+    color: #f59e0b;
+  }
+
+  .bgMode .offloadInfo {
+    color: #8b8bff;
+  }
+
+  .ringBg {
+    stroke: #2f2f2f;
+  }
+
+  .ringProgress {
+    stroke: #f59e0b;
+  }
+
+  .timerCount {
+    color: #f59e0b;
+  }
+
+  .offloadBtn {
+    border-color: #2a2a2a;
+    background: #151515;
+    color: #ececec;
+
+    &:hover {
+      background: #1e1e1e;
+      border-color: #3f3f3f;
+    }
+  }
+
+  .cancelAct {
+    color: #8e8ea0;
+
+    &:hover {
+      background: rgba(239, 68, 68, 0.08);
+      border-color: rgba(239, 68, 68, 0.3);
+      color: #ef4444;
+    }
+  }
+
+  .offloadNote {
+    color: #555;
+  }
+
+  .noteDot {
+    background: #555;
+  }
+
+  .bgStatusRow {
+    color: #8b8bff;
+  }
+
+  .bgPulse {
+    background: #8b8bff;
+  }
+
+  .bgElapsed {
+    color: #a5a5ff;
+  }
+
+  .gearBtn {
+    color: #8e8ea0;
+
+    &:hover {
+      background: #2a2a2a;
+      color: #ececec;
+    }
+
+    &.active {
+      background: rgba(139, 139, 255, 0.15);
+      color: #8b8bff;
+    }
+  }
+}
