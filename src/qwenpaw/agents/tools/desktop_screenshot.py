@@ -106,6 +106,7 @@ async def _capture_macos_screencapture(
         _, stderr = await cancellable_wait(
             proc.communicate(),
             fallback_secs=30,
+            as_kill_deadline=True,
         )
         if proc.returncode != 0:
             stderr_str = (stderr or b"").decode().strip() or "Unknown error"

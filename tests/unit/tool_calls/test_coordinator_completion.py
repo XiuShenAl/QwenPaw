@@ -151,15 +151,17 @@ async def test_middleware_caller_observes_coordinator_response():
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason="offload globally disabled pending fix")
 async def test_background_completion_emits_hint():
-    coordinator = ToolCoordinator(default_timeout_secs=0.001)
+    coordinator = ToolCoordinator(
+        default_timeout_secs=0.001,
+        offload_on_deadline=True,
+    )
     tool_call = _ToolCall(id="call-bg", name="slow_tool")
 
     async def next_handler(
         tool_call: _ToolCall,
     ) -> AsyncGenerator[Any, None]:
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0.05)
         yield _text_response(tool_call.id, "x" * 2000)
 
     events = await _collect(
@@ -173,17 +175,17 @@ async def test_background_completion_emits_hint():
     )
     hint = await asyncio.wait_for(
         _wait_for_hint(coordinator, "session-bg"),
-        timeout=1,
+        timeout=2,
     )
 
     assert events[-1].metadata["offloaded"] is True
     assert hint.role == "assistant"
-    tool_result = next(
+    text_block = next(
         block
         for block in hint.content
-        if getattr(block, "type", None) == "tool_result"
+        if getattr(block, "type", None) == "text"
     )
-    assert _tool_result_output_text_bytes(tool_result) == 2000
+    assert "slow_tool" in text_block.text
 
 
 @pytest.mark.asyncio
@@ -206,7 +208,7 @@ async def test_caller_cancellation_does_not_cancel_background_task():
             agent_id="agent-1",
             root_session_id="root-1",
             started_at=0.0,
-            deadline=None,
+            offload_deadline=None,
             cancel_event=asyncio.Event(),
         ),
         stream=ToolStream(
@@ -232,3 +234,158 @@ async def test_caller_cancellation_does_not_cancel_background_task():
 
     bg_can_finish.set()
     await asyncio.wait_for(bg_task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_offload_disabled_clears_offload_deadline():
+    """When offload_on_deadline=False, reaching offload_deadline should
+    clear it and continue foreground execution instead of offloading."""
+    coordinator = ToolCoordinator(
+        default_timeout_secs=0.01,
+        offload_on_deadline=False,
+    )
+    tool_call = _ToolCall(id="call-noop", name="fast_tool")
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        await asyncio.sleep(0.05)
+        yield _text_response(tool_call.id, "done")
+
+    events = await _collect(
+        coordinator.execute(
+            tool_call=tool_call,
+            next_handler=next_handler,
+            session_id="session-noop",
+            agent_id="agent-1",
+            root_session_id="root-1",
+        ),
+    )
+
+    final = events[-1]
+    assert isinstance(final, ToolResponse)
+    assert final.content[0].text == "done"
+    assert final.metadata.get("offloaded") is not True
+
+
+@pytest.mark.asyncio
+async def test_kill_deadline_terminates_execution():
+    """When kill_deadline is reached, the tool should be terminated."""
+    coordinator = ToolCoordinator(offload_on_deadline=False)
+    tool_call = _ToolCall(id="call-kill", name="kill_tool")
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        from qwenpaw.tool_calls import cancellable_wait
+
+        await cancellable_wait(
+            asyncio.sleep(10),
+            fallback_secs=0.05,
+            as_kill_deadline=True,
+        )
+        yield _text_response(tool_call.id, "should not reach")
+
+    events = await asyncio.wait_for(
+        _collect(
+            coordinator.execute(
+                tool_call=tool_call,
+                next_handler=next_handler,
+                session_id="session-kill",
+                agent_id="agent-1",
+                root_session_id="root-1",
+            ),
+        ),
+        timeout=5,
+    )
+
+    final = events[-1]
+    assert isinstance(final, ToolResponse)
+    assert "should not reach" not in final.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_offload_policy_runtime_toggle():
+    """offload_on_deadline can be toggled at runtime via the property."""
+    coordinator = ToolCoordinator(offload_on_deadline=False)
+    assert not coordinator.offload_on_deadline
+
+    coordinator.offload_on_deadline = True
+    assert coordinator.offload_on_deadline
+
+    coordinator.offload_on_deadline = False
+    assert not coordinator.offload_on_deadline
+
+
+@pytest.mark.asyncio
+async def test_extend_offload_deadline():
+    """extend_offload_deadline should extend the offload wait time."""
+    coordinator = ToolCoordinator(default_timeout_secs=0.5)
+    tool_call = _ToolCall(id="call-extend", name="extend_tool")
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        await asyncio.sleep(0.1)
+        yield _text_response(tool_call.id, "ok")
+
+    task = asyncio.create_task(
+        _collect(
+            coordinator.execute(
+                tool_call=tool_call,
+                next_handler=next_handler,
+                session_id="session-ext",
+                agent_id="agent-1",
+                root_session_id="root-1",
+            ),
+        ),
+    )
+
+    await asyncio.sleep(0.01)
+    ok = await coordinator.extend_offload_deadline(
+        "call-extend",
+        seconds=30,
+    )
+    assert ok is True
+
+    events = await asyncio.wait_for(task, timeout=2)
+    final = events[-1]
+    assert isinstance(final, ToolResponse)
+    assert final.content[0].text == "ok"
+
+
+@pytest.mark.asyncio
+async def test_extend_offload_deadline_rejects_after_offload():
+    """extend_offload_deadline should return False for offloaded entries."""
+    coordinator = ToolCoordinator(
+        default_timeout_secs=0.001,
+        offload_on_deadline=True,
+    )
+    tool_call = _ToolCall(id="call-ext-rej", name="slow_ext_tool")
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        await asyncio.sleep(1)
+        yield _text_response(tool_call.id, "done")
+
+    events = await asyncio.wait_for(
+        _collect(
+            coordinator.execute(
+                tool_call=tool_call,
+                next_handler=next_handler,
+                session_id="session-ext-rej",
+                agent_id="agent-1",
+                root_session_id="root-1",
+            ),
+        ),
+        timeout=2,
+    )
+
+    assert events[-1].metadata["offloaded"] is True
+
+    ok = await coordinator.extend_offload_deadline(
+        "call-ext-rej",
+        seconds=10,
+    )
+    assert ok is False

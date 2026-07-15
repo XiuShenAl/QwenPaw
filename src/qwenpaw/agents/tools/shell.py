@@ -401,13 +401,13 @@ async def _execute_in_sandbox(
         env_vars=sandbox_env,
     )
 
-    # Temporarily extend the tool-call deadline so that sandbox creation
+    # Temporarily extend the offload deadline so that sandbox creation
     # does not consume the user's command timeout budget.
     ctx = get_call_context()
     original_deadline = None
-    if ctx is not None and ctx.deadline is not None:
-        original_deadline = ctx.deadline
-        ctx.deadline += _SANDBOX_SETUP_DEADLINE_EXTENSION
+    if ctx is not None and ctx.offload_deadline is not None:
+        original_deadline = ctx.offload_deadline
+        ctx.offload_deadline += _SANDBOX_SETUP_DEADLINE_EXTENSION
 
     try:
         async with create_sandbox(effective_config) as sandbox:
@@ -415,12 +415,12 @@ async def _execute_in_sandbox(
             # now that sandbox setup is complete.
             if ctx is not None and original_deadline is not None:
                 now = asyncio.get_event_loop().time()
-                ctx.deadline = now + timeout
+                ctx.offload_deadline = now + timeout
             result = await sandbox.execute(cmd, cwd=cwd)
     except BaseException:
         # On failure, restore original deadline to avoid permanent extension
         if ctx is not None and original_deadline is not None:
-            ctx.deadline = original_deadline
+            ctx.offload_deadline = original_deadline
         raise
 
     return result
@@ -490,6 +490,44 @@ def _is_dangerous_self_kill(cmd: str) -> bool:
             pass
 
     return False
+
+
+async def _cleanup_proc(
+    proc: asyncio.subprocess.Process,
+    stderr_suffix: str,
+) -> tuple[str, str]:
+    """Kill a timed-out / cancelled subprocess and drain its output."""
+    try:
+        pgid = os.getpgid(proc.pid)
+        os.killpg(pgid, signal.SIGTERM)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=2)
+        except asyncio.TimeoutError:
+            os.killpg(pgid, signal.SIGKILL)
+            await asyncio.wait_for(proc.wait(), timeout=2)
+
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=1,
+            )
+        except asyncio.TimeoutError:
+            stdout, stderr = b"", b""
+        stdout_str = smart_decode(stdout)
+        stderr_str = smart_decode(stderr)
+        if stderr_str:
+            stderr_str += f"\n{stderr_suffix}"
+        else:
+            stderr_str = stderr_suffix
+    except (ProcessLookupError, OSError):
+        try:
+            proc.kill()
+            await proc.wait()
+        except (ProcessLookupError, OSError):
+            pass
+        stdout_str = ""
+        stderr_str = stderr_suffix
+    return stdout_str, stderr_str
 
 
 # pylint: disable=too-many-branches, too-many-statements
@@ -681,12 +719,13 @@ async def execute_shell_command(
                 stdout, stderr = await cancellable_wait(
                     proc.communicate(),
                     fallback_secs=timeout,
+                    as_kill_deadline=True,
                 )
                 stdout_str = smart_decode(stdout)
                 stderr_str = smart_decode(stderr)
                 returncode = proc.returncode
 
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except asyncio.TimeoutError:
                 stderr_suffix = (
                     f"⚠️ TimeoutError: The command execution exceeded "
                     f"the timeout of {timeout} seconds. "
@@ -694,41 +733,18 @@ async def execute_shell_command(
                     f"requires more time to complete."
                 )
                 returncode = -1
-                try:
-                    # Kill the entire process group so that child processes
-                    # spawned by the shell are also terminated.
-                    pgid = os.getpgid(proc.pid)
-                    os.killpg(pgid, signal.SIGTERM)
-                    try:
-                        await asyncio.wait_for(proc.wait(), timeout=2)
-                    except asyncio.TimeoutError:
-                        os.killpg(pgid, signal.SIGKILL)
-                        await asyncio.wait_for(proc.wait(), timeout=2)
+                stdout_str, stderr_str = await _cleanup_proc(
+                    proc,
+                    stderr_suffix,
+                )
 
-                    # Drain remaining output.
-                    try:
-                        stdout, stderr = await asyncio.wait_for(
-                            proc.communicate(),
-                            timeout=1,
-                        )
-                    except asyncio.TimeoutError:
-                        stdout, stderr = b"", b""
-                    stdout_str = smart_decode(stdout)
-                    stderr_str = smart_decode(stderr)
-                    if stderr_str:
-                        stderr_str += f"\n{stderr_suffix}"
-                    else:
-                        stderr_str = stderr_suffix
-                except (ProcessLookupError, OSError):
-                    # Process already gone or pgid lookup failed — fall back
-                    # to direct kill on the process itself.
-                    try:
-                        proc.kill()
-                        await proc.wait()
-                    except (ProcessLookupError, OSError):
-                        pass
-                    stdout_str = ""
-                    stderr_str = stderr_suffix
+            except asyncio.CancelledError:
+                stderr_suffix = "⚠️ Command execution was cancelled."
+                returncode = -1
+                stdout_str, stderr_str = await _cleanup_proc(
+                    proc,
+                    stderr_suffix,
+                )
 
         if returncode == 0:
             if stdout_str:

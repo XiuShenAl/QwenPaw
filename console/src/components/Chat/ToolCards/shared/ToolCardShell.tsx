@@ -10,6 +10,9 @@ import { useTranslation } from "react-i18next";
 import type { ToolCallContent } from "./types";
 import DefaultBlock from "./DefaultBlock";
 import { stringifyResult } from "./utils";
+import { useToolCallSessionId } from "./ToolCallSessionContext";
+import { useToolCallControl } from "../../../../hooks/useToolCallControl";
+import { ToolCallControlPopover } from "./ToolCallControlPopover";
 import styles from "./toolCards.module.less";
 
 export interface ToolCardShellProps {
@@ -39,12 +42,19 @@ const ToolCardShell: React.FC<ToolCardShellProps> = ({
   children,
 }) => {
   const { t } = useTranslation();
+  const sessionId = useToolCallSessionId();
   const isLoading = content.status === "calling" && isStreaming;
   const isError = content.status === "error";
   const inputProgress = content.inputProgress;
   const inputPreview = inputProgress
     ? `${inputProgress.truncated ? "…\n" : ""}${inputProgress.preview}`
     : "";
+
+  const control = useToolCallControl(
+    sessionId,
+    content.id,
+    content.status,
+  );
 
   return (
     <details
@@ -80,6 +90,18 @@ const ToolCardShell: React.FC<ToolCardShellProps> = ({
           <span className={styles.toolCallInlineResult} title={inlineResult}>
             {inlineResult}
           </span>
+        )}
+        {content.status === "calling" && sessionId && (
+          <ToolCallControlPopover
+            sessionId={sessionId}
+            toolCallId={content.id}
+            offloadRemaining={control.offloadRemaining}
+            killRemaining={control.killRemaining}
+            open={control.showPopup}
+            onToggle={control.togglePopup}
+            onClose={control.closePopup}
+            onUpdateRemaining={control.updateRemaining}
+          />
         )}
       </summary>
       {isError ? (

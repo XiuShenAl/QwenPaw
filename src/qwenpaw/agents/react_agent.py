@@ -462,6 +462,9 @@ class QwenPawAgent(CodingModeMixin, Agent):
         stripping, passive bad-request retry, and auto-continue on
         text-only responses."""
 
+        # ── Inject background-tool results before each reasoning step ──
+        await self._inject_pending_hints()
+
         # ── Pre-check: pending gate actions from previous iter ──
         from ..loop.gates.runner import check_pending_gates
 
@@ -719,8 +722,8 @@ class QwenPawAgent(CodingModeMixin, Agent):
             self.state.context.append(hint)
 
     async def _reply(self, **kwargs: Any) -> Any:
-        """Override to inject pending background-tool hints before reply."""
-        await self._inject_pending_hints()
+        """Override kept as extension point; hint injection moved to
+        ``_reasoning`` so each ReAct iteration picks up new hints."""
         async for evt in super()._reply(**kwargs):
             yield evt
 

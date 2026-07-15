@@ -23,8 +23,9 @@ class ToolCallInfo(BaseModel):
     agent_id: str
     status: str
     started_at: float
-    deadline: float | None
     elapsed: float
+    offload_remaining: float | None
+    kill_remaining: float | None
     extra: dict[str, Any]
     end_state: str | None
     force_cancelled: bool
@@ -43,6 +44,10 @@ class CancelRequest(BaseModel):
 class ExtendRequest(BaseModel):
     seconds: float | None = Field(default=None, gt=0)
     no_deadline: bool = False
+    target: str = Field(
+        default="offload",
+        pattern="^(offload|kill)$",
+    )
 
 
 # ─── Helpers ───
@@ -60,21 +65,52 @@ def _get_coordinator(request: Request) -> Any:
 
 def _entry_to_info(entry: Any) -> ToolCallInfo:
     loop = asyncio.get_running_loop()
-    elapsed = loop.time() - entry.ctx.started_at
+    now = loop.time()
+    elapsed = now - entry.ctx.started_at
+    ctx = entry.ctx
+
+    offload_remaining = None
+    if ctx.offload_deadline is not None:
+        offload_remaining = max(0.0, ctx.offload_deadline - now)
+
+    kill_remaining = None
+    if ctx.kill_deadline is not None:
+        kill_remaining = max(0.0, ctx.kill_deadline - now)
+
     return ToolCallInfo(
-        tool_call_id=entry.ctx.tool_call_id,
-        tool_name=entry.ctx.tool_name,
-        session_id=entry.ctx.session_id,
-        agent_id=entry.ctx.agent_id,
+        tool_call_id=ctx.tool_call_id,
+        tool_name=ctx.tool_name,
+        session_id=ctx.session_id,
+        agent_id=ctx.agent_id,
         status=entry.status.value,
-        started_at=entry.ctx.started_at,
-        deadline=entry.ctx.deadline,
+        started_at=ctx.started_at,
         elapsed=elapsed,
-        extra=entry.ctx.extra,
+        offload_remaining=offload_remaining,
+        kill_remaining=kill_remaining,
+        extra=ctx.extra,
         end_state=entry.end_state,
         force_cancelled=entry.force_cancelled,
         max_internal_timeout_secs=None,
     )
+
+
+def _remaining_snapshot(entry: Any) -> dict[str, float | None]:
+    """Return current remaining values for an entry's deadlines."""
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    ctx = entry.ctx
+    return {
+        "offload_remaining": (
+            max(0.0, ctx.offload_deadline - now)
+            if ctx.offload_deadline is not None
+            else None
+        ),
+        "kill_remaining": (
+            max(0.0, ctx.kill_deadline - now)
+            if ctx.kill_deadline is not None
+            else None
+        ),
+    }
 
 
 # ─── Endpoints ───
@@ -149,17 +185,31 @@ async def extend_deadline(
     entry = coordinator.get(tool_call_id)
     if entry is None or entry.ctx.session_id != session_id:
         raise HTTPException(404, "Tool call not found")
-    ok = await coordinator.extend_deadline(
-        tool_call_id,
-        seconds=body.seconds,
-        no_deadline=body.no_deadline,
-    )
+
+    if body.target == "kill":
+        ok = await coordinator.extend_kill_deadline(
+            tool_call_id,
+            seconds=body.seconds,
+            no_deadline=body.no_deadline,
+        )
+    else:
+        ok = await coordinator.extend_offload_deadline(
+            tool_call_id,
+            seconds=body.seconds,
+            no_deadline=body.no_deadline,
+        )
+
     if not ok:
         raise HTTPException(
             409,
             "Cannot extend deadline (capped or invalid)",
         )
-    return {"status": "accepted", "tool_call_id": tool_call_id}
+
+    return {
+        "status": "accepted",
+        "tool_call_id": tool_call_id,
+        **_remaining_snapshot(entry),
+    }
 
 
 @router.get("/{session_id}/{tool_call_id}/output")

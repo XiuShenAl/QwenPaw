@@ -31,7 +31,7 @@ BackgroundResultProcessor = Callable[
 @dataclass
 class _NextEvent:
     type: str  # chunk | stream_closed | cancelled | deadline_reached
-    #            | deadline_changed
+    #            | kill_deadline_reached | deadline_changed
     chunk: Any = None
 
 
@@ -51,9 +51,11 @@ class ToolCoordinator:
         *,
         default_timeout_secs: float | None = None,
         cancel_grace_period_secs: float = 5.0,
+        offload_on_deadline: bool = False,
     ) -> None:
         self._default_timeout = default_timeout_secs
         self._cancel_grace = cancel_grace_period_secs
+        self._offload_on_deadline = offload_on_deadline
 
         self._entries: dict[str, ToolCallEntry] = {}
         self._entries_lock = asyncio.Lock()
@@ -65,10 +67,18 @@ class ToolCoordinator:
         self.hooks = ToolHookRegistry()
         self._per_agent_tool_timeouts: dict[tuple[str, str], float] = {}
 
+    @property
+    def offload_on_deadline(self) -> bool:
+        return self._offload_on_deadline
+
+    @offload_on_deadline.setter
+    def offload_on_deadline(self, value: bool) -> None:
+        self._offload_on_deadline = value
+
     # ================================================================
     # PRIMARY ENTRY
     # ================================================================
-    async def execute(  # pylint: disable=too-many-locals
+    async def execute(  # pylint: disable=too-many-locals,too-many-branches
         self,
         tool_call: Any,
         next_handler: Callable[..., AsyncGenerator[Any, None]],
@@ -111,14 +121,31 @@ class ToolCoordinator:
                 elif event.type == "stream_closed":
                     break
                 elif event.type == "deadline_reached":
-                    # TODO FIXME: offload is temporarily
-                    # disabled. cancel_event kills the
-                    # subprocess instead of backgrounding
-                    # it. See issue-offload-kills-subprocess.
-                    ctx.deadline = None
-                    # self._handle_deadline_reached(ctx)
-                    # terminal = "offload"
-                    # break
+                    if self._offload_on_deadline:
+                        self._handle_deadline_reached(ctx)
+                        terminal = "offload"
+                        break
+                    ctx.offload_deadline = None
+                    ctx.deadline_changed_event.set()
+                elif event.type == "kill_deadline_reached":
+                    ctx.cancel_event.set()
+                    ctx.cancel_reason = CancelReason.TIMEOUT
+                    if (
+                        entry.background_task
+                        and not entry.background_task.done()
+                    ):
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.shield(entry.background_task),
+                                timeout=self._cancel_grace,
+                            )
+                        except asyncio.TimeoutError:
+                            await self._apply_force_cancel(entry)
+                    terminal = "completed"
+                    break
+                elif event.type == "cancelled":
+                    terminal = "completed"
+                    break
         finally:
             entry.stream.remove_subscriber(chunk_queue)
 
@@ -133,9 +160,6 @@ class ToolCoordinator:
     def _handle_deadline_reached(ctx: ToolCallContext) -> None:
         if ctx.offload_reason is None:
             ctx.offload_reason = OffloadReason.TIMEOUT
-            ctx.cancel_event.set()
-            if ctx.cancel_reason is None:
-                ctx.cancel_reason = CancelReason.TIMEOUT
 
     def _create_entry(
         self,
@@ -159,7 +183,7 @@ class ToolCoordinator:
             agent_id=agent_id,
             root_session_id=root_session_id,
             started_at=now,
-            deadline=now + timeout if timeout is not None else None,
+            offload_deadline=now + timeout if timeout is not None else None,
             cancel_event=asyncio.Event(),
         )
         return ToolCallEntry(
@@ -178,7 +202,7 @@ class ToolCoordinator:
     ) -> ToolResponse:
         ctx = entry.ctx
         entry.status = ToolCallStatus.OFFLOADED
-        ctx.deadline = None
+        ctx.offload_deadline = None
 
         asyncio.create_task(
             self._supervise(entry, background_result_processor),
@@ -281,7 +305,7 @@ class ToolCoordinator:
         if entry is None or entry.status != ToolCallStatus.RUNNING:
             return False
         entry.ctx.offload_reason = reason
-        entry.ctx.deadline = asyncio.get_running_loop().time()
+        entry.ctx.offload_deadline = asyncio.get_running_loop().time()
         entry.ctx.deadline_changed_event.set()
         return True
 
@@ -302,13 +326,42 @@ class ToolCoordinator:
         entry.ctx.cancel_reason = reason
         return True
 
-    async def extend_deadline(
+    async def extend_offload_deadline(
         self,
         tool_call_id: str,
         *,
         seconds: float | None = None,
         no_deadline: bool = False,
     ) -> bool:
+        """Extend foreground wait time (postpone offload). No effect on
+        kill_deadline."""
+        entry = self._entries.get(tool_call_id)
+        if entry is None or entry.status != ToolCallStatus.RUNNING:
+            return False
+
+        if no_deadline:
+            entry.ctx.offload_deadline = None
+            entry.ctx.deadline_changed_event.set()
+            return True
+
+        if seconds is None or seconds <= 0:
+            return False
+
+        loop = asyncio.get_running_loop()
+        base = entry.ctx.offload_deadline or loop.time()
+        entry.ctx.offload_deadline = base + seconds
+        entry.ctx.deadline_changed_event.set()
+        return True
+
+    async def extend_kill_deadline(
+        self,
+        tool_call_id: str,
+        *,
+        seconds: float | None = None,
+        no_deadline: bool = False,
+    ) -> bool:
+        """Extend maximum execution time. Works in both foreground and
+        background phases."""
         entry = self._entries.get(tool_call_id)
         if entry is None:
             return False
@@ -319,7 +372,7 @@ class ToolCoordinator:
         if no_deadline:
             if cap is not None:
                 return False
-            entry.ctx.deadline = None
+            entry.ctx.kill_deadline = None
             entry.ctx.deadline_changed_event.set()
             return True
 
@@ -327,17 +380,28 @@ class ToolCoordinator:
             return False
 
         loop = asyncio.get_running_loop()
-        base = entry.ctx.deadline if entry.ctx.deadline else loop.time()
+        base = entry.ctx.kill_deadline or loop.time()
         new_deadline = base + seconds
-
         if cap is not None:
-            max_allowed = entry.ctx.started_at + cap
-            if new_deadline > max_allowed:
+            if new_deadline > entry.ctx.started_at + cap:
                 return False
-
-        entry.ctx.deadline = new_deadline
+        entry.ctx.kill_deadline = new_deadline
         entry.ctx.deadline_changed_event.set()
         return True
+
+    async def extend_deadline(
+        self,
+        tool_call_id: str,
+        *,
+        seconds: float | None = None,
+        no_deadline: bool = False,
+    ) -> bool:
+        """Backward-compatible entry point. Extends offload deadline."""
+        return await self.extend_offload_deadline(
+            tool_call_id,
+            seconds=seconds,
+            no_deadline=no_deadline,
+        )
 
     # ================================================================
     # HINT INJECTION + CALLBACKS
@@ -410,23 +474,39 @@ class ToolCoordinator:
         chunk_queue: asyncio.Queue[Any] | None,
     ) -> _NextEvent:
         loop = asyncio.get_running_loop()
-        remaining = (
-            entry.ctx.deadline - loop.time()
-            if entry.ctx.deadline is not None
+        now = loop.time()
+        ctx = entry.ctx
+
+        remaining_offload = (
+            (ctx.offload_deadline - now)
+            if ctx.offload_deadline is not None
+            else None
+        )
+        remaining_kill = (
+            (ctx.kill_deadline - now)
+            if ctx.kill_deadline is not None
             else None
         )
 
-        if remaining is not None and remaining <= 0:
+        # kill takes priority — execution limit supersedes offload
+        if remaining_kill is not None and remaining_kill <= 0:
+            return _NextEvent(type="kill_deadline_reached")
+        if remaining_offload is not None and remaining_offload <= 0:
             return _NextEvent(type="deadline_reached")
+
+        candidates = [
+            r for r in (remaining_offload, remaining_kill) if r is not None
+        ]
+        remaining = min(candidates) if candidates else None
 
         waiters: dict[str, asyncio.Task[Any]] = {}
         if chunk_queue is not None:
             waiters["chunk"] = asyncio.create_task(chunk_queue.get())
         waiters["cancel"] = asyncio.create_task(
-            entry.ctx.cancel_event.wait(),
+            ctx.cancel_event.wait(),
         )
         waiters["dl_changed"] = asyncio.create_task(
-            entry.ctx.deadline_changed_event.wait(),
+            ctx.deadline_changed_event.wait(),
         )
 
         try:
@@ -444,22 +524,29 @@ class ToolCoordinator:
 
         if "chunk" in waiters and waiters["chunk"] in done:
             item = waiters["chunk"].result()
-            if item is _STREAM_SENTINEL:
-                return _NextEvent(type="stream_closed")
-            return _NextEvent(type="chunk", chunk=item)
+            event_type = (
+                "stream_closed" if item is _STREAM_SENTINEL else "chunk"
+            )
+            return _NextEvent(
+                type=event_type,
+                chunk=item if event_type == "chunk" else None,
+            )
 
         if waiters["cancel"] in done:
             return _NextEvent(type="cancelled")
 
         if waiters["dl_changed"] in done:
-            # Clear before returning so the next _await_next_event blocks.
-            # A concurrent set() between wait() and clear() is benign:
-            # the caller always re-reads entry.ctx.deadline for the true
-            # value, so a "lost" notification just triggers one extra loop.
-            entry.ctx.deadline_changed_event.clear()
+            ctx.deadline_changed_event.clear()
             return _NextEvent(type="deadline_changed")
 
-        return _NextEvent(type="deadline_reached")
+        # timeout expired — determine which deadline fired
+        now2 = loop.time()
+        deadline_type = (
+            "kill_deadline_reached"
+            if ctx.kill_deadline is not None and now2 >= ctx.kill_deadline
+            else "deadline_reached"
+        )
+        return _NextEvent(type=deadline_type)
 
     async def _drain(
         self,
@@ -593,29 +680,7 @@ class ToolCoordinator:
         if bg is None:
             return
 
-        while not bg.done():
-            event = await self._await_next_event(
-                entry,
-                chunk_queue=None,
-            )
-
-            if event.type in ("cancelled", "deadline_changed"):
-                continue
-
-            if event.type == "deadline_reached":
-                entry.ctx.cancel_event.set()
-                entry.ctx.cancel_reason = CancelReason.TIMEOUT
-                try:
-                    await asyncio.wait_for(
-                        asyncio.shield(bg),
-                        timeout=self._cancel_grace,
-                    )
-                except asyncio.TimeoutError:
-                    await self._apply_force_cancel(entry)
-                break
-
-            if event.type == "stream_closed":
-                break
+        await self._supervise_loop(entry, bg)
 
         await self._await_background_task(entry)
 
@@ -645,6 +710,51 @@ class ToolCoordinator:
                     exc,
                     exc_info=True,
                 )
+
+    async def _supervise_loop(
+        self,
+        entry: ToolCallEntry,
+        bg: asyncio.Task[Any],
+    ) -> None:
+        while not bg.done():
+            event_task = asyncio.ensure_future(
+                self._await_next_event(entry, chunk_queue=None),
+            )
+            done, _ = await asyncio.wait(
+                {event_task, bg},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if event_task not in done:
+                event_task.cancel()
+                try:
+                    await event_task
+                except asyncio.CancelledError:
+                    pass
+                break
+
+            event = event_task.result()
+            if event.type in ("cancelled", "deadline_changed"):
+                continue
+            if event.type in (
+                "deadline_reached",
+                "kill_deadline_reached",
+                "stream_closed",
+            ):
+                if (
+                    event.type != "stream_closed"
+                    and not entry.ctx.cancel_event.is_set()
+                ):
+                    entry.ctx.cancel_event.set()
+                    entry.ctx.cancel_reason = CancelReason.TIMEOUT
+                if event.type != "stream_closed":
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(bg),
+                            timeout=self._cancel_grace,
+                        )
+                    except asyncio.TimeoutError:
+                        await self._apply_force_cancel(entry)
+                break
 
     async def _apply_force_cancel(self, entry: ToolCallEntry) -> None:
         if entry.background_task is None or entry.background_task.done():

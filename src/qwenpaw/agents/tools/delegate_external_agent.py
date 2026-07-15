@@ -596,8 +596,8 @@ async def _stream_action_responses(
     from ...tool_calls import get_call_context
 
     _tc_ctx = get_call_context()
-    if _tc_ctx is not None and _tc_ctx.remaining() is not None:
-        deadline = _tc_ctx.deadline
+    if _tc_ctx is not None and _tc_ctx.kill_deadline is not None:
+        deadline = _tc_ctx.kill_deadline
     elif max_runtime is not None and max_runtime > 0:
         deadline = loop.time() + max_runtime
     else:
