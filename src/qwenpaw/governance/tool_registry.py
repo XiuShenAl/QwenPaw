@@ -187,6 +187,11 @@ def register_tool_governance(
             pattern_param=pattern_param,
             sandbox_required=sandbox_required,
         )
+    else:
+        logger.debug(
+            "Tool %s already registered in governance, skipping type update",
+            pname,
+        )
     registry.register_python_name(python_name, pname)
     return pname
 
@@ -200,9 +205,12 @@ def _register_from_descriptors(registry: ToolRegistry) -> None:
 
         _ = _agents_tools
     except Exception as exc:  # noqa: BLE001
-        logger.debug(
-            "Skipping descriptor governance registration: %s",
+        logger.error(
+            "Failed to import agents.tools for governance registration: %s. "
+            "Built-in tools will be missing from the governance whitelist "
+            "and denied at Phase 0 until import succeeds.",
             exc,
+            exc_info=True,
         )
         return
 
@@ -225,7 +233,12 @@ def _register_from_descriptors(registry: ToolRegistry) -> None:
 
 
 def _register_non_descriptor_tools(registry: ToolRegistry) -> None:
-    """Tools that intentionally skip ``@tool_descriptor`` auto-collection."""
+    """Register tools that intentionally skip ``@tool_descriptor`` collection.
+
+    Exception path for dynamic / mode-scoped tools that must not appear in
+    the global builtin set (scroll ``recall_history*``, memory manager
+    ``memory_search``). Keep this list documented when adding similar tools.
+    """
     # Scroll strategy tools — hand-built descriptors, not global builtins.
     register_tool_governance(
         registry,
@@ -252,16 +265,11 @@ def _register_non_descriptor_tools(registry: ToolRegistry) -> None:
     )
 
 
-def assert_no_governance_gaps() -> list[str]:
-    """Return policy names of descriptor tools missing from governance.
-
-    Tools with empty ``governance.tool_type`` are skipped (not yet migrated
-    or intentionally using another registration path).
-    """
+def _collect_governance_gaps(registry: ToolRegistry) -> list[str]:
+    """Return policy names of descriptor tools missing from ``registry``."""
     from ..runtime.tool_registry import get_builtin_tool_funcs
 
     gaps: list[str] = []
-    registry = DEFAULT_REGISTRY
     for fn in get_builtin_tool_funcs():
         desc = getattr(fn, "_tool_descriptor", None)
         if desc is None:
@@ -281,6 +289,15 @@ def assert_no_governance_gaps() -> list[str]:
     return gaps
 
 
+def assert_no_governance_gaps() -> list[str]:
+    """Return policy names of descriptor tools missing from governance.
+
+    Tools with empty ``governance.tool_type`` are skipped (not yet migrated
+    or intentionally using another registration path).
+    """
+    return _collect_governance_gaps(DEFAULT_REGISTRY)
+
+
 # ---------------------------------------------------------------------------
 # Default registry (lazy singleton)
 # ---------------------------------------------------------------------------
@@ -291,6 +308,13 @@ def _create_default_registry() -> ToolRegistry:
     registry = ToolRegistry()
     _register_from_descriptors(registry)
     _register_non_descriptor_tools(registry)
+    gaps = _collect_governance_gaps(registry)
+    if gaps:
+        logger.warning(
+            "Governance registry built with %d gap(s): %s",
+            len(gaps),
+            ", ".join(gaps),
+        )
     return registry
 
 

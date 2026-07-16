@@ -22,6 +22,13 @@ class ToolGovernanceSpec:
 
     ``default_policy`` / ``policy_reason`` drive auto-generated
     ``ToolName(**)`` entries in the default user rules list.
+
+    Distinct from :attr:`ToolDescriptor.requires_sandbox`:
+    * ``requires_sandbox`` — runtime resource needs the sandbox honors
+      (``file_read``, ``file_write``, ``shell_exec``, …).
+    * ``fail_without_sandbox`` — governance fail-closed flag: when True,
+      the tool is denied unless a ``sandbox_config`` is supplied (e.g.
+      model-authored REPL).
     """
 
     tool_type: str = ""

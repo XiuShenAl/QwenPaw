@@ -468,6 +468,12 @@ def _auto_default_user_rules() -> List[GovernanceRule]:
 
     Import of ``agents.tools`` is deferred so this stays safe when
     ``policy`` is imported before tool modules.
+
+    Rule order follows ``get_builtin_tool_funcs()`` collection order
+    (``agents/tools/__init__.py`` import order). Current auto rules are
+    non-overlapping ``ToolName(**)`` ALLOW entries, so order does not
+    change Phase 2 first-match outcomes; keep that invariant when adding
+    ASK/DENY defaults.
     """
     try:
         import qwenpaw.agents.tools as _agents_tools  # noqa: F401
@@ -475,7 +481,11 @@ def _auto_default_user_rules() -> List[GovernanceRule]:
         from .tool_registry import snake_to_pascal
 
         _ = _agents_tools
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Failed to build auto default user rules from descriptors: %s",
+            exc,
+        )
         return []
 
     action_map = {
@@ -508,6 +518,17 @@ def _auto_default_user_rules() -> List[GovernanceRule]:
 def get_default_user_rules() -> List[GovernanceRule]:
     """Path-level defaults + auto-generated tool-level descriptor rules.
 
+    Concatenation order (matters for Phase 2 first-match on ``user_rules``):
+
+    1. ``_PATH_LEVEL_USER_RULES`` — workspace / tmp / coding-project / gh
+    2. ``_auto_default_user_rules()`` — ``ToolName(**)`` from descriptors
+
+    Today tool-level ALLOW rules are supersets of the path-level ALLOW rules
+    for the same tools, so reordering relative to the historical interleaved
+    list is semantically equivalent. Do **not** add tool-level DENY/ASK
+    defaults that would need to lose to a more specific path ALLOW without
+    revisiting this order.
+
     If tests (or callers) replace module-level ``DEFAULT_USER_RULES`` with a
     plain ``list``, that override is returned as-is so migration tests can
     inject synthetic default rules.
@@ -523,7 +544,14 @@ def get_default_user_rules() -> List[GovernanceRule]:
 # Backward-compatible name used by tests and callers. Resolved lazily so
 # descriptor imports are available when the list is first read.
 class _DefaultUserRulesProxy(list):
-    """List-like view over :func:`get_default_user_rules`."""
+    """Lazy list-like view over :func:`get_default_user_rules`.
+
+    Supported: iteration, ``len()``, integer index, ``repr``.
+
+    Unsupported / unsafe on the proxy itself: ``+``, ``==``, slice
+    assignment, in-place mutation. Prefer
+    ``list(DEFAULT_USER_RULES)`` / :func:`get_default_user_rules` first.
+    """
 
     def _rules(self) -> List[GovernanceRule]:
         return get_default_user_rules()

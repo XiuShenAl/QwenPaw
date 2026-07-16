@@ -69,4 +69,6 @@ def _build_all() -> list[str]:
     ]
 
 
+# Must stay below all side-effect imports above so every @tool_descriptor
+# has already appended to the global registry before __all__ is built.
 __all__ = _build_all()

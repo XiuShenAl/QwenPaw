@@ -1790,9 +1790,14 @@ def _default_builtin_tools() -> Dict[str, BuiltinToolConfig]:
                 async_execution=desc.async_execution,
                 icon=(ui.icon if ui and ui.icon else None),
             )
-    except Exception:
+    except Exception as exc:
         # Tools package unavailable during early import — empty set;
         # callers typically re-invoke after agents.tools is loaded.
+        logger.warning(
+            "Failed to build BuiltinToolConfig from tool descriptors: %s. "
+            "Built-in tools may be missing from the UI until reload.",
+            exc,
+        )
         tools = {}
 
     # Merge dynamically registered tools from plugins
@@ -1834,8 +1839,8 @@ def _default_builtin_tools() -> Dict[str, BuiltinToolConfig]:
                                 async_execution=False,
                                 icon=tool_info.get("icon", "🔧"),
                             )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Plugin tool merge skipped: %s", exc)
 
     return tools
 
