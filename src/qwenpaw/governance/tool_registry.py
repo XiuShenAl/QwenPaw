@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, List
+import threading
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,14 @@ class ToolRegistry:
         """
         return self._target_params.get(tool_name, "")
 
+    def get_pattern_param(self, tool_name: str) -> str:
+        """Return the optional pattern parameter name (e.g. Glob)."""
+        return self._pattern_params.get(tool_name, "")
+
+    def get_mapped_policy_name(self, python_name: str) -> Optional[str]:
+        """Return explicit python→policy mapping, or ``None`` if unset."""
+        return self._python_name_map.get(python_name)
+
     def requires_sandbox(self, tool_name: str) -> bool:
         """Whether the tool fails closed without a ``sandbox_config``.
 
@@ -148,6 +157,18 @@ class ToolRegistry:
         """Return all registered tool names."""
         return list(self._types.keys())
 
+    def get_identity(
+        self,
+        tool_name: str,
+    ) -> Tuple[str, str, str, bool]:
+        """Return (type, target, pattern, sandbox_required) for comparisons."""
+        return (
+            self.get_type(tool_name),
+            self.get_target_param(tool_name),
+            self.get_pattern_param(tool_name),
+            self.requires_sandbox(tool_name),
+        )
+
 
 # ---------------------------------------------------------------------------
 # Shared registration helpers
@@ -159,6 +180,10 @@ def snake_to_pascal(name: str) -> str:
     return "".join(p.capitalize() for p in name.split("_"))
 
 
+class GovernanceRegistrationConflict(ValueError):
+    """Raised when a governance policy identity would be reused unsafely."""
+
+
 def register_tool_governance(
     registry: ToolRegistry,
     python_name: str,
@@ -168,7 +193,11 @@ def register_tool_governance(
     pattern_param: str = "",
     sandbox_required: bool = False,
 ) -> str:
-    """Register one tool into the governance registry (idempotent).
+    """Register one tool into the governance registry.
+
+    Idempotent only when the existing policy identity is owned by the same
+    ``python_name`` and metadata (type / target / pattern / sandbox) match.
+    Conflicting re-registration fails closed.
 
     Used by:
     - builtin ``@tool_descriptor`` scan (``_register_from_descriptors``)
@@ -176,10 +205,25 @@ def register_tool_governance(
     - goal-mode ``register_goal_tools_governance``
 
     Returns the policy-layer tool name that was registered
-    (or already present).
+    (or already present with identical metadata).
     """
     pname = policy_name or snake_to_pascal(python_name)
-    if registry.get_type(pname) == "unknown":
+    new_identity = (
+        tool_type,
+        target_param or "",
+        pattern_param or "",
+        bool(sandbox_required),
+    )
+    existing_type = registry.get_type(pname)
+    existing_map = registry.get_mapped_policy_name(python_name)
+
+    if existing_map is not None and existing_map != pname:
+        raise GovernanceRegistrationConflict(
+            f"Python tool {python_name!r} already maps to policy "
+            f"{existing_map!r}; cannot remap to {pname!r}",
+        )
+
+    if existing_type == "unknown":
         registry.register(
             pname,
             tool_type,
@@ -187,12 +231,26 @@ def register_tool_governance(
             pattern_param=pattern_param,
             sandbox_required=sandbox_required,
         )
-    else:
-        logger.debug(
-            "Tool %s already registered in governance, skipping type update",
-            pname,
+        registry.register_python_name(python_name, pname)
+        return pname
+
+    existing_identity = registry.get_identity(pname)
+    if existing_identity != new_identity:
+        raise GovernanceRegistrationConflict(
+            f"Governance policy identity conflict for {pname!r}: "
+            f"existing type/target/pattern/sandbox="
+            f"{existing_identity!r}, requested {new_identity!r}",
         )
-    registry.register_python_name(python_name, pname)
+
+    if existing_map is None:
+        # Another python name already owns this policy identity.
+        raise GovernanceRegistrationConflict(
+            f"Policy name {pname!r} is already registered; refusing to map "
+            f"additional python tool {python_name!r} onto it "
+            f"(name-fold / ownership collision)",
+        )
+
+    # Same python_name + identical metadata → idempotent.
     return pname
 
 
@@ -200,7 +258,7 @@ def _register_from_descriptors(registry: ToolRegistry) -> None:
     """Register builtins that declare governance.tool_type on descriptors."""
     try:
         # Side-effect import so @tool_descriptor registrations run.
-        import qwenpaw.agents.tools as _agents_tools  # noqa: F401
+        from ..agents import tools as _agents_tools  # noqa: F401
         from ..runtime.tool_registry import get_builtin_tool_funcs
 
         _ = _agents_tools
@@ -266,7 +324,13 @@ def _register_non_descriptor_tools(registry: ToolRegistry) -> None:
 
 
 def _collect_governance_gaps(registry: ToolRegistry) -> list[str]:
-    """Return policy names of descriptor tools missing from ``registry``."""
+    """Return names of collected builtins missing a governance identity.
+
+    Every function in the builtin runtime collection must declare a non-empty
+    ``governance.tool_type`` and be present in ``registry``. Empty tool_type
+    is itself a gap — tools must not appear in toolkit/UI without Phase 0
+    metadata.
+    """
     from ..runtime.tool_registry import get_builtin_tool_funcs
 
     gaps: list[str] = []
@@ -276,6 +340,12 @@ def _collect_governance_gaps(registry: ToolRegistry) -> list[str]:
             continue
         gov = getattr(desc, "governance", None)
         if gov is None or not gov.tool_type:
+            gaps.append(desc.name)
+            logger.error(
+                "Governance gap: tool %r is runtime-registered but has no "
+                "governance.tool_type (Phase 0 DENY / invisible to registry).",
+                desc.name,
+            )
             continue
         pname = gov.policy_name or snake_to_pascal(desc.name)
         if registry.get_type(pname) == "unknown":
@@ -290,10 +360,9 @@ def _collect_governance_gaps(registry: ToolRegistry) -> list[str]:
 
 
 def assert_no_governance_gaps() -> list[str]:
-    """Return policy names of descriptor tools missing from governance.
+    """Return names of collected builtins missing governance identity.
 
-    Tools with empty ``governance.tool_type`` are skipped (not yet migrated
-    or intentionally using another registration path).
+    Includes descriptors with empty ``governance.tool_type``.
     """
     return _collect_governance_gaps(DEFAULT_REGISTRY)
 
@@ -325,24 +394,40 @@ class _LazyDefaultRegistry:
     delaying construction until after ``agents.tools`` imports can run.
     """
 
-    __slots__ = ("_instance",)
+    __slots__ = ("_instance", "_lock")
 
     def __init__(self) -> None:
         object.__setattr__(self, "_instance", None)
+        object.__setattr__(self, "_lock", threading.Lock())
 
     def _get(self) -> ToolRegistry:
         inst = object.__getattribute__(self, "_instance")
-        if inst is None:
-            inst = _create_default_registry()
-            object.__setattr__(self, "_instance", inst)
-        return inst
+        if inst is not None:
+            return inst
+        lock = object.__getattribute__(self, "_lock")
+        with lock:
+            inst = object.__getattribute__(self, "_instance")
+            if inst is None:
+                inst = _create_default_registry()
+                object.__setattr__(self, "_instance", inst)
+            return inst
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._get(), name)
 
+    def __copy__(self) -> "_LazyDefaultRegistry":
+        # Singleton: copy must not duplicate the lock.
+        return self
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> "_LazyDefaultRegistry":
+        memo[id(self)] = self
+        return self
+
     def _reset_for_tests(self) -> None:
         """Drop the cached instance (test helper only)."""
-        object.__setattr__(self, "_instance", None)
+        lock = object.__getattribute__(self, "_lock")
+        with lock:
+            object.__setattr__(self, "_instance", None)
 
 
 DEFAULT_REGISTRY: Any = _LazyDefaultRegistry()

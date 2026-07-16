@@ -230,6 +230,23 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
             # pylint: disable-next=protected-access
             workspace_registry._bootstrap_kwargs[key] = value
 
+        # Warm descriptor-driven caches before serving requests so the
+        # first /tools or agent-config path does not pay full import cost
+        # on the event loop (macos integration tests use a 15s timeout).
+        try:
+            from ..config.config import _default_builtin_tools
+            from ..governance.policy import get_default_user_rules
+            from ..governance.tool_registry import DEFAULT_REGISTRY
+
+            DEFAULT_REGISTRY.get_all_tool_names()
+            _default_builtin_tools()
+            get_default_user_rules()
+        except Exception:
+            logger.debug(
+                "Descriptor cache warm-up skipped",
+                exc_info=True,
+            )
+
     except Exception:
         logger.debug(
             "Runtime infrastructure init skipped",

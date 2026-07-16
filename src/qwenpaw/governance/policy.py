@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 import logging
 import re
+import threading
 from dataclasses import dataclass, field
 from enum import Enum
 from fnmatch import fnmatch
@@ -463,6 +464,10 @@ _PATH_LEVEL_USER_RULES: List[GovernanceRule] = [
 ]
 
 
+_AUTO_DEFAULT_USER_RULES_CACHE: List[GovernanceRule] | None = None
+_AUTO_DEFAULT_USER_RULES_LOCK = threading.Lock()
+
+
 def _auto_default_user_rules() -> List[GovernanceRule]:
     """Build tool-level rules from ``@tool_descriptor(default_policy=...)``.
 
@@ -474,45 +479,53 @@ def _auto_default_user_rules() -> List[GovernanceRule]:
     non-overlapping ``ToolName(**)`` ALLOW entries, so order does not
     change Phase 2 first-match outcomes; keep that invariant when adding
     ASK/DENY defaults.
+
+    Successful builds are cached so request paths do not rescan descriptors.
     """
-    try:
-        import qwenpaw.agents.tools as _agents_tools  # noqa: F401
-        from ..runtime.tool_registry import get_builtin_tool_funcs
-        from .tool_registry import snake_to_pascal
+    global _AUTO_DEFAULT_USER_RULES_CACHE
+    with _AUTO_DEFAULT_USER_RULES_LOCK:
+        if _AUTO_DEFAULT_USER_RULES_CACHE is not None:
+            return list(_AUTO_DEFAULT_USER_RULES_CACHE)
 
-        _ = _agents_tools
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Failed to build auto default user rules from descriptors: %s",
-            exc,
-        )
-        return []
+        try:
+            from ..agents import tools as _agents_tools  # noqa: F401
+            from ..runtime.tool_registry import get_builtin_tool_funcs
+            from .tool_registry import snake_to_pascal
 
-    action_map = {
-        "allow": GovernanceAction.ALLOW,
-        "ask": GovernanceAction.ASK,
-        "deny": GovernanceAction.DENY,
-    }
-    rules: List[GovernanceRule] = []
-    for fn in get_builtin_tool_funcs():
-        desc = getattr(fn, "_tool_descriptor", None)
-        if desc is None:
-            continue
-        gov = getattr(desc, "governance", None)
-        if gov is None or not gov.default_policy:
-            continue
-        action = action_map.get(gov.default_policy.lower())
-        if action is None:
-            continue
-        pname = gov.policy_name or snake_to_pascal(desc.name)
-        rules.append(
-            GovernanceRule(
-                match=f"{pname}(**)",
-                action=action,
-                reason=gov.policy_reason or f"Auto-registered: {pname}",
-            ),
-        )
-    return rules
+            _ = _agents_tools
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to build auto default user rules from descriptors: %s",
+                exc,
+            )
+            return []
+
+        action_map = {
+            "allow": GovernanceAction.ALLOW,
+            "ask": GovernanceAction.ASK,
+            "deny": GovernanceAction.DENY,
+        }
+        rules: List[GovernanceRule] = []
+        for fn in get_builtin_tool_funcs():
+            desc = getattr(fn, "_tool_descriptor", None)
+            if desc is None:
+                continue
+            gov = getattr(desc, "governance", None)
+            if gov is None or not gov.default_policy:
+                continue
+            action = action_map.get(gov.default_policy.lower())
+            if action is None:
+                continue
+            pname = gov.policy_name or snake_to_pascal(desc.name)
+            rules.append(
+                GovernanceRule(
+                    match=f"{pname}(**)",
+                    action=action,
+                    reason=gov.policy_reason or f"Auto-registered: {pname}",
+                ),
+            )
+        _AUTO_DEFAULT_USER_RULES_CACHE = rules
+        return list(rules)
 
 
 def get_default_user_rules() -> List[GovernanceRule]:

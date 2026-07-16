@@ -3,6 +3,11 @@
 
 from __future__ import annotations
 
+import threading
+from unittest.mock import patch
+
+import pytest
+
 from qwenpaw.agents.tools.delegate_external_agent import (
     delegate_external_agent,
 )
@@ -18,12 +23,15 @@ from qwenpaw.governance.policy import (
 )
 from qwenpaw.governance.tool_registry import (
     DEFAULT_REGISTRY,
+    GovernanceRegistrationConflict,
     ToolRegistry,
     assert_no_governance_gaps,
     register_tool_governance,
     snake_to_pascal,
+    _collect_governance_gaps,
 )
 from qwenpaw.plugins.api import _register_to_governance
+from qwenpaw.runtime.tool_registry import ToolDescriptor, ToolGovernanceSpec
 
 
 def _tc(tool_name: str, target: str = "") -> ToolCallSpec:
@@ -36,7 +44,7 @@ def _tc(tool_name: str, target: str = "") -> ToolCallSpec:
 
 
 class TestRegisterToolGovernance:
-    def test_idempotent_register(self):
+    def test_idempotent_register_identical_metadata(self):
         registry = ToolRegistry()
         pname = register_tool_governance(
             registry,
@@ -46,13 +54,57 @@ class TestRegisterToolGovernance:
         )
         assert pname == "UtPluginTool"
         assert registry.get_type("UtPluginTool") == "network"
+        # Same python_name + identical metadata is idempotent.
         register_tool_governance(
             registry,
             python_name="__ut_plugin_tool__",
-            tool_type="shell",  # ignored — already registered
+            tool_type="network",
             policy_name="UtPluginTool",
         )
         assert registry.get_type("UtPluginTool") == "network"
+
+    def test_reject_metadata_change_on_reregister(self):
+        registry = ToolRegistry()
+        register_tool_governance(
+            registry,
+            python_name="__ut_plugin_tool_meta__",
+            tool_type="network",
+            policy_name="UtPluginToolMeta",
+        )
+        with pytest.raises(GovernanceRegistrationConflict):
+            register_tool_governance(
+                registry,
+                python_name="__ut_plugin_tool_meta__",
+                tool_type="shell",
+                policy_name="UtPluginToolMeta",
+            )
+        assert registry.get_type("UtPluginToolMeta") == "network"
+
+    def test_reject_name_fold_collision(self):
+        """Distinct python names must not share a folded policy identity."""
+        registry = ToolRegistry()
+        register_tool_governance(
+            registry,
+            python_name="get_current_time",
+            tool_type="internal",
+            policy_name="GetCurrentTime",
+        )
+        with pytest.raises(GovernanceRegistrationConflict):
+            register_tool_governance(
+                registry,
+                python_name="get__current_time",
+                tool_type="internal",
+                # snake_to_pascal("get__current_time") == "GetCurrentTime"
+            )
+
+    def test_reject_plugin_collision_with_builtin_internal(self):
+        with pytest.raises(GovernanceRegistrationConflict):
+            register_tool_governance(
+                DEFAULT_REGISTRY,
+                python_name="__collide_get_current_time__",
+                tool_type="network",
+                policy_name="GetCurrentTime",
+            )
 
     def test_snake_to_pascal(self):
         assert snake_to_pascal("generate_image_qwen") == "GenerateImageQwen"
@@ -62,6 +114,29 @@ class TestBuiltinDescriptorGovernance:
     def test_no_governance_gaps(self):
         gaps = assert_no_governance_gaps()
         assert not gaps
+
+    def test_empty_tool_type_is_governance_gap(self):
+        registry = ToolRegistry()
+
+        class _Fn:
+            __name__ = "missing_gov_tool"
+
+        fn = _Fn()
+        setattr(
+            fn,
+            "_tool_descriptor",
+            ToolDescriptor(
+                name="missing_gov_tool",
+                func=lambda: None,
+                governance=ToolGovernanceSpec(tool_type=""),
+            ),
+        )
+        with patch(
+            "qwenpaw.runtime.tool_registry.get_builtin_tool_funcs",
+            return_value=[fn],
+        ):
+            gaps = _collect_governance_gaps(registry)
+        assert "missing_gov_tool" in gaps
 
     def test_ast_search_registered(self):
         assert DEFAULT_REGISTRY.get_type("AstSearch") == "file"
@@ -78,6 +153,7 @@ class TestBuiltinDescriptorGovernance:
             "WebFetch": "network",
             "Browser": "network",
             "GetCurrentTime": "internal",
+            "SetUserTimezone": "internal",
             "RecallHistory": "internal",
             "RecallHistoryPython": "shell",
             "MemorySearch": "internal",
@@ -95,15 +171,17 @@ class TestBuiltinDescriptorGovernance:
             DEFAULT_REGISTRY.python_to_policy_name("web_search") == "WebSearch"
         )
 
-    def test_set_user_timezone_target_param_matches_signature(self):
-        """extract_target must use the real function parameter name."""
+    def test_set_user_timezone_target_not_joined_to_workspace(self):
+        """Timezone names must not be treated as relative file paths."""
         assert (
             DEFAULT_REGISTRY.get_target_param("SetUserTimezone")
             == "timezone_name"
         )
+        assert DEFAULT_REGISTRY.get_type("SetUserTimezone") == "internal"
         target = DEFAULT_REGISTRY.extract_target(
             "SetUserTimezone",
             {"timezone_name": "Asia/Shanghai"},
+            workspace_dir="/tmp/fake-workspace",
         )
         assert target == "Asia/Shanghai"
 
@@ -122,6 +200,7 @@ class TestPluginGovernanceIssue6114:
             "reference_to_video_wan",
         ]
         for py_name in plugin_tools:
+            # Idempotent when metadata matches (may already be registered).
             register_tool_governance(
                 DEFAULT_REGISTRY,
                 python_name=py_name,
@@ -155,6 +234,41 @@ class TestPluginGovernanceIssue6114:
         decision = policy.evaluate(_tc("TotallyUnknownToolXYZ"))
         assert decision.action is GovernanceAction.DENY
         assert "Unregistered tool" in decision.reason
+
+
+class TestLazyRegistryConcurrency:
+    def test_lazy_registry_single_instance_under_contention(self):
+        """Double-checked locking must yield one shared registry instance."""
+        import time
+
+        from qwenpaw.governance import tool_registry as tr
+
+        # pylint: disable=protected-access
+        proxy = tr._LazyDefaultRegistry()
+        create_count = 0
+
+        def _slow_create() -> ToolRegistry:
+            nonlocal create_count
+            create_count += 1
+            time.sleep(0.05)
+            return ToolRegistry()
+
+        results: list[ToolRegistry] = []
+
+        def _worker() -> None:
+            results.append(proxy._get())
+
+        with patch.object(tr, "_create_default_registry", _slow_create):
+            threads = [threading.Thread(target=_worker) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=5)
+        # pylint: enable=protected-access
+
+        assert create_count == 1
+        assert len(results) == 8
+        assert all(r is results[0] for r in results)
 
 
 class TestAutoDefaultUserRules:

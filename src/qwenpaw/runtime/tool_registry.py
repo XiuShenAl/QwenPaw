@@ -17,8 +17,10 @@ from typing import Any, Callable, Iterable
 class ToolGovernanceSpec:
     """Governance identity for a tool (type, target param, policy name).
 
-    Empty ``tool_type`` means the descriptor does not auto-register into
-    the governance ToolRegistry (legacy / dynamic tools use other paths).
+    Empty ``tool_type`` is invalid for collected builtins under
+    ``qwenpaw.agents.tools`` (treated as a governance gap). Dynamic tools
+    that intentionally skip the global builtin collection register via
+    ``register_tool_governance`` / other paths instead.
 
     ``default_policy`` / ``policy_reason`` drive auto-generated
     ``ToolName(**)`` entries in the default user rules list.

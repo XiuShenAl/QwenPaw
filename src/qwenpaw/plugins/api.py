@@ -690,8 +690,24 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         """
 
         def _startup_register():
+            # Governance first: fail closed before exposing the tool in
+            # toolkit/UI/runtime (avoids #6114-style visible-but-denied).
             try:
-                import qwenpaw.agents.tools as tools_module
+                _register_to_governance(
+                    tool_name,
+                    tool_type=tool_type,
+                    target_param=target_param,
+                )
+            except Exception as exc:
+                logger.error(
+                    f"Failed to register tool '{tool_name}' into "
+                    f"governance (not exposing tool): {exc}",
+                    exc_info=True,
+                )
+                return
+
+            try:
+                from ..agents import tools as tools_module
 
                 setattr(tools_module, tool_name, tool_func)
                 if tool_name not in tools_module.__all__:
@@ -714,15 +730,11 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                     description,
                     icon,
                 )
-                _register_to_governance(
-                    tool_name,
-                    tool_type=tool_type,
-                    target_param=target_param,
-                )
 
             except Exception as exc:
                 logger.error(
-                    f"Failed to register tool '{tool_name}': {exc}",
+                    f"Failed to register tool '{tool_name}' after "
+                    f"governance sync: {exc}",
                     exc_info=True,
                 )
 

@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import re
+import threading
 from pathlib import Path
 from typing import Optional, Union, Dict, List, Literal, Any, Set
 
@@ -1759,90 +1761,119 @@ class BuiltinToolConfig(BaseModel):
     )
 
 
+_BUILTIN_TOOLS_CACHE: Dict[str, BuiltinToolConfig] | None = None
+_BUILTIN_TOOLS_LOCK = threading.Lock()
+
+
+def _reset_builtin_tools_cache_for_tests() -> None:
+    """Clear cached BuiltinToolConfig map (test helper only)."""
+    global _BUILTIN_TOOLS_CACHE
+    with _BUILTIN_TOOLS_LOCK:
+        _BUILTIN_TOOLS_CACHE = None
+
+
+def _copy_builtin_tools(
+    tools: Dict[str, BuiltinToolConfig],
+) -> Dict[str, BuiltinToolConfig]:
+    """Return a shallow dict of model copies so callers cannot mutate cache."""
+    return {name: cfg.model_copy() for name, cfg in tools.items()}
+
+
 # pylint: disable=too-many-nested-blocks
 def _default_builtin_tools() -> Dict[str, BuiltinToolConfig]:
     """Return built-in tool definitions from ``@tool_descriptor`` UI metadata.
 
     Plugin tools from manifests are merged afterwards (disabled by default).
+    Successful builds are cached; descriptor import failure fails closed
+    (raises) unless a previous successful snapshot exists.
     """
-    tools: Dict[str, BuiltinToolConfig] = {}
-    try:
-        import qwenpaw.agents.tools as _agents_tools  # noqa: F401
-        from ..runtime.tool_registry import get_builtin_tool_funcs
+    global _BUILTIN_TOOLS_CACHE
+    with _BUILTIN_TOOLS_LOCK:
+        if _BUILTIN_TOOLS_CACHE is not None:
+            return _copy_builtin_tools(_BUILTIN_TOOLS_CACHE)
 
-        _ = _agents_tools
-        for fn in get_builtin_tool_funcs():
-            desc = getattr(fn, "_tool_descriptor", None)
-            if desc is None:
-                continue
-            ui = getattr(desc, "ui", None)
-            tools[desc.name] = BuiltinToolConfig(
-                name=desc.name,
-                enabled=desc.enabled_by_default,
-                description=(
-                    (ui.description if ui and ui.description else "")
-                    or desc.description
-                    or ""
-                ),
-                display_to_user=(
-                    ui.display_to_user if ui is not None else True
-                ),
-                async_execution=desc.async_execution,
-                icon=(ui.icon if ui and ui.icon else None),
+        tools: Dict[str, BuiltinToolConfig] = {}
+        try:
+            # Side-effect import via importlib (not `from ..agents import
+            # tools`) so mypy --follow-imports=skip does not form a static
+            # cycle with agents.tools → delegate_external_agent → config.
+            importlib.import_module("qwenpaw.agents.tools")
+            from ..runtime.tool_registry import get_builtin_tool_funcs
+
+            for fn in get_builtin_tool_funcs():
+                desc = getattr(fn, "_tool_descriptor", None)
+                if desc is None:
+                    continue
+                ui = getattr(desc, "ui", None)
+                tools[desc.name] = BuiltinToolConfig(
+                    name=desc.name,
+                    enabled=desc.enabled_by_default,
+                    description=(
+                        (ui.description if ui and ui.description else "")
+                        or desc.description
+                        or ""
+                    ),
+                    display_to_user=(
+                        ui.display_to_user if ui is not None else True
+                    ),
+                    async_execution=desc.async_execution,
+                    icon=(ui.icon if ui and ui.icon else None),
+                )
+        except Exception as exc:
+            logger.error(
+                "Failed to build BuiltinToolConfig from tool descriptors: %s",
+                exc,
+                exc_info=True,
             )
-    except Exception as exc:
-        # Tools package unavailable during early import — empty set;
-        # callers typically re-invoke after agents.tools is loaded.
-        logger.warning(
-            "Failed to build BuiltinToolConfig from tool descriptors: %s. "
-            "Built-in tools may be missing from the UI until reload.",
-            exc,
-        )
-        tools = {}
+            raise RuntimeError(
+                "Failed to build built-in tool config from descriptors; "
+                "refusing to persist an empty/incomplete ToolsConfig",
+            ) from exc
 
-    # Merge dynamically registered tools from plugins
-    try:
-        from ..plugins.registry import PluginRegistry
+        # Merge dynamically registered tools from plugins
+        try:
+            from ..plugins.registry import PluginRegistry
 
-        registry = PluginRegistry()
-        all_manifests = registry.get_all_plugin_manifests()
-        for plugin_id, manifest in all_manifests.items():
-            meta = manifest.get("meta", {})
-            if meta.get("tool_name"):
-                tool_name = meta["tool_name"]
-                if tool_name not in tools:
-                    tools[tool_name] = BuiltinToolConfig(
-                        name=tool_name,
-                        enabled=False,
-                        description=meta.get(
-                            "tool_description",
-                            f"Tool from plugin {plugin_id}",
-                        ),
-                        display_to_user=True,
-                        async_execution=False,
-                        icon=meta.get("tool_icon", "🔧"),
-                    )
-            tools_list = meta.get("tools", [])
-            if isinstance(tools_list, list):
-                for tool_info in tools_list:
-                    if isinstance(tool_info, dict) and "name" in tool_info:
-                        tool_name = tool_info["name"]
-                        if tool_name not in tools:
-                            tools[tool_name] = BuiltinToolConfig(
-                                name=tool_name,
-                                enabled=False,
-                                description=tool_info.get(
-                                    "description",
-                                    f"Tool from plugin {plugin_id}",
-                                ),
-                                display_to_user=True,
-                                async_execution=False,
-                                icon=tool_info.get("icon", "🔧"),
-                            )
-    except Exception as exc:
-        logger.debug("Plugin tool merge skipped: %s", exc)
+            registry = PluginRegistry()
+            all_manifests = registry.get_all_plugin_manifests()
+            for plugin_id, manifest in all_manifests.items():
+                meta = manifest.get("meta", {})
+                if meta.get("tool_name"):
+                    tool_name = meta["tool_name"]
+                    if tool_name not in tools:
+                        tools[tool_name] = BuiltinToolConfig(
+                            name=tool_name,
+                            enabled=False,
+                            description=meta.get(
+                                "tool_description",
+                                f"Tool from plugin {plugin_id}",
+                            ),
+                            display_to_user=True,
+                            async_execution=False,
+                            icon=meta.get("tool_icon", "🔧"),
+                        )
+                tools_list = meta.get("tools", [])
+                if isinstance(tools_list, list):
+                    for tool_info in tools_list:
+                        if isinstance(tool_info, dict) and "name" in tool_info:
+                            tool_name = tool_info["name"]
+                            if tool_name not in tools:
+                                tools[tool_name] = BuiltinToolConfig(
+                                    name=tool_name,
+                                    enabled=False,
+                                    description=tool_info.get(
+                                        "description",
+                                        f"Tool from plugin {plugin_id}",
+                                    ),
+                                    display_to_user=True,
+                                    async_execution=False,
+                                    icon=tool_info.get("icon", "🔧"),
+                                )
+        except Exception as exc:
+            logger.debug("Plugin tool merge skipped: %s", exc)
 
-    return tools
+        _BUILTIN_TOOLS_CACHE = tools
+        return _copy_builtin_tools(tools)
 
 
 class ToolsConfig(BaseModel):

@@ -60,7 +60,9 @@ async def get_current_time() -> ToolChunk:
 
 @tool_descriptor(
     async_execution=True,
-    tool_type="file",
+    # Config/internal op — not a filesystem tool. Using tool_type="file"
+    # would make extract_target() join workspace_dir onto timezone names.
+    tool_type="internal",
     target_param="timezone_name",
     policy_name="SetUserTimezone",
     ui_description="Set user timezone",
