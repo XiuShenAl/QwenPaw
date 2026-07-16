@@ -51,6 +51,29 @@ def get_tool_config(tool_name: str) -> Optional[Dict[str, Any]]:
 # -------------------------------------------------------------------
 
 
+def _register_to_governance(
+    tool_name: str,
+    tool_type: str = "network",
+    target_param: str = "",
+) -> None:
+    """Register a plugin tool into the governance whitelist.
+
+    Fixes issue #6114: tools visible to the agent were denied at Phase 0
+    because ``register_tool`` never synced the governance registry.
+    """
+    from ..governance.tool_registry import (
+        DEFAULT_REGISTRY,
+        register_tool_governance,
+    )
+
+    register_tool_governance(
+        DEFAULT_REGISTRY,
+        python_name=tool_name,
+        tool_type=tool_type,
+        target_param=target_param,
+    )
+
+
 def _bridge_to_runtime(
     tool_name: str,
     tool_func: Callable,
@@ -618,6 +641,8 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         description: str = "",
         icon: str = "🔧",
         enabled: bool = False,
+        tool_type: str = "network",
+        target_param: str = "",
     ) -> None:
         """Register a tool function into the Agent's toolkit.
 
@@ -629,6 +654,8 @@ class PluginApi:  # pylint: disable=too-many-public-methods
           config (disabled by default so the user can opt-in)
         - Bridges to the runtime ToolRegistry so the agent can
           actually invoke the tool at runtime.
+        - Registers the tool into the governance whitelist so Phase 0
+          does not deny it as unregistered (issue #6114).
 
         The actual registration is deferred to a startup hook so it
         runs after the application and agent context are fully
@@ -643,6 +670,12 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             enabled: Whether the tool is enabled by default. The
                 recommended value is False so the user explicitly
                 enables the tool. Default: False.
+            tool_type: Governance tool type
+                (``"file"`` | ``"network"`` | ``"shell"`` | ``"internal"``).
+                Defaults to ``"network"`` to restore 1.0 pass-through
+                semantics for plugin tools while still running Phase 1
+                deep scans.
+            target_param: Optional governance target parameter name.
 
         Example:
             >>> from .tool import my_tool_func
@@ -652,6 +685,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             ...         tool_func=my_tool_func,
             ...         description="Does something useful",
             ...         icon="🔧",
+            ...         tool_type="network",
             ...     )
         """
 
@@ -679,6 +713,11 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                     enabled,
                     description,
                     icon,
+                )
+                _register_to_governance(
+                    tool_name,
+                    tool_type=tool_type,
+                    target_param=target_param,
                 )
 
             except Exception as exc:

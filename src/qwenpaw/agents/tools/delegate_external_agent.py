@@ -908,7 +908,14 @@ async def _run_streaming_agent_action(
         yield response_text(f"ACP execution error: {e}")
 
 
-@tool_descriptor(async_execution=True)
+@tool_descriptor(
+    async_execution=True,
+    tool_type="internal",
+    target_param="runner",
+    policy_name="DelegateExternalAgent",
+    ui_description="Delegate work to an external ACP agent runner",
+    ui_icon="📡",
+)
 async def delegate_external_agent(
     action: str,
     runner: str = "",

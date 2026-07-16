@@ -430,7 +430,13 @@ def format_background_status_text(
     return "\n".join(parts)
 
 
-@tool_descriptor(async_execution=True)
+@tool_descriptor(
+    async_execution=True,
+    tool_type="internal",
+    policy_name="ListAgents",
+    ui_description="List configured agents from the local API",
+    ui_icon="🤖",
+)
 async def list_agents(
     base_url: Optional[str] = None,
 ) -> ToolChunk:
@@ -445,7 +451,17 @@ async def list_agents(
     return _tool_text_response(_json_text(result))
 
 
-@tool_descriptor(async_execution=True)
+@tool_descriptor(
+    async_execution=True,
+    tool_type="internal",
+    target_param="agent_id",
+    policy_name="ChatWithAgent",
+    ui_description=(
+        "Send a message to another configured agent and wait for "
+        "the response"
+    ),
+    ui_icon="💬",
+)
 async def chat_with_agent(
     to_agent: str,
     text: str,
@@ -529,7 +545,14 @@ async def chat_with_agent(
     )
 
 
-@tool_descriptor(async_execution=True)
+@tool_descriptor(
+    async_execution=True,
+    tool_type="internal",
+    target_param="agent_id",
+    policy_name="SubmitToAgent",
+    ui_description="Submit a background task to another configured agent",
+    ui_icon="📨",
+)
 async def submit_to_agent(
     to_agent: str,
     text: str,
@@ -613,7 +636,14 @@ async def submit_to_agent(
     )
 
 
-@tool_descriptor(async_execution=True)
+@tool_descriptor(
+    async_execution=True,
+    tool_type="internal",
+    target_param="task_id",
+    policy_name="CheckAgentTask",
+    ui_description="Check the status of a background agent task",
+    ui_icon="⏳",
+)
 async def check_agent_task(
     task_id: str,
 ) -> ToolChunk:
@@ -707,7 +737,13 @@ def _build_spawn_request_context(current_agent_id: str) -> dict[str, Any]:
     return context
 
 
-@tool_descriptor(async_execution=True)
+@tool_descriptor(
+    async_execution=True,
+    tool_type="internal",
+    policy_name="SpawnSubagent",
+    ui_description="Spawn an ephemeral sub-task within the current workspace",
+    ui_icon="🔀",
+)
 async def spawn_subagent(
     task: str,
     fork: bool = False,

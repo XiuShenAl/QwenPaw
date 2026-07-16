@@ -31,27 +31,19 @@ def register_goal_tools_governance() -> None:
     try:
         from ...governance.tool_registry import (
             DEFAULT_REGISTRY,
+            register_tool_governance,
         )
 
-        for name in (
-            "GetGoal",
-            "CreateGoal",
-            "UpdateGoal",
-        ):
-            if DEFAULT_REGISTRY.get_type(name) == "unknown":
-                DEFAULT_REGISTRY.register(
-                    name,
-                    "internal",
-                    "",
-                )
         for py, policy in (
             ("get_goal", "GetGoal"),
             ("create_goal", "CreateGoal"),
             ("update_goal", "UpdateGoal"),
         ):
-            DEFAULT_REGISTRY.register_python_name(
-                py,
-                policy,
+            register_tool_governance(
+                DEFAULT_REGISTRY,
+                python_name=py,
+                tool_type="internal",
+                policy_name=policy,
             )
     except Exception:  # noqa: BLE001
         logger.debug(

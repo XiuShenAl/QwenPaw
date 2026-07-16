@@ -14,8 +14,12 @@ Relationship with policy.yaml:
 """
 
 from __future__ import annotations
+
+import logging
 import os
 from typing import Any, Dict, List
+
+logger = logging.getLogger(__name__)
 
 
 class ToolRegistry:
@@ -146,97 +150,175 @@ class ToolRegistry:
 
 
 # ---------------------------------------------------------------------------
-# Default registry instance (21 tools)
+# Shared registration helpers
+# ---------------------------------------------------------------------------
+
+
+def snake_to_pascal(name: str) -> str:
+    """Convert ``snake_case`` to ``PascalCase``."""
+    return "".join(p.capitalize() for p in name.split("_"))
+
+
+def register_tool_governance(
+    registry: ToolRegistry,
+    python_name: str,
+    tool_type: str,
+    target_param: str = "",
+    policy_name: str = "",
+    pattern_param: str = "",
+    sandbox_required: bool = False,
+) -> str:
+    """Register one tool into the governance registry (idempotent).
+
+    Used by:
+    - builtin ``@tool_descriptor`` scan (``_register_from_descriptors``)
+    - ``PluginApi.register_tool`` (issue #6114)
+    - goal-mode ``register_goal_tools_governance``
+
+    Returns the policy-layer tool name that was registered
+    (or already present).
+    """
+    pname = policy_name or snake_to_pascal(python_name)
+    if registry.get_type(pname) == "unknown":
+        registry.register(
+            pname,
+            tool_type,
+            target_param,
+            pattern_param=pattern_param,
+            sandbox_required=sandbox_required,
+        )
+    registry.register_python_name(python_name, pname)
+    return pname
+
+
+def _register_from_descriptors(registry: ToolRegistry) -> None:
+    """Register builtins that declare governance.tool_type on descriptors."""
+    try:
+        # Side-effect import so @tool_descriptor registrations run.
+        import qwenpaw.agents.tools as _agents_tools  # noqa: F401
+        from ..runtime.tool_registry import get_builtin_tool_funcs
+
+        _ = _agents_tools
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "Skipping descriptor governance registration: %s",
+            exc,
+        )
+        return
+
+    for fn in get_builtin_tool_funcs():
+        desc = getattr(fn, "_tool_descriptor", None)
+        if desc is None:
+            continue
+        gov = getattr(desc, "governance", None)
+        if gov is None or not gov.tool_type:
+            continue
+        register_tool_governance(
+            registry,
+            python_name=desc.name,
+            tool_type=gov.tool_type,
+            target_param=gov.target_param,
+            policy_name=gov.policy_name,
+            pattern_param=gov.pattern_param,
+            sandbox_required=gov.fail_without_sandbox,
+        )
+
+
+def _register_non_descriptor_tools(registry: ToolRegistry) -> None:
+    """Tools that intentionally skip ``@tool_descriptor`` auto-collection."""
+    # Scroll strategy tools — hand-built descriptors, not global builtins.
+    register_tool_governance(
+        registry,
+        python_name="recall_history",
+        tool_type="internal",
+        target_param="op",
+        policy_name="RecallHistory",
+    )
+    register_tool_governance(
+        registry,
+        python_name="recall_history_python",
+        tool_type="shell",
+        target_param="source",
+        policy_name="RecallHistoryPython",
+        sandbox_required=True,
+    )
+    # Memory manager tool — registered dynamically outside agents.tools.
+    register_tool_governance(
+        registry,
+        python_name="memory_search",
+        tool_type="internal",
+        target_param="",
+        policy_name="MemorySearch",
+    )
+
+
+def assert_no_governance_gaps() -> list[str]:
+    """Return policy names of descriptor tools missing from governance.
+
+    Tools with empty ``governance.tool_type`` are skipped (not yet migrated
+    or intentionally using another registration path).
+    """
+    from ..runtime.tool_registry import get_builtin_tool_funcs
+
+    gaps: list[str] = []
+    registry = DEFAULT_REGISTRY
+    for fn in get_builtin_tool_funcs():
+        desc = getattr(fn, "_tool_descriptor", None)
+        if desc is None:
+            continue
+        gov = getattr(desc, "governance", None)
+        if gov is None or not gov.tool_type:
+            continue
+        pname = gov.policy_name or snake_to_pascal(desc.name)
+        if registry.get_type(pname) == "unknown":
+            gaps.append(pname)
+            logger.error(
+                "Governance gap: tool %r (policy %r) is runtime-registered "
+                "but missing from the governance registry (Phase 0 DENY).",
+                desc.name,
+                pname,
+            )
+    return gaps
+
+
+# ---------------------------------------------------------------------------
+# Default registry (lazy singleton)
 # ---------------------------------------------------------------------------
 
 
 def _create_default_registry() -> ToolRegistry:
     """Create and populate the default ToolRegistry."""
     registry = ToolRegistry()
-    _register_builtin_tools(registry)
-    _register_python_name_mappings(registry)
+    _register_from_descriptors(registry)
+    _register_non_descriptor_tools(registry)
     return registry
 
 
-def _register_builtin_tools(r: ToolRegistry) -> None:
-    """Register all built-in tool types."""
-    # ── File tools ──
-    for name, param in [
-        ("Read", "file_path"),
-        ("Write", "file_path"),
-        ("Edit", "file_path"),
-        ("Append", "file_path"),
-        ("Grep", "path"),
-        ("SendFileToUser", "file_path"),
-        ("ViewImage", "image_path"),
-        ("ViewVideo", "video_path"),
-        ("DesktopScreenshot", "path"),
-        ("SetUserTimezone", "timezone"),
-    ]:
-        r.register(name, "file", param)
-    r.register("Glob", "file", "path", pattern_param="pattern")
+class _LazyDefaultRegistry:
+    """Proxy that builds the real registry on first attribute access.
 
-    # ── Network / Shell ──
-    r.register("Browser", "network", "url")
-    r.register("WebSearch", "network", "search_term")
-    r.register("WebFetch", "network", "url")
-    r.register("Bash", "shell", "command")
-    # Fail-closed: the REPL runs model-authored Python and returns DENIED
-    # unless a sandbox_config is supplied (unlike Bash, which is fail-open).
-    r.register("RecallHistoryPython", "shell", "source", sandbox_required=True)
-    # Structured recall: bound-parameter read-only queries over history.db —
-    # the model supplies scalars, never code, so no sandbox/approval needed.
-    r.register("RecallHistory", "internal", "op")
+    Keeps the public name ``DEFAULT_REGISTRY`` stable for call sites while
+    delaying construction until after ``agents.tools`` imports can run.
+    """
 
-    # ── Internal tools ──
-    for name, param in [
-        ("GetCurrentTime", ""),
-        ("GetTokenUsage", ""),
-        ("ListAgents", ""),
-        ("MaterializeSkill", ""),
-        ("ChatWithAgent", "agent_id"),
-        ("SubmitToAgent", "agent_id"),
-        ("CheckAgentTask", "task_id"),
-        ("SpawnSubagent", ""),
-        ("DelegateExternalAgent", "runner"),
-        ("MemorySearch", ""),
-    ]:
-        r.register(name, "internal", param)
+    __slots__ = ("_instance",)
+
+    def __init__(self) -> None:
+        object.__setattr__(self, "_instance", None)
+
+    def _get(self) -> ToolRegistry:
+        inst = object.__getattribute__(self, "_instance")
+        if inst is None:
+            inst = _create_default_registry()
+            object.__setattr__(self, "_instance", inst)
+        return inst
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._get(), name)
+
+    def _reset_for_tests(self) -> None:
+        """Drop the cached instance (test helper only)."""
+        object.__setattr__(self, "_instance", None)
 
 
-def _register_python_name_mappings(
-    r: ToolRegistry,
-) -> None:
-    """Register python func name → policy name maps."""
-    mappings = {
-        "execute_shell_command": "Bash",
-        "read_file": "Read",
-        "write_file": "Write",
-        "edit_file": "Edit",
-        "memory_search": "MemorySearch",
-        "append_file": "Append",
-        "grep_search": "Grep",
-        "glob_search": "Glob",
-        "browser_use": "Browser",
-        "web_search": "WebSearch",
-        "web_fetch": "WebFetch",
-        "desktop_screenshot": "DesktopScreenshot",
-        "send_file_to_user": "SendFileToUser",
-        "view_image": "ViewImage",
-        "view_video": "ViewVideo",
-        "get_current_time": "GetCurrentTime",
-        "set_user_timezone": "SetUserTimezone",
-        "get_token_usage": "GetTokenUsage",
-        "delegate_external_agent": "DelegateExternalAgent",
-        "list_agents": "ListAgents",
-        "chat_with_agent": "ChatWithAgent",
-        "submit_to_agent": "SubmitToAgent",
-        "check_agent_task": "CheckAgentTask",
-        "spawn_subagent": "SpawnSubagent",
-        "materialize_skill": "MaterializeSkill",
-    }
-    for py_name, policy_name in mappings.items():
-        r.register_python_name(py_name, policy_name)
-
-
-DEFAULT_REGISTRY = _create_default_registry()
+DEFAULT_REGISTRY: Any = _LazyDefaultRegistry()
