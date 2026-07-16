@@ -12,7 +12,7 @@ from agentscope.message import TextBlock, ToolResultBlock
 from agentscope.tool import ToolResponse
 
 from qwenpaw.tool_calls import ToolCoordinator, ToolCoordinatorMiddleware
-from qwenpaw.tool_calls._context import ToolCallContext
+from qwenpaw.tool_calls._context import CancelReason, ToolCallContext
 from qwenpaw.tool_calls._entry import ToolCallEntry
 from qwenpaw.tool_calls._stream import ToolStream
 
@@ -302,6 +302,11 @@ async def test_kill_deadline_terminates_execution():
     final = events[-1]
     assert isinstance(final, ToolResponse)
     assert "should not reach" not in final.content[0].text
+
+    entry = coordinator.get("call-kill")
+    if entry is not None:
+        assert entry.ctx.cancel_event.is_set()
+        assert entry.ctx.cancel_reason == CancelReason.TIMEOUT
 
 
 @pytest.mark.asyncio

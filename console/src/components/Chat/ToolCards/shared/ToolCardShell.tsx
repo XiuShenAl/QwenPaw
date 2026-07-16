@@ -69,37 +69,38 @@ const ToolCardShell: React.FC<ToolCardShellProps> = ({
     return `${bannerStyles.show}`;
   }, [control.bannerVisible]);
 
-  const metadataBlock = useMemo(() => {
+  const staticMetadata = useMemo(() => {
     if (!content.params || Object.keys(content.params).length === 0)
       return null;
     const lines: string[] = [];
     if (content.id) lines.push(`tool_call_id: ${content.id}`);
     if (content.name) lines.push(`tool: ${content.name}`);
-    const hiddenKeys = new Set(
-      control.killRemaining !== null ? ["timeout"] : [],
-    );
     for (const [k, v] of Object.entries(content.params)) {
-      if (hiddenKeys.has(k)) continue;
-      const val =
-        typeof v === "string" ? v : JSON.stringify(v, null, 2);
+      if (k === "timeout" && control.killRemaining !== null) continue;
+      const val = typeof v === "string" ? v : JSON.stringify(v, null, 2);
       lines.push(`${k}: ${val}`);
     }
-    if (control.offloadRemaining !== null) {
-      lines.push(
-        `offload_remaining: ${Math.ceil(control.offloadRemaining)}s`,
-      );
-    }
-    if (control.killRemaining !== null) {
-      lines.push(`timeout: ${Math.ceil(control.killRemaining)}s`);
-    }
     return lines.join("\n");
+    // control.killRemaining only gates whether to hide static "timeout" param;
+    // coerce to boolean so the memo doesn't rerun every second.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     content.id,
     content.name,
     content.params,
-    control.offloadRemaining,
-    control.killRemaining,
+    control.killRemaining !== null,
   ]);
+
+  const dynamicMetadata = useMemo(() => {
+    const lines: string[] = [];
+    if (control.offloadRemaining !== null) {
+      lines.push(`offload_remaining: ${Math.ceil(control.offloadRemaining)}s`);
+    }
+    if (control.killRemaining !== null) {
+      lines.push(`timeout: ${Math.ceil(control.killRemaining)}s`);
+    }
+    return lines.length > 0 ? lines.join("\n") : null;
+  }, [control.offloadRemaining, control.killRemaining]);
 
   return (
     <div>
@@ -175,8 +176,11 @@ const ToolCardShell: React.FC<ToolCardShellProps> = ({
                 content={inputPreview}
               />
             )}
-            {isLoading && metadataBlock && (
-              <DefaultBlock title="Parameters" content={metadataBlock} />
+            {isLoading && staticMetadata && (
+              <DefaultBlock title="Parameters" content={staticMetadata} />
+            )}
+            {isLoading && dynamicMetadata && (
+              <DefaultBlock title="Runtime" content={dynamicMetadata} />
             )}
             {children}
           </>

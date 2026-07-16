@@ -2174,7 +2174,8 @@
       "keepForeground": "保持前台执行",
       "keepForegroundDesc": "倒计时结束后工具继续在前台运行，不自动转入后台。适合需要实时查看输出的场景。",
       "offload": "自动转入后台",
-      "offloadDesc": "倒计时结束后工具自动转入后台执行，Agent 可继续处理其他任务。适合长时间运行的工具。"
+      "offloadDesc": "倒计时结束后工具自动转入后台执行，Agent 可继续处理其他任务。适合长时间运行的工具。",
+      "saveFailed": "保存策略失败"
     },
     "maxContextLength": "最大上下文长度",
     "maxContextLengthTooltip": "模型上下文窗口的最大 token 数，决定每次请求能携带的最大历史长度",
@@ -3164,7 +3165,7 @@
       "extendOffload": "推迟转后台",
       "extendKill": "延长执行超时",
       "cancel": "取消执行",
-      "autoActionPrefix": "后自动执行默认操作：",
+      "autoAction": "{{seconds}}秒后自动执行默认操作：",
       "noCountdown": "无倒计时 · 默认操作：",
       "policyOffload": "转入后台",
       "policyKeep": "不转后台",

@@ -123,8 +123,10 @@ function parseV1Props(v1Props: Record<string, unknown>): {
   // Message-level status on *_call messages reflects delivery, not execution.
   const status = deriveToolStatus(resultItem, data);
 
-  // Extract id — prefer call_id (the actual ToolCallBlock.id from
-  // AgentScope SSE, set via FunctionCall.call_id in the backend).
+  // Extract id — prefer call_id which carries the ToolCallBlock.id
+  // (e.g. "toolu_…" / "call_…") from the AgentScope SSE stream.
+  // It is set in the backend at FunctionCall.call_id
+  // (see agentscope/message.py → FunctionCall dataclass).
   const toolId =
     (callData.call_id as string) ||
     (callData.id as string) ||

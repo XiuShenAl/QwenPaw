@@ -337,7 +337,10 @@ class ToolCoordinator:
         no_deadline: bool = False,
     ) -> bool:
         """Extend foreground wait time (postpone offload). No effect on
-        kill_deadline."""
+        kill_deadline.
+
+        Kept async (despite no await) for interface consistency with
+        cancel() and other coordinator methods that callers await."""
         entry = self._entries.get(tool_call_id)
         if entry is None or entry.status != ToolCallStatus.RUNNING:
             return False
@@ -364,7 +367,9 @@ class ToolCoordinator:
         no_deadline: bool = False,
     ) -> bool:
         """Extend maximum execution time. Works in both foreground and
-        background phases."""
+        background phases.
+
+        Kept async for interface consistency with cancel()."""
         entry = self._entries.get(tool_call_id)
         if entry is None:
             return False
@@ -736,10 +741,13 @@ class ToolCoordinator:
                 break
 
             event = event_task.result()
-            if event.type in ("cancelled", "deadline_changed"):
+            if event.type in (
+                "cancelled",
+                "deadline_changed",
+                "deadline_reached",
+            ):
                 continue
             if event.type in (
-                "deadline_reached",
                 "kill_deadline_reached",
                 "stream_closed",
             ):

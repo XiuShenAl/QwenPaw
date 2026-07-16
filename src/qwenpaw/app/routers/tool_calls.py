@@ -63,13 +63,29 @@ def _get_coordinator(request: Request) -> Any:
     return coordinator
 
 
-def _get_entry(coordinator: Any, tool_call_id: str) -> Any:
-    """Look up an entry by tool_call_id only. session_id in the URL path
-    is kept for API compatibility but not enforced — the frontend may
-    pass a local timestamp that differs from the backend session_id."""
+def _get_entry(
+    coordinator: Any,
+    tool_call_id: str,
+    session_id: str = "",
+) -> Any:
+    """Look up by tool_call_id (globally unique).
+
+    session_id is validated when provided: a mismatch is logged as a
+    warning for audit purposes but does not block the request, because
+    the frontend may pass a local-timestamp ID that differs from the
+    backend session_id (e.g. ``console:default``)."""
     entry = coordinator.get(tool_call_id)
     if entry is None:
         raise HTTPException(404, "Tool call not found")
+    if session_id and entry.ctx.session_id != session_id:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "session_id mismatch: url=%s backend=%s tc=%s",
+            session_id,
+            entry.ctx.session_id,
+            tool_call_id,
+        )
     return entry
 
 
@@ -138,24 +154,24 @@ async def list_calls(
 
 
 @router.get("/{session_id}/{tool_call_id}", response_model=ToolCallInfo)
-async def get_call(  # pylint: disable=unused-argument
+async def get_call(
     session_id: str,
     tool_call_id: str,
     request: Request,
 ) -> ToolCallInfo:
     coordinator = _get_coordinator(request)
-    entry = _get_entry(coordinator, tool_call_id)
+    entry = _get_entry(coordinator, tool_call_id, session_id)
     return _entry_to_info(entry)
 
 
 @router.post("/{session_id}/{tool_call_id}/offload", status_code=202)
-async def offload_call(  # pylint: disable=unused-argument
+async def offload_call(
     session_id: str,
     tool_call_id: str,
     request: Request,
 ) -> dict[str, Any]:
     coordinator = _get_coordinator(request)
-    _get_entry(coordinator, tool_call_id)
+    _get_entry(coordinator, tool_call_id, session_id)
     ok = await coordinator.request_offload(tool_call_id)
     if not ok:
         raise HTTPException(409, "Cannot offload (not running)")
@@ -163,14 +179,14 @@ async def offload_call(  # pylint: disable=unused-argument
 
 
 @router.post("/{session_id}/{tool_call_id}/cancel", status_code=202)
-async def cancel_call(  # pylint: disable=unused-argument
+async def cancel_call(
     session_id: str,
     tool_call_id: str,
     request: Request,
     body: CancelRequest | None = None,
 ) -> dict[str, Any]:
     coordinator = _get_coordinator(request)
-    _get_entry(coordinator, tool_call_id)
+    _get_entry(coordinator, tool_call_id, session_id)
     force = body.force if body else False
     ok = await coordinator.cancel(tool_call_id, force=force)
     if not ok:
@@ -182,14 +198,14 @@ async def cancel_call(  # pylint: disable=unused-argument
     "/{session_id}/{tool_call_id}/extend-deadline",
     status_code=202,
 )
-async def extend_deadline(  # pylint: disable=unused-argument
+async def extend_deadline(
     session_id: str,
     tool_call_id: str,
     request: Request,
     body: ExtendRequest,
 ) -> dict[str, Any]:
     coordinator = _get_coordinator(request)
-    entry = _get_entry(coordinator, tool_call_id)
+    entry = _get_entry(coordinator, tool_call_id, session_id)
 
     if body.target == "kill":
         ok = await coordinator.extend_kill_deadline(
@@ -218,13 +234,13 @@ async def extend_deadline(  # pylint: disable=unused-argument
 
 
 @router.get("/{session_id}/{tool_call_id}/output")
-async def get_output(  # pylint: disable=unused-argument
+async def get_output(
     session_id: str,
     tool_call_id: str,
     request: Request,
 ) -> dict[str, Any]:
     coordinator = _get_coordinator(request)
-    entry = _get_entry(coordinator, tool_call_id)
+    entry = _get_entry(coordinator, tool_call_id, session_id)
     content_blocks = []
     if entry.final_response and entry.final_response.content:
         for block in entry.final_response.content:
@@ -238,13 +254,13 @@ async def get_output(  # pylint: disable=unused-argument
 
 
 @router.get("/{session_id}/{tool_call_id}/stream")
-async def stream_output(  # pylint: disable=unused-argument
+async def stream_output(
     session_id: str,
     tool_call_id: str,
     request: Request,
 ) -> StreamingResponse:
     coordinator = _get_coordinator(request)
-    entry = _get_entry(coordinator, tool_call_id)
+    entry = _get_entry(coordinator, tool_call_id, session_id)
 
     async def _generate():
         async for chunk in entry.stream.subscribe():

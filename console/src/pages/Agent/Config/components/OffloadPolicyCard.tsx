@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Card, Radio, Space, Typography, Alert, Spin } from "antd";
+import { Card, Radio, Space, Typography, Alert, Spin, message } from "antd";
 import { Clock } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toolCallsApi } from "../../../../api/modules/toolCalls";
@@ -19,9 +19,7 @@ export function OffloadPolicyCard() {
     toolCallsApi
       .getOffloadPolicy()
       .then((res) => {
-        setPolicy(
-          (res.default_action as OffloadPolicy) || "keep_foreground",
-        );
+        setPolicy((res.default_action as OffloadPolicy) || "keep_foreground");
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -33,7 +31,9 @@ export function OffloadPolicyCard() {
       await toolCallsApi.setOffloadPolicy(value);
       setPolicy(value);
     } catch {
-      // Silently fail — user can retry
+      message.error(
+        t("agentConfig.offloadPolicy.saveFailed", "Failed to save policy"),
+      );
     } finally {
       setSaving(false);
     }
@@ -42,10 +42,7 @@ export function OffloadPolicyCard() {
   const options = [
     {
       value: "keep_foreground" as OffloadPolicy,
-      label: t(
-        "agentConfig.offloadPolicy.keepForeground",
-        "保持前台执行",
-      ),
+      label: t("agentConfig.offloadPolicy.keepForeground", "保持前台执行"),
       description: t(
         "agentConfig.offloadPolicy.keepForegroundDesc",
         "倒计时结束后工具继续在前台运行，不自动转入后台。适合需要实时查看输出的场景。",
@@ -54,10 +51,7 @@ export function OffloadPolicyCard() {
     },
     {
       value: "offload" as OffloadPolicy,
-      label: t(
-        "agentConfig.offloadPolicy.offload",
-        "自动转入后台",
-      ),
+      label: t("agentConfig.offloadPolicy.offload", "自动转入后台"),
       description: t(
         "agentConfig.offloadPolicy.offloadDesc",
         "倒计时结束后工具自动转入后台执行，Agent 可继续处理其他任务。适合长时间运行的工具。",

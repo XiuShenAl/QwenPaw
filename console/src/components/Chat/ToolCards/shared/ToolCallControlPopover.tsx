@@ -7,6 +7,7 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { message } from "antd";
 import { toolCallsApi } from "../../../../api/modules/toolCalls";
 import styles from "./offloadBanner.module.less";
 
@@ -20,17 +21,13 @@ interface OffloadBannerProps {
   totalSeconds: number;
   defaultPolicy: "offload" | "keep_foreground";
   onClose: () => void;
-  onUpdateRemaining: (
-    offload: number | null,
-    kill: number | null,
-  ) => void;
+  onUpdateRemaining: (offload: number | null, kill: number | null) => void;
 }
 
 export const OffloadBanner: React.FC<OffloadBannerProps> = ({
   sessionId,
   toolCallId,
   offloadRemaining,
-  killRemaining,
   totalSeconds,
   defaultPolicy,
   onClose,
@@ -58,7 +55,7 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
       setDisplaySecs(Math.ceil(remaining));
       if (remaining <= 0) {
         clearInterval(timerRef.current);
-        dismiss();
+        dismiss(true);
       }
     }, 1000);
 
@@ -68,8 +65,15 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [offloadRemaining]);
 
-  const dismiss = () => {
+  const dismiss = (showToast = false) => {
     if (timerRef.current) clearInterval(timerRef.current);
+    if (showToast) {
+      const label =
+        defaultPolicy === "offload"
+          ? t("tool.control.policyOffload")
+          : t("tool.control.policyKeep");
+      message.info(label);
+    }
     setCollapsing(true);
     setTimeout(() => onClose(), 250);
   };
@@ -94,8 +98,8 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
 
   const handleKeep = () =>
     withGuard("keep", async () => {
-      await toolCallsApi.preventOffload(sessionId, toolCallId);
-      onUpdateRemaining(null, killRemaining);
+      const res = await toolCallsApi.preventOffload(sessionId, toolCallId);
+      onUpdateRemaining(res.offload_remaining, res.kill_remaining);
       dismiss();
     });
 
@@ -135,9 +139,7 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
     >
       <div className={styles.offloadBar}>
         <div className={styles.offloadGear}>⚙️</div>
-        <div className={styles.offloadInfo}>
-          {t("tool.control.title")}
-        </div>
+        <div className={styles.offloadInfo}>{t("tool.control.title")}</div>
 
         {hasCountdown && (
           <div className={styles.timerRing}>
@@ -173,16 +175,14 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
           onClick={handleBackground}
           disabled={busy !== null}
         >
-          <span className={styles.ico}>🌙</span>{" "}
-          {t("tool.control.offload")}
+          <span className={styles.ico}>🌙</span> {t("tool.control.offload")}
         </button>
         <button
           className={styles.offloadBtn}
           onClick={handleKeep}
           disabled={busy !== null}
         >
-          <span className={styles.ico}>⏳</span>{" "}
-          {t("tool.control.keep")}
+          <span className={styles.ico}>⏳</span> {t("tool.control.keep")}
         </button>
         <button
           className={styles.offloadBtn}
@@ -197,25 +197,21 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
           onClick={handleExtendKill}
           disabled={busy !== null}
         >
-          <span className={styles.ico}>⏱️</span>{" "}
-          {t("tool.control.extendKill")}
+          <span className={styles.ico}>⏱️</span> {t("tool.control.extendKill")}
         </button>
         <button
           className={`${styles.offloadBtn} ${styles.cancelAct}`}
           onClick={handleCancel}
           disabled={busy !== null}
         >
-          <span className={styles.ico}>✕</span>{" "}
-          {t("tool.control.cancel")}
+          <span className={styles.ico}>✕</span> {t("tool.control.cancel")}
         </button>
       </div>
 
       <div className={styles.offloadNote}>
         <div className={styles.noteDot} />
         {hasCountdown ? (
-          <>
-            <span>{displaySecs}</span>s{t("tool.control.autoActionPrefix")}
-          </>
+          <>{t("tool.control.autoAction", { seconds: displaySecs })}</>
         ) : (
           <>{t("tool.control.noCountdown")}</>
         )}
