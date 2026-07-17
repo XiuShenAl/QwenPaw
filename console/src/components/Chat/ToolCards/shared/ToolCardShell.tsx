@@ -62,7 +62,12 @@ const ToolCardShell: React.FC<ToolCardShellProps> = ({
 
   const showGear = content.status === "calling" && !!sessionId;
 
-  const control = useToolCallControl(sessionId, content.id, content.status);
+  const control = useToolCallControl(
+    sessionId,
+    content.id,
+    content.status,
+    content.name || title,
+  );
 
   const gearDotClass = useMemo(() => {
     if (!control.bannerVisible) return "";
@@ -191,6 +196,7 @@ const ToolCardShell: React.FC<ToolCardShellProps> = ({
         <OffloadBanner
           sessionId={sessionId}
           toolCallId={content.id}
+          toolName={content.name || title}
           offloadRemaining={control.offloadRemaining}
           killRemaining={control.killRemaining}
           totalSeconds={AUTO_POPUP_TOTAL_SECS}

@@ -3169,7 +3169,30 @@
       "noCountdown": "无倒计时 · 默认操作：",
       "policyOffload": "转入后台",
       "policyKeep": "不转后台",
-      "manage": "后台管理"
+      "manage": "后台管理",
+      "toast": {
+        "offloaded": "工具已转入后台",
+        "keepWaiting": "继续前台等待…",
+        "extended": "已延长提醒，+30 秒后再次提示",
+        "killExtended": "执行超时已延长 30 秒",
+        "cancelled": "工具调用已取消",
+        "cancelFailed": "取消工具失败",
+        "bgComplete": "后台工具已完成：{{tool}}",
+        "bgCancelled": "后台工具已取消：{{tool}}"
+      },
+      "hint": {
+        "completed": "工具 {{tool}} 已在后台完成",
+        "cancelled": "工具 {{tool}} 已取消"
+      },
+      "bgQueue": {
+        "title": "后台任务",
+        "running": "运行中",
+        "done": "已完成",
+        "cancelled": "已取消",
+        "totalDuration": "总耗时",
+        "remove": "移除",
+        "noOutput": "暂无输出"
+      }
     }
   },
   "preview": {

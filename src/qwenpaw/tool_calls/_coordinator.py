@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Awaitable, Callable
 
@@ -19,6 +21,11 @@ from ._hooks import ToolHookRegistry
 from ._stream import ToolStream, _SENTINEL as _STREAM_SENTINEL
 
 logger = logging.getLogger(__name__)
+
+# Keep finalized entries briefly so GET /output after SSE ``done`` can still
+# read ``final_response`` (finalize pops from the hot table immediately).
+_COMPLETED_CACHE_TTL_SECS = 60.0
+_COMPLETED_CACHE_MAX = 50
 
 CompletionHandler = Callable[[ToolCallEntry], Awaitable[None]]
 OffloadedHandler = Callable[[ToolCallEntry], Awaitable[None]]
@@ -59,6 +66,11 @@ class ToolCoordinator:
 
         self._entries: dict[str, ToolCallEntry] = {}
         self._entries_lock = asyncio.Lock()
+        # tool_call_id -> (entry, monotonic completed_at)
+        self._completed_cache: OrderedDict[
+            str,
+            tuple[ToolCallEntry, float],
+        ] = OrderedDict()
         self._pending_hints: dict[str, list[Any]] = {}
         self._hints_lock = asyncio.Lock()
         self._completion_handlers: list[CompletionHandler] = []
@@ -251,7 +263,10 @@ class ToolCoordinator:
     # INDEX / QUERY
     # ================================================================
     def get(self, tool_call_id: str) -> ToolCallEntry | None:
-        return self._entries.get(tool_call_id)
+        entry = self._entries.get(tool_call_id)
+        if entry is not None:
+            return entry
+        return self._get_completed(tool_call_id)
 
     def list_entries(
         self,
@@ -261,6 +276,32 @@ class ToolCoordinator:
         if session_id is not None:
             entries = [e for e in entries if e.ctx.session_id == session_id]
         return entries
+
+    def _get_completed(self, tool_call_id: str) -> ToolCallEntry | None:
+        self._purge_completed_cache()
+        cached = self._completed_cache.get(tool_call_id)
+        if cached is None:
+            return None
+        entry, _completed_at = cached
+        return entry
+
+    def _store_completed(self, entry: ToolCallEntry) -> None:
+        self._purge_completed_cache()
+        tcid = entry.ctx.tool_call_id
+        self._completed_cache.pop(tcid, None)
+        self._completed_cache[tcid] = (entry, time.monotonic())
+        while len(self._completed_cache) > _COMPLETED_CACHE_MAX:
+            self._completed_cache.popitem(last=False)
+
+    def _purge_completed_cache(self) -> None:
+        now = time.monotonic()
+        expired = [
+            tcid
+            for tcid, (_entry, completed_at) in self._completed_cache.items()
+            if now - completed_at > _COMPLETED_CACHE_TTL_SECS
+        ]
+        for tcid in expired:
+            self._completed_cache.pop(tcid, None)
 
     # ================================================================
     # PER-AGENT PER-TOOL TIMEOUT CONFIGURATION
@@ -804,6 +845,7 @@ class ToolCoordinator:
                 "interrupted" if entry.ctx.cancel_event.is_set() else "success"
             )
         self._entries.pop(entry.ctx.tool_call_id, None)
+        self._store_completed(entry)
         return entry.final_response
 
     def _resolve_timeout(

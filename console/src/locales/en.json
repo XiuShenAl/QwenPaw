@@ -3150,7 +3150,30 @@
       "noCountdown": "No countdown · Default: ",
       "policyOffload": "Offload",
       "policyKeep": "Keep Foreground",
-      "manage": "Manage"
+      "manage": "Manage",
+      "toast": {
+        "offloaded": "Tool moved to background",
+        "keepWaiting": "Continuing to wait…",
+        "extended": "Will remind you in +30s",
+        "killExtended": "Timeout extended by 30s",
+        "cancelled": "Tool call cancelled",
+        "cancelFailed": "Failed to cancel tool",
+        "bgComplete": "Background tool complete: {{tool}}",
+        "bgCancelled": "Background tool cancelled: {{tool}}"
+      },
+      "hint": {
+        "completed": "Tool {{tool}} completed in background",
+        "cancelled": "Tool {{tool}} cancelled"
+      },
+      "bgQueue": {
+        "title": "Background tasks",
+        "running": "Running",
+        "done": "Done",
+        "cancelled": "Cancelled",
+        "totalDuration": "Total",
+        "remove": "Remove",
+        "noOutput": "No output yet"
+      }
     }
   },
   "preview": {

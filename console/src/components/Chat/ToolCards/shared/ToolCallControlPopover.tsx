@@ -9,6 +9,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { message } from "antd";
 import { toolCallsApi } from "../../../../api/modules/toolCalls";
+import { registerBackgroundTask } from "../../../../hooks/useBackgroundTaskWatcher";
 import styles from "./offloadBanner.module.less";
 
 const CIRCUMFERENCE = 2 * Math.PI * 10;
@@ -16,6 +17,7 @@ const CIRCUMFERENCE = 2 * Math.PI * 10;
 interface OffloadBannerProps {
   sessionId: string;
   toolCallId: string;
+  toolName: string;
   offloadRemaining: number | null;
   killRemaining: number | null;
   totalSeconds: number;
@@ -27,6 +29,7 @@ interface OffloadBannerProps {
 export const OffloadBanner: React.FC<OffloadBannerProps> = ({
   sessionId,
   toolCallId,
+  toolName,
   offloadRemaining,
   totalSeconds,
   defaultPolicy,
@@ -68,6 +71,14 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
   const dismiss = (showToast = false) => {
     if (timerRef.current) clearInterval(timerRef.current);
     if (showToast) {
+      // Default policy executed: if system auto-offloads, register the queue item.
+      if (defaultPolicy === "offload") {
+        registerBackgroundTask({
+          sessionId,
+          toolCallId,
+          toolName: toolName || toolCallId,
+        });
+      }
       const label =
         defaultPolicy === "offload"
           ? t("tool.control.policyOffload")
@@ -93,6 +104,14 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
   const handleBackground = () =>
     withGuard("offload", async () => {
       await toolCallsApi.offload(sessionId, toolCallId);
+      registerBackgroundTask({
+        sessionId,
+        toolCallId,
+        toolName: toolName || toolCallId,
+      });
+      message.success(
+        t("tool.control.toast.offloaded", "Tool moved to background"),
+      );
       dismiss();
     });
 
@@ -100,6 +119,7 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
     withGuard("keep", async () => {
       const res = await toolCallsApi.preventOffload(sessionId, toolCallId);
       onUpdateRemaining(res.offload_remaining, res.kill_remaining);
+      message.info(t("tool.control.toast.keepWaiting", "Continuing to wait…"));
       dismiss();
     });
 
@@ -107,17 +127,22 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
     withGuard("extendOffload", async () => {
       const res = await toolCallsApi.extendOffload(sessionId, toolCallId, 30);
       onUpdateRemaining(res.offload_remaining, res.kill_remaining);
+      message.info(t("tool.control.toast.extended", "Will remind you in +30s"));
     });
 
   const handleExtendKill = () =>
     withGuard("extendKill", async () => {
       const res = await toolCallsApi.extendKill(sessionId, toolCallId, 30);
       onUpdateRemaining(res.offload_remaining, res.kill_remaining);
+      message.info(
+        t("tool.control.toast.killExtended", "Timeout extended by 30s"),
+      );
     });
 
   const handleCancel = () =>
     withGuard("cancel", async () => {
       await toolCallsApi.cancel(sessionId, toolCallId);
+      message.info(t("tool.control.toast.cancelled", "Tool call cancelled"));
       dismiss();
     });
 

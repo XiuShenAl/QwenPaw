@@ -310,6 +310,38 @@ async def test_kill_deadline_terminates_execution():
 
 
 @pytest.mark.asyncio
+async def test_completed_cache_keeps_final_response():
+    """Finalize still allows get() via the short TTL completed cache."""
+    coordinator = ToolCoordinator(offload_on_deadline=False)
+    tool_call = _ToolCall(id="call-cache", name="fast_tool")
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        yield _text_response(tool_call.id, "cached-result")
+
+    await _collect(
+        coordinator.execute(
+            tool_call=tool_call,
+            next_handler=next_handler,
+            session_id="session-cache",
+            agent_id="agent-1",
+            root_session_id="root-1",
+        ),
+    )
+
+    # Hot table should not list it as in-flight
+    assert all(
+        e.ctx.tool_call_id != "call-cache" for e in coordinator.list_entries()
+    )
+
+    entry = coordinator.get("call-cache")
+    assert entry is not None
+    assert entry.final_response is not None
+    assert entry.final_response.content[0].text == "cached-result"
+
+
+@pytest.mark.asyncio
 async def test_offload_policy_runtime_toggle():
     """offload_on_deadline can be toggled at runtime via the property."""
     coordinator = ToolCoordinator(offload_on_deadline=False)

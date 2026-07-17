@@ -121,6 +121,8 @@ import { openExternalLink } from "../../utils/openExternalLink";
 import { getLastEditorCopy } from "../Coding/lastEditorCopy";
 import { useUploadLimitStore } from "../../stores/uploadLimitStore";
 import MessageQueuePanel from "./components/MessageQueuePanel";
+import BackgroundTaskPanel from "./components/BackgroundTaskPanel";
+import { useBackgroundTasksStore } from "../../stores/backgroundTasksStore";
 import ApprovalLevelToggle from "./components/ApprovalLevelToggle";
 import { useAgentRunningConfigApprovalLevel } from "../../hooks/useAgentRunningConfigApprovalLevel";
 import { type ToolExecutionLevel } from "../../utils/approval";
@@ -1312,7 +1314,8 @@ export default function ChatPage() {
   // the "other tab is owner" banner on every session switch.
   const isQueueOnlyTab = ownershipResolved && !isOwner;
   const hasQueueItems = messageQueue.length > 0;
-  const showSenderBeforeUI = isQueueOnlyTab || hasQueueItems;
+  const bgTaskCount = useBackgroundTasksStore((s) => s.tasks.length);
+  const showSenderBeforeUI = isQueueOnlyTab || hasQueueItems || bgTaskCount > 0;
 
   const scheduleNextSend = useCallback(() => {
     if (autoSendTimerRef.current) clearTimeout(autoSendTimerRef.current);
@@ -2748,6 +2751,14 @@ export default function ChatPage() {
                 message={t("chat.queue.otherTabOwner")}
               />
             )}
+            <BackgroundTaskPanel
+              sessionId={
+                (window as unknown as { currentSessionId?: string })
+                  .currentSessionId ||
+                chatId ||
+                ""
+              }
+            />
             {hasQueueItems ? (
               <SessionQueuePanel
                 sessionId={queueSessionId}
@@ -3038,6 +3049,10 @@ export default function ChatPage() {
     toggleHistoryPanel,
     handleCompactCommand,
     handleNewCommand,
+    runState,
+    isOwner,
+    bgTaskCount,
+    chatId,
   ]);
 
   return (
