@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type CSSProperties,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { useTheme } from "../../../contexts/ThemeContext";
 import {
@@ -32,6 +38,7 @@ export default function BackgroundTaskPanel({
   const { isDark } = useTheme();
   const tasks = useBackgroundTasksStore((s) => s.tasks);
   const removeTask = useBackgroundTasksStore((s) => s.removeTask);
+  const removeTasks = useBackgroundTasksStore((s) => s.removeTasks);
   const dismissHint = useBackgroundTasksStore((s) => s.dismissHint);
 
   const sessionTasks = useMemo(
@@ -41,6 +48,7 @@ export default function BackgroundTaskPanel({
 
   const [collapsed, setCollapsed] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [batchBusy, setBatchBusy] = useState(false);
   const [, setTick] = useState(0);
 
   useEffect(() => {
@@ -49,9 +57,75 @@ export default function BackgroundTaskPanel({
     return () => clearInterval(id);
   }, [sessionTasks]);
 
+  const runningTasks = useMemo(
+    () => sessionTasks.filter((t) => t.status === "running"),
+    [sessionTasks],
+  );
+
+  const handleClose = useCallback(
+    async (task: BackgroundTask) => {
+      if (task.status === "running") {
+        try {
+          await cancelBackgroundTask(task.sessionId, task.toolCallId);
+          message.info(
+            t("tool.control.toast.cancelled", "Tool call cancelled"),
+          );
+        } catch (e) {
+          console.error("[BackgroundTaskPanel] cancel failed:", e);
+          message.error(
+            t("tool.control.toast.cancelFailed", "Failed to cancel tool"),
+          );
+        }
+        return;
+      }
+      stopBackgroundTaskWatcher(task.toolCallId);
+      removeTask(task.toolCallId);
+    },
+    [removeTask, t],
+  );
+
+  const handleCancelAll = useCallback(async () => {
+    if (runningTasks.length === 0 || batchBusy) return;
+    setBatchBusy(true);
+    try {
+      await Promise.allSettled(
+        runningTasks.map((task) =>
+          cancelBackgroundTask(task.sessionId, task.toolCallId),
+        ),
+      );
+      message.info(
+        t("tool.control.bgQueue.cancelAllDone", "Cancelled all running tasks"),
+      );
+    } finally {
+      setBatchBusy(false);
+    }
+  }, [runningTasks, batchBusy, t]);
+
+  const handleClearAll = useCallback(async () => {
+    if (sessionTasks.length === 0 || batchBusy) return;
+    setBatchBusy(true);
+    try {
+      // Cancel running tools first, then remove every entry in this session.
+      await Promise.allSettled(
+        runningTasks.map((task) =>
+          cancelBackgroundTask(task.sessionId, task.toolCallId),
+        ),
+      );
+      for (const task of sessionTasks) {
+        stopBackgroundTaskWatcher(task.toolCallId);
+      }
+      removeTasks(sessionTasks.map((task) => task.toolCallId));
+      message.info(
+        t("tool.control.bgQueue.clearAllDone", "Cleared background task list"),
+      );
+    } finally {
+      setBatchBusy(false);
+    }
+  }, [sessionTasks, runningTasks, batchBusy, removeTasks, t]);
+
   if (sessionTasks.length === 0) return null;
 
-  const hasRunning = sessionTasks.some((t) => t.status === "running");
+  const hasRunning = runningTasks.length > 0;
   const borderColor = isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)";
   const badgeBg = hasRunning
     ? isDark
@@ -61,22 +135,16 @@ export default function BackgroundTaskPanel({
     ? "rgba(114,46,209,0.25)"
     : "rgba(114,46,209,0.12)";
   const badgeColor = hasRunning ? "#d48806" : "#722ed1";
-
-  const handleClose = async (task: BackgroundTask) => {
-    if (task.status === "running") {
-      try {
-        await cancelBackgroundTask(task.sessionId, task.toolCallId);
-        message.info(t("tool.control.toast.cancelled", "Tool call cancelled"));
-      } catch (e) {
-        console.error("[BackgroundTaskPanel] cancel failed:", e);
-        message.error(
-          t("tool.control.toast.cancelFailed", "Failed to cancel tool"),
-        );
-      }
-      return;
-    }
-    stopBackgroundTaskWatcher(task.toolCallId);
-    removeTask(task.toolCallId);
+  const actionBtnStyle: CSSProperties = {
+    border: `1px solid ${borderColor}`,
+    background: isDark ? "rgba(255,255,255,0.04)" : "rgba(0,0,0,0.03)",
+    cursor: batchBusy ? "not-allowed" : "pointer",
+    color: isDark ? "#bbb" : "#555",
+    fontSize: 11,
+    padding: "2px 8px",
+    borderRadius: 4,
+    lineHeight: 1.4,
+    opacity: batchBusy ? 0.5 : 1,
   };
 
   return (
@@ -92,38 +160,81 @@ export default function BackgroundTaskPanel({
         border: `1px solid ${borderColor}`,
       }}
     >
-      <button
-        type="button"
-        onClick={() => setCollapsed((c) => !c)}
+      <div
         style={{
           display: "flex",
           alignItems: "center",
           gap: 8,
-          border: "none",
-          background: "transparent",
-          cursor: "pointer",
-          padding: 0,
-          color: isDark ? "#bbb" : "#555",
-          fontSize: 12,
-          fontWeight: 500,
         }}
       >
-        <span>{t("tool.control.bgQueue.title", "Background tasks")}</span>
-        <span
+        <button
+          type="button"
+          onClick={() => setCollapsed((c) => !c)}
           style={{
-            fontSize: 11,
-            padding: "0 6px",
-            borderRadius: 10,
-            background: badgeBg,
-            color: badgeColor,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            border: "none",
+            background: "transparent",
+            cursor: "pointer",
+            padding: 0,
+            color: isDark ? "#bbb" : "#555",
+            fontSize: 12,
+            fontWeight: 500,
+            flex: 1,
+            minWidth: 0,
           }}
         >
-          {sessionTasks.length}
-        </span>
-        <span style={{ marginLeft: "auto", opacity: 0.6 }}>
-          {collapsed ? "▼" : "▲"}
-        </span>
-      </button>
+          <span>{t("tool.control.bgQueue.title", "Background tasks")}</span>
+          <span
+            style={{
+              fontSize: 11,
+              padding: "0 6px",
+              borderRadius: 10,
+              background: badgeBg,
+              color: badgeColor,
+            }}
+          >
+            {sessionTasks.length}
+          </span>
+          <span style={{ marginLeft: "auto", opacity: 0.6 }}>
+            {collapsed ? "▼" : "▲"}
+          </span>
+        </button>
+        {!collapsed && (
+          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+            <button
+              type="button"
+              disabled={batchBusy || runningTasks.length === 0}
+              onClick={(e) => {
+                e.stopPropagation();
+                void handleCancelAll();
+              }}
+              style={{
+                ...actionBtnStyle,
+                opacity: batchBusy || runningTasks.length === 0 ? 0.4 : 1,
+                cursor:
+                  batchBusy || runningTasks.length === 0
+                    ? "not-allowed"
+                    : "pointer",
+              }}
+            >
+              {t("tool.control.bgQueue.cancelAll", "Cancel all")}
+            </button>
+            <button
+              type="button"
+              disabled={batchBusy || sessionTasks.length === 0}
+              onClick={(e) => {
+                e.stopPropagation();
+                void handleClearAll();
+              }}
+              style={actionBtnStyle}
+            >
+              {t("tool.control.bgQueue.clearAll", "Clear all")}
+            </button>
+          </div>
+        )}
+      </div>
 
       {!collapsed &&
         sessionTasks.map((task) => {
@@ -132,6 +243,7 @@ export default function BackgroundTaskPanel({
               ? task.liveOutput
               : task.result || task.liveOutput;
           const isExpanded = expandedId === task.toolCallId;
+          const isRunning = task.status === "running";
           return (
             <div key={task.toolCallId}>
               {task.hintVisible && (
@@ -210,12 +322,11 @@ export default function BackgroundTaskPanel({
                     width: 8,
                     height: 8,
                     borderRadius: "50%",
-                    background:
-                      task.status === "running"
-                        ? "#722ed1"
-                        : task.status === "cancelled"
-                        ? "#8c8c8c"
-                        : "#52c41a",
+                    background: isRunning
+                      ? "#722ed1"
+                      : task.status === "cancelled"
+                      ? "#8c8c8c"
+                      : "#52c41a",
                     flexShrink: 0,
                   }}
                 />
@@ -237,7 +348,7 @@ export default function BackgroundTaskPanel({
                     whiteSpace: "nowrap",
                   }}
                 >
-                  {task.status === "running"
+                  {isRunning
                     ? `${t(
                         "tool.control.bgQueue.running",
                         "Running",
@@ -257,24 +368,37 @@ export default function BackgroundTaskPanel({
                 </span>
                 <button
                   type="button"
-                  title={
-                    task.status === "running"
-                      ? t("tool.control.cancel", "Cancel")
-                      : t("tool.control.bgQueue.remove", "Remove")
-                  }
                   onClick={(e) => {
                     e.stopPropagation();
                     void handleClose(task);
                   }}
                   style={{
-                    border: "none",
+                    border: `1px solid ${
+                      isRunning
+                        ? isDark
+                          ? "rgba(255,77,79,0.45)"
+                          : "rgba(255,77,79,0.35)"
+                        : borderColor
+                    }`,
                     background: "transparent",
                     cursor: "pointer",
-                    color: isDark ? "#aaa" : "#666",
-                    padding: "0 4px",
+                    color: isRunning
+                      ? isDark
+                        ? "#ff7875"
+                        : "#cf1322"
+                      : isDark
+                      ? "#aaa"
+                      : "#666",
+                    fontSize: 11,
+                    padding: "1px 8px",
+                    borderRadius: 4,
+                    flexShrink: 0,
+                    whiteSpace: "nowrap",
                   }}
                 >
-                  ✕
+                  {isRunning
+                    ? t("tool.control.bgQueue.cancel", "Cancel")
+                    : t("tool.control.bgQueue.remove", "Remove")}
                 </button>
               </div>
               {isExpanded && (

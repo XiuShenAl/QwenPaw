@@ -3171,7 +3171,12 @@
         "done": "Done",
         "cancelled": "Cancelled",
         "totalDuration": "Total",
+        "cancel": "Cancel",
         "remove": "Remove",
+        "cancelAll": "Cancel all",
+        "clearAll": "Clear all",
+        "cancelAllDone": "Cancelled all running tasks",
+        "clearAllDone": "Cleared background task list",
         "noOutput": "No output yet"
       }
     }

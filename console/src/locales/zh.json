@@ -3190,7 +3190,12 @@
         "done": "已完成",
         "cancelled": "已取消",
         "totalDuration": "总耗时",
+        "cancel": "取消",
         "remove": "移除",
+        "cancelAll": "全部取消",
+        "clearAll": "全部清除",
+        "cancelAllDone": "已取消全部运行中任务",
+        "clearAllDone": "已清除后台任务列表",
         "noOutput": "暂无输出"
       }
     }

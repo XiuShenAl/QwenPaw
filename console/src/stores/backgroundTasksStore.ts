@@ -42,6 +42,7 @@ interface BackgroundTasksState {
   ) => void;
   appendLiveOutput: (toolCallId: string, chunk: string) => void;
   removeTask: (toolCallId: string) => void;
+  removeTasks: (toolCallIds: string[]) => void;
   dismissHint: (toolCallId: string) => void;
 }
 
@@ -104,6 +105,15 @@ export const useBackgroundTasksStore = create<BackgroundTasksState>((set) => ({
     set((state) => ({
       tasks: state.tasks.filter((t) => t.toolCallId !== toolCallId),
     })),
+
+  removeTasks: (toolCallIds) =>
+    set((state) => {
+      if (toolCallIds.length === 0) return state;
+      const drop = new Set(toolCallIds);
+      return {
+        tasks: state.tasks.filter((t) => !drop.has(t.toolCallId)),
+      };
+    }),
 
   dismissHint: (toolCallId) =>
     set((state) => ({
