@@ -120,8 +120,7 @@ import {
 import { openExternalLink } from "../../utils/openExternalLink";
 import { getLastEditorCopy } from "../Coding/lastEditorCopy";
 import { useUploadLimitStore } from "../../stores/uploadLimitStore";
-import MessageQueuePanel from "./components/MessageQueuePanel";
-import BackgroundTaskPanel from "./components/BackgroundTaskPanel";
+import ChatSenderTabsPanel from "./components/ChatSenderTabsPanel";
 import { useBackgroundTasksStore } from "../../stores/backgroundTasksStore";
 import {
   hydrateBackgroundTasksForSession,
@@ -2796,27 +2795,24 @@ export default function ChatPage() {
                 message={t("chat.queue.otherTabOwner")}
               />
             )}
-            <BackgroundTaskPanel
-              sessionId={
+            <ChatSenderTabsPanel
+              bgSessionId={
                 bgBackendSessionId ||
                 window.currentSessionId ||
                 sessionApi.getBackendSessionId(queueSessionId) ||
                 ""
               }
+              queueItems={messageQueue}
+              runState={runState}
+              onRemove={handleQueueRemove}
+              onEdit={handleQueueEdit}
+              onReorder={handleQueueReorder}
+              onInterruptAndSend={handleQueueInterruptAndSend}
+              onClear={handleQueueClear}
+              onPauseResume={handleQueuePauseResume}
+              onRetry={handleQueueRetry}
+              onSkip={handleQueueSkip}
             />
-            {hasQueueItems ? (
-              <SessionQueuePanel
-                sessionId={queueSessionId}
-                onRemove={handleQueueRemove}
-                onEdit={handleQueueEdit}
-                onReorder={handleQueueReorder}
-                onInterruptAndSend={handleQueueInterruptAndSend}
-                onClear={handleQueueClear}
-                onPauseResume={handleQueuePauseResume}
-                onRetry={handleQueueRetry}
-                onSkip={handleQueueSkip}
-              />
-            ) : null}
           </>
         ) : undefined,
         prefix: (

@@ -20,6 +20,8 @@ import { message } from "antd";
 
 interface BackgroundTaskPanelProps {
   sessionId: string;
+  /** When true, omit outer chrome/title (used inside ChatSenderTabsPanel). */
+  embedded?: boolean;
 }
 
 function formatDuration(startTime: number, endTime: number | null): string {
@@ -33,6 +35,7 @@ function formatDuration(startTime: number, endTime: number | null): string {
 
 export default function BackgroundTaskPanel({
   sessionId,
+  embedded = false,
 }: BackgroundTaskPanelProps) {
   const { t } = useTranslation();
   const { isDark } = useTheme();
@@ -50,6 +53,7 @@ export default function BackgroundTaskPanel({
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [batchBusy, setBatchBusy] = useState(false);
   const [, setTick] = useState(0);
+  const showBody = embedded || !collapsed;
 
   useEffect(() => {
     if (!sessionTasks.some((t) => t.status === "running")) return;
@@ -147,96 +151,102 @@ export default function BackgroundTaskPanel({
     opacity: batchBusy ? 0.5 : 1,
   };
 
+  const batchActions = (
+    <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+      <button
+        type="button"
+        disabled={batchBusy || runningTasks.length === 0}
+        onClick={(e) => {
+          e.stopPropagation();
+          void handleCancelAll();
+        }}
+        style={{
+          ...actionBtnStyle,
+          opacity: batchBusy || runningTasks.length === 0 ? 0.4 : 1,
+          cursor:
+            batchBusy || runningTasks.length === 0 ? "not-allowed" : "pointer",
+        }}
+      >
+        {t("tool.control.bgQueue.cancelAll", "Cancel all")}
+      </button>
+      <button
+        type="button"
+        disabled={batchBusy || sessionTasks.length === 0}
+        onClick={(e) => {
+          e.stopPropagation();
+          void handleClearAll();
+        }}
+        style={actionBtnStyle}
+      >
+        {t("tool.control.bgQueue.clearAll", "Clear all")}
+      </button>
+    </div>
+  );
+
   return (
     <div
       style={{
         display: "flex",
         flexDirection: "column",
         gap: 6,
-        padding: "8px 12px",
-        marginBottom: 4,
-        borderRadius: 8,
-        background: isDark ? "rgba(255,255,255,0.02)" : "rgba(0,0,0,0.01)",
-        border: `1px solid ${borderColor}`,
+        padding: embedded ? 0 : "8px 12px",
+        marginBottom: embedded ? 0 : 4,
+        borderRadius: embedded ? 0 : 8,
+        background: embedded
+          ? "transparent"
+          : isDark
+          ? "rgba(255,255,255,0.02)"
+          : "rgba(0,0,0,0.01)",
+        border: embedded ? "none" : `1px solid ${borderColor}`,
       }}
     >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-        }}
-      >
-        <button
-          type="button"
-          onClick={() => setCollapsed((c) => !c)}
+      {!embedded && (
+        <div
           style={{
             display: "flex",
             alignItems: "center",
             gap: 8,
-            border: "none",
-            background: "transparent",
-            cursor: "pointer",
-            padding: 0,
-            color: isDark ? "#bbb" : "#555",
-            fontSize: 12,
-            fontWeight: 500,
-            flex: 1,
-            minWidth: 0,
           }}
         >
-          <span>{t("tool.control.bgQueue.title", "Background tasks")}</span>
-          <span
+          <button
+            type="button"
+            onClick={() => setCollapsed((c) => !c)}
             style={{
-              fontSize: 11,
-              padding: "0 6px",
-              borderRadius: 10,
-              background: badgeBg,
-              color: badgeColor,
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              border: "none",
+              background: "transparent",
+              cursor: "pointer",
+              padding: 0,
+              color: isDark ? "#bbb" : "#555",
+              fontSize: 12,
+              fontWeight: 500,
+              flex: 1,
+              minWidth: 0,
             }}
           >
-            {sessionTasks.length}
-          </span>
-          <span style={{ marginLeft: "auto", opacity: 0.6 }}>
-            {collapsed ? "▼" : "▲"}
-          </span>
-        </button>
-        {!collapsed && (
-          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-            <button
-              type="button"
-              disabled={batchBusy || runningTasks.length === 0}
-              onClick={(e) => {
-                e.stopPropagation();
-                void handleCancelAll();
-              }}
+            <span>{t("tool.control.bgQueue.title", "Background tasks")}</span>
+            <span
               style={{
-                ...actionBtnStyle,
-                opacity: batchBusy || runningTasks.length === 0 ? 0.4 : 1,
-                cursor:
-                  batchBusy || runningTasks.length === 0
-                    ? "not-allowed"
-                    : "pointer",
+                fontSize: 11,
+                padding: "0 6px",
+                borderRadius: 10,
+                background: badgeBg,
+                color: badgeColor,
               }}
             >
-              {t("tool.control.bgQueue.cancelAll", "Cancel all")}
-            </button>
-            <button
-              type="button"
-              disabled={batchBusy || sessionTasks.length === 0}
-              onClick={(e) => {
-                e.stopPropagation();
-                void handleClearAll();
-              }}
-              style={actionBtnStyle}
-            >
-              {t("tool.control.bgQueue.clearAll", "Clear all")}
-            </button>
-          </div>
-        )}
-      </div>
+              {sessionTasks.length}
+            </span>
+            <span style={{ marginLeft: "auto", opacity: 0.6 }}>
+              {collapsed ? "▼" : "▲"}
+            </span>
+          </button>
+          {showBody && batchActions}
+        </div>
+      )}
 
-      {!collapsed &&
+      {showBody &&
         sessionTasks.map((task) => {
           const body =
             task.status === "running"
