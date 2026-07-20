@@ -123,6 +123,10 @@ import { useUploadLimitStore } from "../../stores/uploadLimitStore";
 import MessageQueuePanel from "./components/MessageQueuePanel";
 import BackgroundTaskPanel from "./components/BackgroundTaskPanel";
 import { useBackgroundTasksStore } from "../../stores/backgroundTasksStore";
+import {
+  hydrateBackgroundTasksForSession,
+  stopBackgroundWatchersNotInSession,
+} from "../../hooks/useBackgroundTaskWatcher";
 import ApprovalLevelToggle from "./components/ApprovalLevelToggle";
 import { useAgentRunningConfigApprovalLevel } from "../../hooks/useAgentRunningConfigApprovalLevel";
 import { type ToolExecutionLevel } from "../../utils/approval";
@@ -1316,6 +1320,47 @@ export default function ChatPage() {
   const hasQueueItems = messageQueue.length > 0;
   const bgTaskCount = useBackgroundTasksStore((s) => s.tasks.length);
   const showSenderBeforeUI = isQueueOnlyTab || hasQueueItems || bgTaskCount > 0;
+
+  // Backend session id for the background-task panel (list API + store filter).
+  const [bgBackendSessionId, setBgBackendSessionId] = useState("");
+
+  // On session load / switch: prune other sessions' watchers, then rehydrate
+  // still-offloaded tools from GET /tool-calls/{session_id}.
+  useEffect(() => {
+    if (!queueSessionId || queueSessionId === "new") {
+      setBgBackendSessionId("");
+      stopBackgroundWatchersNotInSession("");
+      return;
+    }
+
+    let cancelled = false;
+
+    const resolveBackendSessionId = async (): Promise<string> => {
+      // Prefer sessionApi mapping; do not trust window.currentSessionId here —
+      // it can briefly still hold the previous session after a switch.
+      for (let i = 0; i < 20 && !cancelled; i++) {
+        const mapped = sessionApi.getBackendSessionId(queueSessionId);
+        const knownInList =
+          mapped !== queueSessionId ||
+          sessionApi.getRealIdForSession(queueSessionId) != null;
+        if (mapped && knownInList) return mapped;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      return sessionApi.getBackendSessionId(queueSessionId) || queueSessionId;
+    };
+
+    void (async () => {
+      const backendSid = await resolveBackendSessionId();
+      if (cancelled || !backendSid) return;
+      setBgBackendSessionId(backendSid);
+      stopBackgroundWatchersNotInSession(backendSid);
+      await hydrateBackgroundTasksForSession(backendSid);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [queueSessionId]);
 
   const scheduleNextSend = useCallback(() => {
     if (autoSendTimerRef.current) clearTimeout(autoSendTimerRef.current);
@@ -2753,9 +2798,9 @@ export default function ChatPage() {
             )}
             <BackgroundTaskPanel
               sessionId={
-                (window as unknown as { currentSessionId?: string })
-                  .currentSessionId ||
-                chatId ||
+                bgBackendSessionId ||
+                window.currentSessionId ||
+                sessionApi.getBackendSessionId(queueSessionId) ||
                 ""
               }
             />
@@ -3052,6 +3097,7 @@ export default function ChatPage() {
     runState,
     isOwner,
     bgTaskCount,
+    bgBackendSessionId,
     chatId,
   ]);
 

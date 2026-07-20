@@ -5,12 +5,21 @@ import { buildAuthHeaders } from "../authHeaders";
 export interface ToolCallInfo {
   tool_call_id: string;
   tool_name: string;
+  session_id?: string;
+  agent_id?: string;
   status: string;
+  started_at?: number;
   elapsed: number;
   offload_remaining: number | null;
   kill_remaining: number | null;
   end_state?: string | null;
   force_cancelled?: boolean;
+  extra?: Record<string, unknown>;
+}
+
+export interface ToolCallListResponse {
+  items: ToolCallInfo[];
+  total: number;
 }
 
 export interface ExtendResult {
@@ -117,6 +126,8 @@ export function subscribeToolCallStream(
 }
 
 export const toolCallsApi = {
+  list: (sid: string) => request<ToolCallListResponse>(`${BASE}/${sid}`),
+
   getInfo: (sid: string, tcid: string) =>
     request<ToolCallInfo>(`${BASE}/${sid}/${tcid}`),
 

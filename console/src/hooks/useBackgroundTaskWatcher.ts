@@ -289,3 +289,54 @@ export async function cancelBackgroundTask(
     hintVisible: true,
   });
 }
+
+/**
+ * Stop watchers and drop store rows that do not belong to the given session.
+ * Call before hydrating a newly selected session to avoid leaking SSE/poll.
+ * Pass an empty session id to tear down every tracked task (e.g. blank "new" chat).
+ */
+export function stopBackgroundWatchersNotInSession(
+  backendSessionId: string,
+): void {
+  const store = useBackgroundTasksStore.getState();
+  const staleIds = !backendSessionId
+    ? store.tasks.map((t) => t.toolCallId)
+    : store.tasks
+        .filter((t) => t.sessionId && t.sessionId !== backendSessionId)
+        .map((t) => t.toolCallId);
+  for (const id of staleIds) {
+    stopBackgroundTaskWatcher(id);
+  }
+  if (staleIds.length > 0) {
+    store.removeTasks(staleIds);
+  }
+}
+
+/**
+ * Rehydrate the background task panel from the backend list of still-offloaded
+ * tool calls. Idempotent with live registerBackgroundTask paths.
+ */
+export async function hydrateBackgroundTasksForSession(
+  backendSessionId: string,
+): Promise<void> {
+  if (!backendSessionId) return;
+  try {
+    const { items } = await toolCallsApi.list(backendSessionId);
+    for (const item of items) {
+      if (item.status !== "offloaded") continue;
+      const elapsedMs = Math.max(0, Math.round((item.elapsed || 0) * 1000));
+      registerBackgroundTask({
+        sessionId: item.session_id || backendSessionId,
+        toolCallId: item.tool_call_id,
+        toolName: item.tool_name || item.tool_call_id,
+        startTime: Date.now() - elapsedMs,
+      });
+    }
+  } catch (err) {
+    console.error(
+      "[hydrateBackgroundTasksForSession] list failed:",
+      backendSessionId,
+      err,
+    );
+  }
+}
