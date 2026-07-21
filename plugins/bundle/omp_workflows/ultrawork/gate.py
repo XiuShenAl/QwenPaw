@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,13 +64,13 @@ class UltraworkGate(LoopGate):
             "ultrawork",
             st.loop_dir,
         )
-        data = wf.read_state()
+        data = await asyncio.to_thread(wf.read_state)
 
         phase = data.get("phase", st.phase)
         st.phase = phase
 
         if phase == "done":
-            wf.cleanup()
+            await asyncio.to_thread(wf.cleanup)
             self.deactivate()
             return StopHandlerResult(
                 action=StopAction.TERMINATE,

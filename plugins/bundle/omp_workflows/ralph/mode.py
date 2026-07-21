@@ -3,19 +3,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shlex
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from agentscope.message import Msg, TextBlock
-
-from qwenpaw.modes.base import AgentMode
 from qwenpaw.runtime.slash_command_registry import CommandSpec
+
+from ..shared.mode_base import OMPModeBase, info_msg, rewrite_user_msg
+from .gate import RalphGate
 
 if TYPE_CHECKING:
     from typing import Any
 
-    from .gate import RalphGate
+    from agentscope.message import Msg
 
 logger = logging.getLogger(__name__)
 
@@ -28,13 +30,14 @@ _HELP = (
 )
 
 
-class RalphMode(AgentMode):
+class RalphMode(OMPModeBase):
     """AgentMode for the Ralph workflow."""
 
     name = "ralph"
-
-    def __init__(self) -> None:
-        self._gate: RalphGate | None = None
+    gate_cls = RalphGate
+    plugin_id = "__omp_ralph__"
+    handler_name = "ralph-stop-handler"
+    scope = "omp-ralph"
 
     def commands(self) -> list[CommandSpec]:
         return [
@@ -47,61 +50,30 @@ class RalphMode(AgentMode):
             ),
         ]
 
-    def setup(self, workspace: object) -> None:
-        super().setup(workspace)
-        from qwenpaw.loop.gates import StopHandler, StopHandlerRegistration
-
-        from .gate import RalphGate as _G
-
-        handler = StopHandler()
-        gate = _G()
-        handler.register(gate)
-        self._gate = gate
-
-        plugins = getattr(workspace, "plugins", None)
-        if plugins is not None:
-            if not hasattr(plugins, "stop_handlers"):
-                plugins.stop_handlers = []
-            plugins.stop_handlers.append(
-                StopHandlerRegistration(
-                    plugin_id="__omp_ralph__",
-                    handler=handler,
-                    priority=0,
-                    name="ralph-stop-handler",
-                    scope="omp-ralph",
-                ),
-            )
-
-    def is_active(self, ctx: Any) -> bool:
-        # Follows upstream MissionMode pattern (LoopGate lacks public API)
-        # pylint: disable=protected-access
-        return self._gate is not None and self._gate._state() is not None
-
-    async def _handler(self, ctx: "Any", args: str) -> Optional[Msg]:
+    async def _handler(self, ctx: "Any", args: str) -> Optional["Msg"]:
         if not args or not args.strip() or args.strip().lower() == "help":
-            return _info(_HELP)
+            return info_msg(_HELP)
 
         parsed = _parse_args(args)
         task = parsed["task"]
         if len(task) < 5:
-            return _info("Please provide a task description.\n\n" + _HELP)
+            return info_msg("Please provide a task description.\n\n" + _HELP)
 
         workspace_dir = getattr(ctx, "workspace_dir", None)
         if not workspace_dir:
-            return _info("ERROR: no workspace directory available.")
+            return info_msg("ERROR: no workspace directory available.")
 
-        from pathlib import Path
-
-        loop_dir = self._gate.activate_for_ralph(
-            workspace_dir=Path(workspace_dir),
-            no_deslop=parsed["no_deslop"],
-            critic_type=parsed["critic_type"],
+        loop_dir = await asyncio.to_thread(
+            self._gate.activate_for_ralph,
+            Path(workspace_dir),
+            parsed["no_deslop"],
+            parsed["critic_type"],
         )
 
         from .prompts import build_initial_prd_prompt
 
         prompt = build_initial_prd_prompt(task, loop_dir)
-        _rewrite(ctx, prompt)
+        rewrite_user_msg(ctx, prompt)
         logger.info("Ralph started: %s", loop_dir)
         return None
 
@@ -135,20 +107,3 @@ def _parse_args(raw: str) -> dict:
         "no_deslop": no_deslop,
         "critic_type": critic_type,
     }
-
-
-def _info(text: str) -> Msg:
-    return Msg(
-        name="system",
-        content=[TextBlock(type="text", text=text)],
-        role="system",
-    )
-
-
-def _rewrite(ctx: "Any", text: str) -> None:
-    msgs = getattr(ctx, "input_msgs", None)
-    if not msgs:
-        return
-    last = msgs[-1]
-    if isinstance(last, Msg):
-        last.content = [TextBlock(type="text", text=text)]

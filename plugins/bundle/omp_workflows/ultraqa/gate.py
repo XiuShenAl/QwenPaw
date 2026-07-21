@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -87,7 +88,7 @@ class UltraQAGate(LoopGate):
             "ultraqa",
             st.loop_dir,
         )
-        data = wf.read_state()
+        data = await asyncio.to_thread(wf.read_state)
 
         st.qa_passed = data.get("qa_passed", False)
         st.last_failures = data.get(
@@ -97,7 +98,7 @@ class UltraQAGate(LoopGate):
         st.cycle = data.get("cycle", st.cycle)
 
         if st.qa_passed:
-            wf.cleanup()
+            await asyncio.to_thread(wf.cleanup)
             self.deactivate()
             return StopHandlerResult(
                 action=StopAction.TERMINATE,
@@ -105,7 +106,7 @@ class UltraQAGate(LoopGate):
             )
 
         if st.cycle >= st.max_cycles:
-            wf.cleanup()
+            await asyncio.to_thread(wf.cleanup)
             self.deactivate()
             return StopHandlerResult(
                 action=StopAction.TERMINATE,
@@ -116,7 +117,7 @@ class UltraQAGate(LoopGate):
             st.last_failures,
             ULTRAQA_MAX_SAME_FAILURE,
         ):
-            wf.cleanup()
+            await asyncio.to_thread(wf.cleanup)
             self.deactivate()
             return StopHandlerResult(
                 action=StopAction.TERMINATE,
@@ -124,7 +125,8 @@ class UltraQAGate(LoopGate):
             )
 
         st.cycle += 1
-        wf.write_state(
+        await asyncio.to_thread(
+            wf.write_state,
             {
                 "cycle": st.cycle,
                 "qa_passed": False,

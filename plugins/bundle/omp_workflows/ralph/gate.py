@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -81,12 +82,12 @@ class RalphGate(LoopGate):
             "ralph",
             st.loop_dir,
         )
-        data = wf.read_state()
+        data = await asyncio.to_thread(wf.read_state)
 
         st.iteration = data.get("iteration", st.iteration) + 1
 
         if st.iteration > st.max_iterations:
-            wf.cleanup()
+            await asyncio.to_thread(wf.cleanup)
             self.deactivate()
             return StopHandlerResult(
                 action=StopAction.TERMINATE,
@@ -94,16 +95,19 @@ class RalphGate(LoopGate):
             )
 
         if data.get("completed", False):
-            wf.cleanup()
+            await asyncio.to_thread(wf.cleanup)
             self.deactivate()
             return StopHandlerResult(
                 action=StopAction.TERMINATE,
                 reason="All stories completed and verified",
             )
 
-        wf.write_state({**data, "iteration": st.iteration})
+        await asyncio.to_thread(
+            wf.write_state,
+            {**data, "iteration": st.iteration},
+        )
 
-        prd = wf.read_prd()
+        prd = await asyncio.to_thread(wf.read_prd)
         st.prd_summary = _summarize_prd(prd)
 
         return StopHandlerResult(
@@ -132,4 +136,4 @@ def _summarize_prd(prd: dict) -> str:
     if not stories:
         return "PRD: not yet created."
     done = sum(1 for s in stories if s.get("passes"))
-    return f"PRD progress: {done}/{len(stories)} " "stories completed."
+    return f"PRD progress: {done}/{len(stories)} stories completed."

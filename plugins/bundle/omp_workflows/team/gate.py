@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -90,12 +91,12 @@ class TeamPipelineGate(LoopGate):
             "team",
             st.loop_dir,
         )
-        data = wf.read_state()
+        data = await asyncio.to_thread(wf.read_state)
 
         st.iteration += 1
 
         if st.iteration > st.max_iterations:
-            wf.cleanup()
+            await asyncio.to_thread(wf.cleanup)
             self.deactivate()
             return StopHandlerResult(
                 action=StopAction.TERMINATE,
@@ -110,7 +111,7 @@ class TeamPipelineGate(LoopGate):
         )
 
         if phase == "completed":
-            wf.cleanup()
+            await asyncio.to_thread(wf.cleanup)
             self.deactivate()
             return StopHandlerResult(
                 action=StopAction.TERMINATE,
@@ -120,13 +121,14 @@ class TeamPipelineGate(LoopGate):
         if phase == "fix":
             st.fix_attempts += 1
             if st.fix_attempts > st.max_fix_attempts:
-                wf.cleanup()
+                await asyncio.to_thread(wf.cleanup)
                 self.deactivate()
                 return StopHandlerResult(
                     action=StopAction.TERMINATE,
                     reason=f"Fix retry limit ({st.max_fix_attempts})",
                 )
-            wf.write_state(
+            await asyncio.to_thread(
+                wf.write_state,
                 {
                     **data,
                     "fix_attempts": st.fix_attempts,

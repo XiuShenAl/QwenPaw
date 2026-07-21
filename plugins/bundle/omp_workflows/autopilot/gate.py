@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -88,12 +89,12 @@ class AutopilotGate(LoopGate):
             "autopilot",
             st.loop_dir,
         )
-        data = wf.read_state()
+        data = await asyncio.to_thread(wf.read_state)
 
         st.iteration += 1
 
         if st.iteration > st.max_iterations:
-            wf.cleanup()
+            await asyncio.to_thread(wf.cleanup)
             self.deactivate()
             return StopHandlerResult(
                 action=StopAction.TERMINATE,
@@ -108,7 +109,7 @@ class AutopilotGate(LoopGate):
         )
 
         if phase == "cleanup":
-            wf.cleanup()
+            await asyncio.to_thread(wf.cleanup)
             self.deactivate()
             return StopHandlerResult(
                 action=StopAction.TERMINATE,
@@ -121,7 +122,7 @@ class AutopilotGate(LoopGate):
             st.iteration - st.phase_entry_iteration[phase]
             > AUTOPILOT_MAX_PHASE_ITERATIONS
         ):
-            wf.cleanup()
+            await asyncio.to_thread(wf.cleanup)
             self.deactivate()
             return StopHandlerResult(
                 action=StopAction.TERMINATE,

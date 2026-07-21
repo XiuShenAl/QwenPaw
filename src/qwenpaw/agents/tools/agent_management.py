@@ -20,6 +20,7 @@ from ...utils.http import trust_env_for_url
 
 DEFAULT_AGENT_API_BASE_URL = "http://127.0.0.1:8088"
 DEFAULT_AGENT_API_TIMEOUT = 30.0
+MAX_SPAWN_BATCH_SIZE = 10
 
 
 def resolve_agent_api_base_url(base_url: Optional[str] = None) -> str:
@@ -762,7 +763,6 @@ def _build_subagent_request_context(
     return rc
 
 
-<<<<<<< HEAD
 @tool_descriptor(
     async_execution=True,
     tool_type="internal",
@@ -770,11 +770,7 @@ def _build_subagent_request_context(
     ui_description="Spawn an ephemeral sub-task within the current workspace",
     ui_icon="🔀",
 )
-async def spawn_subagent(
-=======
-@tool_descriptor(async_execution=True)
 async def spawn_subagent(  # pylint: disable=too-many-return-statements
->>>>>>> b9fc4e66 (fix(omp): resolve pre-commit lint failures in OMP workflow plugins)
     task: str = "",
     fork: bool = False,
     background: bool = False,
@@ -829,6 +825,7 @@ async def spawn_subagent(  # pylint: disable=too-many-return-statements
             ``task`` must be empty.  Each dict must contain a ``task``
             key; optional keys: ``fork``, ``timeout``, ``allowed_tools``,
             ``skills``.  All subagents run as background tasks.
+            Maximum length is ``MAX_SPAWN_BATCH_SIZE`` (10).
 
     Returns:
         Foreground (single): subagent result text with [SESSION: <id>].
@@ -930,6 +927,11 @@ async def _spawn_batch(
         return _tool_text_response(
             "ERROR: 'batch' must be a non-empty list",
         )
+    if len(specs) > MAX_SPAWN_BATCH_SIZE:
+        return _tool_text_response(
+            f"ERROR: batch size {len(specs)} exceeds "
+            f"maximum of {MAX_SPAWN_BATCH_SIZE}",
+        )
     for i, spec in enumerate(specs):
         if not isinstance(spec, dict) or not spec.get("task", "").strip():
             return _tool_text_response(
@@ -945,6 +947,8 @@ async def _spawn_batch(
             "ERROR: unable to resolve current agent ID",
         )
 
+    sem = asyncio.Semaphore(MAX_SPAWN_BATCH_SIZE)
+
     async def _dispatch_one(spec: Dict[str, Any]) -> str:
         session_id = _generate_subagent_session_id()
         task_text = spec["task"]
@@ -953,43 +957,44 @@ async def _spawn_batch(
         spec_allowed = spec.get("allowed_tools")
         spec_skills = spec.get("skills")
 
-        if spec_fork:
-            chunk = await _spawn_forked_subagent(
-                task=task_text,
-                current_agent_id=current_agent_id,
-                subagent_session_id=session_id,
-                background=True,
-                timeout=spec_timeout,
+        async with sem:
+            if spec_fork:
+                chunk = await _spawn_forked_subagent(
+                    task=task_text,
+                    current_agent_id=current_agent_id,
+                    subagent_session_id=session_id,
+                    background=True,
+                    timeout=spec_timeout,
+                    allowed_tools=spec_allowed,
+                    skills=spec_skills,
+                )
+                return chunk.content[0].text if chunk.content else ""
+
+            rc = _build_subagent_request_context(
+                current_agent_id,
                 allowed_tools=spec_allowed,
                 skills=spec_skills,
             )
-            return chunk.content[0].text if chunk.content else ""
-
-        rc = _build_subagent_request_context(
-            current_agent_id,
-            allowed_tools=spec_allowed,
-            skills=spec_skills,
-        )
-        payload = {
-            "session_id": session_id,
-            "input": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": task_text},
-                    ],
-                },
-            ],
-            "request_context": rc,
-        }
-        result = await asyncio.to_thread(
-            submit_agent_chat_task,
-            None,
-            payload,
-            current_agent_id,
-            int(DEFAULT_AGENT_API_TIMEOUT),
-        )
-        return format_background_submission_text(result, session_id)
+            payload = {
+                "session_id": session_id,
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": task_text},
+                        ],
+                    },
+                ],
+                "request_context": rc,
+            }
+            result = await asyncio.to_thread(
+                submit_agent_chat_task,
+                None,
+                payload,
+                current_agent_id,
+                int(DEFAULT_AGENT_API_TIMEOUT),
+            )
+            return format_background_submission_text(result, session_id)
 
     results = await asyncio.gather(
         *[_dispatch_one(s) for s in specs],
