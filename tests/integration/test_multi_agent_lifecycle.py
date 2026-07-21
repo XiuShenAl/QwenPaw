@@ -21,7 +21,9 @@ from tests.integration.helpers import (
     toggle_agent,
 )
 
-_AGENT_HTTP_TIMEOUT = default_http_timeout(15.0)
+# Same floor as Windows CI (QWENPAW_INTEGRATION_HTTP_TIMEOUT=120): concurrent
+# agent create/reorder/delete can exceed the 15s default on slow runners.
+_AGENT_HTTP_TIMEOUT = default_http_timeout(120.0)
 
 
 # ------------------------------------------------------------------ #
