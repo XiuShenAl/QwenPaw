@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 
 from qwenpaw.security.tool_guard.safety_checks import (
+    classify_destructive_command,
+    is_command_catastrophic,
     is_command_destructive,
     is_path_outside_boundary,
 )
@@ -20,9 +22,18 @@ class TestIsCommandDestructive:
             "rm -rf /*",
             "rm -f -r /",
             "rm --force --recursive /",
+            "rm -rf /./",
+            "rm -rf //",
+            "rm -rf /tmp/..",
+            "rm -rf /tmp/../",
+            "rm -rf /tmp/../etc",
             "rm -rf /home",
             "rm -rf /home/alice",
             "rm -rf /Users/alice",
+            "rm -rf /root",
+            "rm -rf /boot",
+            "rm -rf /dev",
+            "rm -rf /Applications",
             "rm -rf /var/lib",
             "rm -rf /private/etc",
             "rm -rf /etc/passwd",
@@ -43,6 +54,8 @@ class TestIsCommandDestructive:
             "reboot",
             "halt",
             "poweroff",
+            "sudo reboot",
+            "echo hi; reboot",
             ": () { : | : & } ; :",
             # Windows catastrophic patterns
             "Remove-Item -Recurse -Force C:\\",
@@ -80,10 +93,18 @@ class TestIsCommandDestructive:
             "rm -rf /var/folders/xx/workspace/build",
             "rm -rf /private/var/folders/xx/workspace/build",
             "rm -rf /homeless",
-            # Windows non-catastrophic deletes.
+            # Substring / script-name false positives must not hard-match.
+            "echo reboot later",
+            "npm run reboot",
+            "git checkout --orphan reboot",
+            "python -c 'print(\"shutdown\")'",
+            "echo mkfs later",
+            # Windows non-catastrophic / non-recursive.
             "Remove-Item -Recurse -Force C:\\Users\\me\\project\\build",
             "del /s /q D:\\work\\out\\*",
             "rd /s /q C:\\Users\\me\\project",
+            "del C:\\",
+            "rd C:\\",
         ],
     )
     def test_allows_safe_commands(self, command: str) -> None:
@@ -102,6 +123,13 @@ class TestIsCommandDestructive:
         target = tmp_path / "build"
         target.mkdir()
         assert is_command_destructive(f"rm -rf {target}") is False
+
+    def test_classify_separates_catastrophic_from_system_power(self) -> None:
+        assert classify_destructive_command("rm -rf /") == "catastrophic"
+        assert classify_destructive_command("reboot") == "system_power"
+        assert classify_destructive_command("npm run reboot") is None
+        assert is_command_catastrophic("rm -rf /") is True
+        assert is_command_catastrophic("reboot") is False
 
 
 class TestIsPathOutsideBoundary:

@@ -982,7 +982,7 @@ class TestRuleBasedToolGuardianGuard:
 
 
 class TestSharedSafetyChecksIntegration:
-    """ToolGuard guardians call shared safety_checks primitives."""
+    """SharedSafetyToolGuardian applies shared safety_checks primitives."""
 
     def test_is_outside_workspace_delegates_to_safety_checks(
         self,
@@ -1004,14 +1004,13 @@ class TestSharedSafetyChecksIntegration:
         assert kwargs.get("cwd_is_resolved") is True
         assert kwargs.get("path_is_resolved") is True
 
-    def test_guard_emits_shared_destructive_finding(
-        self,
-        tmp_path,
-        mock_config_rules,
-    ):
-        """is_command_destructive hits produce a CRITICAL finding."""
-        # Empty rules dir — shared check must still fire without YAML.
-        guardian = RuleBasedToolGuardian(rules_dir=tmp_path)
+    def test_guard_emits_shared_destructive_finding(self):
+        """Catastrophic hits produce SAFETY_CHECKS_DESTRUCTIVE_COMMAND."""
+        from qwenpaw.security.tool_guard.guardians.rule_guardian import (
+            SharedSafetyToolGuardian,
+        )
+
+        guardian = SharedSafetyToolGuardian()
         findings = guardian.guard(
             "execute_shell_command",
             {"command": "rm -rf /"},
@@ -1022,13 +1021,36 @@ class TestSharedSafetyChecksIntegration:
             for f in findings
         )
 
-    def test_guard_skips_shared_check_for_tmp_path(
-        self,
-        tmp_path,
-        mock_config_rules,
-    ):
+    def test_guard_emits_system_power_finding_not_catastrophic(self):
+        """reboot is surfaced for approval, not as catastrophic auto-deny."""
+        from qwenpaw.security.tool_guard.guardians.rule_guardian import (
+            SharedSafetyToolGuardian,
+        )
+
+        guardian = SharedSafetyToolGuardian()
+        findings = guardian.guard(
+            "execute_shell_command",
+            {"command": "reboot"},
+        )
+        assert any(f.rule_id == "SAFETY_CHECKS_SYSTEM_POWER" for f in findings)
+        assert not any(
+            f.rule_id == "SAFETY_CHECKS_DESTRUCTIVE_COMMAND" for f in findings
+        )
+
+    def test_always_run_is_enabled(self):
+        from qwenpaw.security.tool_guard.guardians.rule_guardian import (
+            SharedSafetyToolGuardian,
+        )
+
+        assert SharedSafetyToolGuardian().always_run is True
+
+    def test_guard_skips_shared_check_for_tmp_path(self):
         """rm -rf /tmp must not hit the shared catastrophic rule."""
-        guardian = RuleBasedToolGuardian(rules_dir=tmp_path)
+        from qwenpaw.security.tool_guard.guardians.rule_guardian import (
+            SharedSafetyToolGuardian,
+        )
+
+        guardian = SharedSafetyToolGuardian()
         findings = guardian.guard(
             "execute_shell_command",
             {"command": "rm -rf /tmp"},
@@ -1050,12 +1072,14 @@ class TestSharedSafetyChecksIntegration:
     )
     def test_guard_emits_shared_finding_for_windows_catastrophic(
         self,
-        tmp_path,
-        mock_config_rules,
         command: str,
     ):
         """Windows catastrophic commands hit the shared CRITICAL finding."""
-        guardian = RuleBasedToolGuardian(rules_dir=tmp_path)
+        from qwenpaw.security.tool_guard.guardians.rule_guardian import (
+            SharedSafetyToolGuardian,
+        )
+
+        guardian = SharedSafetyToolGuardian()
         findings = guardian.guard(
             "execute_shell_command",
             {"command": command},
@@ -1066,31 +1090,51 @@ class TestSharedSafetyChecksIntegration:
             for f in findings
         )
 
-    def test_guard_skips_shared_check_for_safe_command(
-        self,
-        tmp_path,
-        mock_config_rules,
-    ):
+    def test_guard_skips_shared_check_for_safe_command(self):
         """Safe shell commands do not get the shared destructive finding."""
-        guardian = RuleBasedToolGuardian(rules_dir=tmp_path)
+        from qwenpaw.security.tool_guard.guardians.rule_guardian import (
+            SharedSafetyToolGuardian,
+        )
+
+        guardian = SharedSafetyToolGuardian()
         findings = guardian.guard(
             "execute_shell_command",
             {"command": "echo hello"},
         )
         assert not any(
+            f.rule_id
+            in {
+                "SAFETY_CHECKS_DESTRUCTIVE_COMMAND",
+                "SAFETY_CHECKS_SYSTEM_POWER",
+            }
+            for f in findings
+        )
+
+    def test_guard_skips_shared_check_for_non_shell_tools(self):
+        """Non-shell tools are not scanned by the shared hard-check."""
+        from qwenpaw.security.tool_guard.guardians.rule_guardian import (
+            SharedSafetyToolGuardian,
+        )
+
+        guardian = SharedSafetyToolGuardian()
+        findings = guardian.guard(
+            "write_file",
+            {"path": "/tmp/x", "content": "rm -rf /"},
+        )
+        assert not any(
             f.rule_id == "SAFETY_CHECKS_DESTRUCTIVE_COMMAND" for f in findings
         )
 
-    def test_guard_skips_shared_check_for_non_shell_tools(
+    def test_rule_based_guardian_no_longer_emits_shared_finding(
         self,
         tmp_path,
         mock_config_rules,
     ):
-        """Non-shell tools are not scanned by the shared hard-check."""
+        """YAML guardian must not duplicate shared safety findings."""
         guardian = RuleBasedToolGuardian(rules_dir=tmp_path)
         findings = guardian.guard(
-            "write_file",
-            {"path": "/tmp/x", "content": "rm -rf /"},
+            "execute_shell_command",
+            {"command": "rm -rf /"},
         )
         assert not any(
             f.rule_id == "SAFETY_CHECKS_DESTRUCTIVE_COMMAND" for f in findings

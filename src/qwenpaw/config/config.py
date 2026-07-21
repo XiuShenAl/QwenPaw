@@ -2075,8 +2075,10 @@ class ToolGuardConfig(BaseModel):
         default_factory=lambda: ["SAFETY_CHECKS_DESTRUCTIVE_COMMAND"],
         description=(
             "Rule IDs that unconditionally deny matched tool calls. "
-            "Defaults to SAFETY_CHECKS_DESTRUCTIVE_COMMAND; "
-            "set to an empty list to disable auto-deny."
+            "Defaults to SAFETY_CHECKS_DESTRUCTIVE_COMMAND (catastrophic "
+            "wipes/mkfs/dd only). An empty list is treated as unset and "
+            "keeps that default (legacy configs). To disable auto-deny, "
+            "set env QWENPAW_TOOL_GUARD_AUTO_DENIED_RULES=none."
         ),
     )
     custom_rules: List[ToolGuardRuleConfig] = Field(default_factory=list)

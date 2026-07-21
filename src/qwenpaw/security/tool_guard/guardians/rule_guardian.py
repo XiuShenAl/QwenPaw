@@ -36,7 +36,7 @@ import yaml
 
 from ..models import GuardFinding, GuardSeverity, GuardThreatCategory
 from ..safety_checks import (
-    is_command_destructive,
+    classify_destructive_command,
     is_path_outside_boundary,
 )
 from . import BaseToolGuardian
@@ -578,6 +578,101 @@ def _load_config_rules() -> tuple[list[GuardRule], set[str]]:
     return custom, disabled
 
 
+def _shared_safety_findings(
+    tool_name: str,
+    params: dict[str, Any],
+    *,
+    guardian_name: str,
+) -> list[GuardFinding]:
+    """Build findings from shared ``safety_checks`` classification.
+
+    ``catastrophic`` → ``SAFETY_CHECKS_DESTRUCTIVE_COMMAND`` (default
+    auto-deny).  ``system_power`` → ``SAFETY_CHECKS_SYSTEM_POWER``
+    (approval only; avoids ``npm run reboot`` hard DENY).
+    """
+    if tool_name != "execute_shell_command":
+        return []
+
+    findings: list[GuardFinding] = []
+    for param_name, param_value in params.items():
+        if param_name != "command" and "command" not in param_name:
+            continue
+        value_str = str(param_value) if param_value is not None else ""
+        if not value_str:
+            continue
+        kind = classify_destructive_command(value_str)
+        if kind is None:
+            continue
+        if kind == "catastrophic":
+            rule_id = "SAFETY_CHECKS_DESTRUCTIVE_COMMAND"
+            title = (
+                "[CRITICAL] Catastrophic command matched shared safety check"
+            )
+            remediation = (
+                "Do not run catastrophic shell commands "
+                "(e.g. recursive delete of system roots, mkfs, dd)."
+            )
+        else:
+            rule_id = "SAFETY_CHECKS_SYSTEM_POWER"
+            title = (
+                "[CRITICAL] System power command matched shared safety check"
+            )
+            remediation = (
+                "Confirm before running shutdown/reboot/halt/poweroff."
+            )
+        findings.append(
+            GuardFinding(
+                id=f"GUARD-{uuid.uuid4().hex}",
+                rule_id=rule_id,
+                category=GuardThreatCategory.RESOURCE_ABUSE,
+                severity=GuardSeverity.CRITICAL,
+                title=title,
+                description=(
+                    "Shared safety_checks.classify_destructive_command "
+                    f"matched parameter '{param_name}' of tool "
+                    f"'{tool_name}' ({kind})."
+                ),
+                tool_name=tool_name,
+                param_name=param_name,
+                matched_value=value_str[:200],
+                remediation=remediation,
+                guardian=guardian_name,
+            ),
+        )
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# SharedSafetyToolGuardian – always-on catastrophic / power checks
+# ---------------------------------------------------------------------------
+
+
+class SharedSafetyToolGuardian(BaseToolGuardian):
+    """Always-on guardian for shared ``safety_checks`` primitives.
+
+    Uses ``always_run=True`` so the check still fires when
+    ``execute_shell_command`` is removed from ``guarded_tools`` (aligned
+    with ACP hard-block posture on the main runtime path).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="shared_safety_tool_guardian",
+            always_run=True,
+        )
+
+    def guard(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+    ) -> list[GuardFinding]:
+        return _shared_safety_findings(
+            tool_name,
+            params,
+            guardian_name=self.name,
+        )
+
+
 # ---------------------------------------------------------------------------
 # RuleBasedToolGuardian
 # ---------------------------------------------------------------------------
@@ -632,54 +727,6 @@ class RuleBasedToolGuardian(BaseToolGuardian):
     # Core interface
     # ------------------------------------------------------------------
 
-    def _check_shared_destructive(
-        self,
-        tool_name: str,
-        params: dict[str, Any],
-    ) -> list[GuardFinding]:
-        """Apply shared ``is_command_destructive`` hard-check.
-
-        Runs independently of YAML rules so ACP hard-block patterns and
-        ToolGuard stay aligned on the same ``BLOCKED_COMMAND_PATTERNS``.
-        """
-        if tool_name != "execute_shell_command":
-            return []
-
-        findings: list[GuardFinding] = []
-        for param_name, param_value in params.items():
-            if param_name != "command" and "command" not in param_name:
-                continue
-            value_str = str(param_value) if param_value is not None else ""
-            if not value_str or not is_command_destructive(value_str):
-                continue
-            findings.append(
-                GuardFinding(
-                    id=f"GUARD-{uuid.uuid4().hex}",
-                    rule_id="SAFETY_CHECKS_DESTRUCTIVE_COMMAND",
-                    category=GuardThreatCategory.RESOURCE_ABUSE,
-                    severity=GuardSeverity.CRITICAL,
-                    title=(
-                        "[CRITICAL] Destructive command matched shared "
-                        "safety check"
-                    ),
-                    description=(
-                        "Shared safety_checks.is_command_destructive "
-                        f"matched parameter '{param_name}' of tool "
-                        f"'{tool_name}'."
-                    ),
-                    tool_name=tool_name,
-                    param_name=param_name,
-                    matched_value=value_str[:200],
-                    remediation=(
-                        "Do not run catastrophic shell commands "
-                        "(e.g. recursive delete of system roots, "
-                        "mkfs, shutdown)."
-                    ),
-                    guardian=self.name,
-                ),
-            )
-        return findings
-
     def guard(
         self,
         tool_name: str,
@@ -687,7 +734,6 @@ class RuleBasedToolGuardian(BaseToolGuardian):
     ) -> list[GuardFinding]:
         """Scan all string-like parameter values against loaded rules."""
         findings: list[GuardFinding] = []
-        findings.extend(self._check_shared_destructive(tool_name, params))
 
         applicable_rules = [
             r for r in self._rules if r.applies_to_tool(tool_name)
