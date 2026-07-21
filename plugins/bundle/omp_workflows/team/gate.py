@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -18,8 +17,6 @@ from ..shared.constants import (
 )
 from ..shared.state import WorkflowState
 from .prompts import build_continuation as _build_prompt
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -94,7 +91,6 @@ class TeamPipelineGate(LoopGate):
         data = await asyncio.to_thread(wf.read_state)
 
         st.iteration += 1
-
         if st.iteration > st.max_iterations:
             await asyncio.to_thread(wf.cleanup)
             self.deactivate()
@@ -103,12 +99,9 @@ class TeamPipelineGate(LoopGate):
                 reason=f"Iteration limit ({st.max_iterations})",
             )
 
+        prev_phase = st.phase
         phase = data.get("current_phase", "plan")
         st.phase = phase
-        st.fix_attempts = data.get(
-            "fix_attempts",
-            st.fix_attempts,
-        )
 
         if phase == "completed":
             await asyncio.to_thread(wf.cleanup)
@@ -118,7 +111,8 @@ class TeamPipelineGate(LoopGate):
                 reason="Team pipeline completed",
             )
 
-        if phase == "fix":
+        # Count fix *rounds* (phase entry), not every agent turn.
+        if phase == "fix" and prev_phase != "fix":
             st.fix_attempts += 1
             if st.fix_attempts > st.max_fix_attempts:
                 await asyncio.to_thread(wf.cleanup)
@@ -128,11 +122,8 @@ class TeamPipelineGate(LoopGate):
                     reason=f"Fix retry limit ({st.max_fix_attempts})",
                 )
             await asyncio.to_thread(
-                wf.write_state,
-                {
-                    **data,
-                    "fix_attempts": st.fix_attempts,
-                },
+                wf.update_state,
+                {"fix_attempts": st.fix_attempts},
             )
 
         return StopHandlerResult(

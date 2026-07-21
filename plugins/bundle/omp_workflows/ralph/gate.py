@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -15,8 +14,6 @@ from qwenpaw.loop.gates.loop_gate import LoopGate
 from ..shared.constants import RALPH_MAX_ITERATIONS
 from ..shared.state import WorkflowState
 from .prompts import build_continuation as _build_prompt
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -82,10 +79,13 @@ class RalphGate(LoopGate):
             "ralph",
             st.loop_dir,
         )
-        data = await asyncio.to_thread(wf.read_state)
+        data, prd = await asyncio.gather(
+            asyncio.to_thread(wf.read_state),
+            asyncio.to_thread(wf.read_prd),
+        )
 
-        st.iteration = data.get("iteration", st.iteration) + 1
-
+        # Gate owns iteration in memory.
+        st.iteration += 1
         if st.iteration > st.max_iterations:
             await asyncio.to_thread(wf.cleanup)
             self.deactivate()
@@ -94,7 +94,9 @@ class RalphGate(LoopGate):
                 reason=f"Reached max iterations ({st.max_iterations})",
             )
 
-        if data.get("completed", False):
+        st.prd_summary = _summarize_prd(prd)
+        completed = bool(data.get("completed")) or _all_stories_passed(prd)
+        if completed:
             await asyncio.to_thread(wf.cleanup)
             self.deactivate()
             return StopHandlerResult(
@@ -103,12 +105,9 @@ class RalphGate(LoopGate):
             )
 
         await asyncio.to_thread(
-            wf.write_state,
-            {**data, "iteration": st.iteration},
+            wf.update_state,
+            {"iteration": st.iteration},
         )
-
-        prd = await asyncio.to_thread(wf.read_prd)
-        st.prd_summary = _summarize_prd(prd)
 
         return StopHandlerResult(
             action=StopAction.INTERRUPT_AND_CONTINUE,
@@ -128,6 +127,14 @@ class RalphGate(LoopGate):
             loop_dir=st.loop_dir,
             prd_summary=st.prd_summary,
         )
+
+
+def _all_stories_passed(prd: dict) -> bool:
+    """Return True when PRD exists and every story has passes=true."""
+    stories = prd.get("stories") or []
+    if not stories:
+        return False
+    return all(s.get("passes") for s in stories)
 
 
 def _summarize_prd(prd: dict) -> str:

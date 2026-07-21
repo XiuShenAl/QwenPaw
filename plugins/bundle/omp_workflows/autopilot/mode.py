@@ -63,6 +63,7 @@ class AutopilotMode(OMPModeBase):
         if not workspace_dir:
             return info_msg("ERROR: no workspace directory available.")
 
+        self.claim_workflow()
         loop_dir = await asyncio.to_thread(
             self._gate.activate_for_autopilot,
             Path(workspace_dir),

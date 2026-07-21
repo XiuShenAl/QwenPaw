@@ -25,7 +25,7 @@ _HELP = (
     "**UltraQA** — automated QA cycle engine\n\n"
     "Usage:\n"
     '  `/ultraqa [--tests|--build|--lint|--typecheck|--custom "cmd"]'
-    " [--interactive] [target]`\n\n"
+    " [--interactive]`\n\n"
     "Runs repeated QA cycles: check → diagnose → fix → re-check.\n"
     "Stops when all checks pass or max cycles reached."
 )
@@ -63,6 +63,7 @@ class UltraQAMode(OMPModeBase):
         if not workspace_dir:
             return info_msg("ERROR: no workspace directory available.")
 
+        self.claim_workflow()
         loop_dir = await asyncio.to_thread(
             self._gate.activate_for_qa,
             Path(workspace_dir),

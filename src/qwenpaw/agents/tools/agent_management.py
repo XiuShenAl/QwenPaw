@@ -21,6 +21,7 @@ from ...utils.http import trust_env_for_url
 DEFAULT_AGENT_API_BASE_URL = "http://127.0.0.1:8088"
 DEFAULT_AGENT_API_TIMEOUT = 30.0
 MAX_SPAWN_BATCH_SIZE = 10
+MAX_SPAWN_BATCH_CONCURRENCY = 3
 
 
 def resolve_agent_api_base_url(base_url: Optional[str] = None) -> str:
@@ -746,6 +747,27 @@ def _build_spawn_request_context(current_agent_id: str) -> dict[str, Any]:
     return context
 
 
+def _normalize_str_list(
+    value: Any,
+    field_name: str,
+) -> Optional[list[str]]:
+    """Validate an optional list[str] tool argument.
+
+    Returns ``None`` when *value* is ``None``.  Raises ``ValueError``
+    when the value is not a list of strings (prevents ``list("abc")``
+    character-splitting on mistaken string inputs).
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) for item in value
+    ):
+        raise ValueError(
+            f"'{field_name}' must be a list of strings or null",
+        )
+    return list(value)
+
+
 def _build_subagent_request_context(
     current_agent_id: str,
     allowed_tools: Optional[list[str]] = None,
@@ -771,7 +793,7 @@ def _build_subagent_request_context(
     ui_icon="🔀",
 )
 async def spawn_subagent(  # pylint: disable=too-many-return-statements
-    task: str = "",
+    task: str,
     fork: bool = False,
     background: bool = False,
     timeout: int = 600,
@@ -794,8 +816,8 @@ async def spawn_subagent(  # pylint: disable=too-many-return-statements
 
     Args:
         task: Description of the sub-task.  This becomes the sole user
-            message in the subagent's conversation.  Required in single
-            mode; must be empty when ``batch`` is provided.
+            message in the subagent's conversation.  Always required by
+            the signature; pass an empty string when using ``batch``.
         fork: Controls two independent features:
             1. **Session state inheritance** — the subagent receives a
                copy of the parent's persisted session state.
@@ -817,15 +839,18 @@ async def spawn_subagent(  # pylint: disable=too-many-return-statements
             Ignored when ``background=True``.
         allowed_tools: Tool-name whitelist.  Only the listed tools are
             available to the subagent.  ``None`` (default) inherits the
-            parent's full tool set.
+            parent's full tool set.  An empty list denies all tools.
         skills: Skill-name whitelist.  Only the listed SKILL.md files
             are loaded for the subagent.  ``None`` (default) inherits
             all skills resolved for this workspace.
         batch: List of task specs for batch mode.  When provided,
-            ``task`` must be empty.  Each dict must contain a ``task``
-            key; optional keys: ``fork``, ``timeout``, ``allowed_tools``,
-            ``skills``.  All subagents run as background tasks.
-            Maximum length is ``MAX_SPAWN_BATCH_SIZE`` (10).
+            ``task`` must be an empty string.  Each dict must contain a
+            ``task`` key; optional keys: ``fork``, ``allowed_tools``,
+            ``skills`` (top-level ``fork`` / ``timeout`` /
+            ``allowed_tools`` / ``skills`` are ignored in batch mode).
+            All subagents run as background tasks.  Maximum length is
+            ``MAX_SPAWN_BATCH_SIZE`` (10); concurrent dispatches are
+            capped at ``MAX_SPAWN_BATCH_CONCURRENCY`` (3).
 
     Returns:
         Foreground (single): subagent result text with [SESSION: <id>].
@@ -833,18 +858,27 @@ async def spawn_subagent(  # pylint: disable=too-many-return-statements
         Fork foreground: also [FORK_BRANCH: <branch>] if changes.
         Batch: per-subagent [TASK_ID: ...] + [SESSION: ...].
     """
+    try:
+        allowed_tools = _normalize_str_list(
+            allowed_tools,
+            "allowed_tools",
+        )
+        skills = _normalize_str_list(skills, "skills")
+    except ValueError as exc:
+        return _tool_text_response(f"ERROR: {exc}")
+
     if batch is not None:
         if task and task.strip():
             return _tool_text_response(
                 "ERROR: 'task' and 'batch' are mutually exclusive. "
-                "Use 'batch' for multiple subagents or 'task' for "
-                "a single one.",
+                "Pass task='' with 'batch' for multiple subagents.",
             )
         return await _spawn_batch(batch)
 
     if not task or not task.strip():
         return _tool_text_response(
-            "ERROR: 'task' is required for spawn_subagent",
+            "ERROR: 'task' is required for spawn_subagent "
+            "(use task='' only with batch=...)",
         )
 
     from ...app.agent_context import get_current_agent_id
@@ -919,11 +953,20 @@ async def spawn_subagent(  # pylint: disable=too-many-return-statements
     )
 
 
+def _chunk_text(chunk: ToolChunk) -> str:
+    """Extract plain text from a ToolChunk, if present."""
+    if not chunk.content:
+        return ""
+    block = chunk.content[0]
+    text = getattr(block, "text", None)
+    return text if isinstance(text, str) else str(block)
+
+
 async def _spawn_batch(
     specs: list[Dict[str, Any]],
 ) -> ToolChunk:
     """Dispatch multiple subagents in parallel as background tasks."""
-    if not specs:
+    if not isinstance(specs, list) or not specs:
         return _tool_text_response(
             "ERROR: 'batch' must be a non-empty list",
         )
@@ -932,12 +975,34 @@ async def _spawn_batch(
             f"ERROR: batch size {len(specs)} exceeds "
             f"maximum of {MAX_SPAWN_BATCH_SIZE}",
         )
+    normalized: list[Dict[str, Any]] = []
     for i, spec in enumerate(specs):
-        if not isinstance(spec, dict) or not spec.get("task", "").strip():
+        if (
+            not isinstance(spec, dict)
+            or not str(
+                spec.get("task", ""),
+            ).strip()
+        ):
             return _tool_text_response(
                 f"ERROR: batch[{i}] must be a dict with a "
                 f"non-empty 'task' field",
             )
+        try:
+            normalized.append(
+                {
+                    **spec,
+                    "allowed_tools": _normalize_str_list(
+                        spec.get("allowed_tools"),
+                        f"batch[{i}].allowed_tools",
+                    ),
+                    "skills": _normalize_str_list(
+                        spec.get("skills"),
+                        f"batch[{i}].skills",
+                    ),
+                },
+            )
+        except ValueError as exc:
+            return _tool_text_response(f"ERROR: {exc}")
 
     from ...app.agent_context import get_current_agent_id
 
@@ -947,12 +1012,12 @@ async def _spawn_batch(
             "ERROR: unable to resolve current agent ID",
         )
 
-    sem = asyncio.Semaphore(MAX_SPAWN_BATCH_SIZE)
+    sem = asyncio.Semaphore(MAX_SPAWN_BATCH_CONCURRENCY)
 
     async def _dispatch_one(spec: Dict[str, Any]) -> str:
         session_id = _generate_subagent_session_id()
         task_text = spec["task"]
-        spec_fork = spec.get("fork", False)
+        spec_fork = bool(spec.get("fork", False))
         spec_timeout = spec.get("timeout", 600)
         spec_allowed = spec.get("allowed_tools")
         spec_skills = spec.get("skills")
@@ -968,7 +1033,7 @@ async def _spawn_batch(
                     allowed_tools=spec_allowed,
                     skills=spec_skills,
                 )
-                return chunk.content[0].text if chunk.content else ""
+                return _chunk_text(chunk)
 
             rc = _build_subagent_request_context(
                 current_agent_id,
@@ -997,7 +1062,7 @@ async def _spawn_batch(
             return format_background_submission_text(result, session_id)
 
     results = await asyncio.gather(
-        *[_dispatch_one(s) for s in specs],
+        *[_dispatch_one(s) for s in normalized],
         return_exceptions=True,
     )
 

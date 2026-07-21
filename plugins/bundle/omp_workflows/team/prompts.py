@@ -99,7 +99,7 @@ Workers: {agent_count}, Role: {agent_role}
 Execute:
 1. Read {loop_dir}/handoffs/prd.md for sub-tasks and acceptance criteria.
 2. Dispatch {agent_count} workers via batch mode:
-   spawn_subagent(batch=[
+   spawn_subagent(task="", batch=[
      {{
        "task": "You are Team Worker agent-001.\\n\\nTask: <sub-task 1>\\n\\
 Write your result to {loop_dir}/results/agent-001.json",
@@ -122,7 +122,7 @@ Pipeline iteration: {iteration}/{max_iterations}
 Execute:
 1. Read {loop_dir}/handoffs/exec-summary.md.
 2. Dispatch three reviewers via batch mode:
-   spawn_subagent(batch=[
+   spawn_subagent(task="", batch=[
      {{
        "task": "VERIFY: Check code changes for "
                "correctness and completeness...",

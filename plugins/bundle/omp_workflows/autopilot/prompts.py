@@ -28,7 +28,9 @@ def build_continuation(
     }
     fn = builders.get(phase)
     if fn is None:
-        return f"Unknown phase: {phase}. Update state.json."
+        return (
+            f"Unknown phase: {phase}. " f"Valid phases: {', '.join(PHASES)}."
+        )
     return fn(
         loop_dir=loop_dir,
         iteration=iteration,
@@ -84,7 +86,7 @@ Execute:
 1. Read {loop_dir}/plan.md for the task list.
 2. Identify independent tasks that can run in parallel.
 3. Dispatch executor workers via batch mode:
-   spawn_subagent(batch=[
+   spawn_subagent(task="", batch=[
      {{"task": "<task 1 from plan>", "fork": true}},
      {{"task": "<task 2 from plan>", "fork": true}},
      ...
@@ -133,7 +135,7 @@ code yourself. Dispatch subagents.
 
 Execute parallel validation:
 1. Use spawn_subagent batch mode for three reviewers:
-   spawn_subagent(batch=[
+   spawn_subagent(task="", batch=[
      {{
        "task": "REVIEW - Functional Completeness: "
                "Verify all spec requirements...",

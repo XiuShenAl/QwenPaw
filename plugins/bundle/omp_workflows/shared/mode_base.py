@@ -3,12 +3,16 @@
 
 from __future__ import annotations
 
-from typing import Any
+import logging
+import weakref
+from typing import Any, ClassVar
 
 from agentscope.message import Msg, TextBlock
 
 from qwenpaw.modes.base import AgentMode
 from qwenpaw.runtime.hooks import HookContext
+
+logger = logging.getLogger(__name__)
 
 
 class OMPModeBase(AgentMode):
@@ -23,8 +27,11 @@ class OMPModeBase(AgentMode):
     handler_name: str
     scope: str
 
+    _instances: ClassVar[list[weakref.ReferenceType]] = []
+
     def __init__(self) -> None:
         self._gate: Any = None
+        OMPModeBase._instances.append(weakref.ref(self))
 
     def setup(self, workspace: object) -> None:
         super().setup(workspace)
@@ -62,6 +69,32 @@ class OMPModeBase(AgentMode):
         """Clear gate state on /new and /clear."""
         if self._gate is not None:
             self._gate.reset_session()
+
+    def claim_workflow(self) -> None:
+        """Deactivate peer OMP workflows so only this scope is active.
+
+        ``_filter_by_scope`` keeps the first active non-default scope;
+        without mutual exclusion a later ``/ralph`` would be ignored
+        while an earlier ``/ultraqa`` gate still holds session state.
+        """
+        alive: list[weakref.ReferenceType] = []
+        for ref in OMPModeBase._instances:
+            mode = ref()
+            if mode is None:
+                continue
+            alive.append(ref)
+            # pylint: disable=protected-access
+            peer_gate = mode._gate
+            if mode is self or peer_gate is None:
+                continue
+            if peer_gate._state() is not None:
+                logger.info(
+                    "Deactivating peer OMP mode '%s' for '%s'",
+                    mode.name,
+                    self.name,
+                )
+                peer_gate.reset_session()
+        OMPModeBase._instances = alive
 
 
 def info_msg(text: str) -> Msg:

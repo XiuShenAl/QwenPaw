@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -15,8 +14,6 @@ from qwenpaw.loop.gates.loop_gate import LoopGate
 from ..shared.constants import ULTRAQA_MAX_CYCLES, ULTRAQA_MAX_SAME_FAILURE
 from ..shared.state import WorkflowState
 from .prompts import build_continuation as _build_prompt
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -90,12 +87,12 @@ class UltraQAGate(LoopGate):
         )
         data = await asyncio.to_thread(wf.read_state)
 
+        # Agent-owned fields — never overwritten by the gate.
         st.qa_passed = data.get("qa_passed", False)
         st.last_failures = data.get(
             "last_failures",
             st.last_failures,
         )
-        st.cycle = data.get("cycle", st.cycle)
 
         if st.qa_passed:
             await asyncio.to_thread(wf.cleanup)
@@ -105,6 +102,7 @@ class UltraQAGate(LoopGate):
                 reason="QA goals achieved",
             )
 
+        # Gate owns cycle in memory (single writer).
         if st.cycle >= st.max_cycles:
             await asyncio.to_thread(wf.cleanup)
             self.deactivate()
@@ -126,12 +124,8 @@ class UltraQAGate(LoopGate):
 
         st.cycle += 1
         await asyncio.to_thread(
-            wf.write_state,
-            {
-                "cycle": st.cycle,
-                "qa_passed": False,
-                "last_failures": st.last_failures,
-            },
+            wf.update_state,
+            {"cycle": st.cycle},
         )
 
         return StopHandlerResult(

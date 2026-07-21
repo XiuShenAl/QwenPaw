@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -19,8 +18,6 @@ from ..shared.constants import (
 )
 from ..shared.state import WorkflowState
 from .prompts import build_continuation as _build_prompt
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -74,7 +71,10 @@ class AutopilotGate(LoopGate):
         self.activate(state)
         return loop_dir
 
-    async def check(self, ctx: Any) -> Optional[StopHandlerResult]:
+    async def check(  # pylint: disable=too-many-return-statements
+        self,
+        ctx: Any,
+    ) -> Optional[StopHandlerResult]:
         if isinstance(ctx, dict) and ctx.get("has_tool_calls"):
             return StopHandlerResult(action=StopAction.BYPASS)
 
@@ -92,7 +92,6 @@ class AutopilotGate(LoopGate):
         data = await asyncio.to_thread(wf.read_state)
 
         st.iteration += 1
-
         if st.iteration > st.max_iterations:
             await asyncio.to_thread(wf.cleanup)
             self.deactivate()
@@ -114,6 +113,19 @@ class AutopilotGate(LoopGate):
             return StopHandlerResult(
                 action=StopAction.TERMINATE,
                 reason="Autopilot completed",
+            )
+
+        if (
+            phase == "validation"
+            and st.validation_round > st.max_validation_rounds
+        ):
+            await asyncio.to_thread(wf.cleanup)
+            self.deactivate()
+            return StopHandlerResult(
+                action=StopAction.TERMINATE,
+                reason=(
+                    f"Validation round limit " f"({st.max_validation_rounds})"
+                ),
             )
 
         if phase not in st.phase_entry_iteration:

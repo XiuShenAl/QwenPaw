@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -18,6 +19,10 @@ class WorkflowState:
 
     Path convention:
         {workspace_dir}/.qwenpaw/omp_workflows/{mode_name}-{timestamp}/
+
+    Writers should prefer :meth:`update_state` so concurrent agent
+    updates to other keys are preserved (read-merge-write + atomic
+    replace).
     """
 
     def __init__(self, workspace_dir: Path, mode_name: str) -> None:
@@ -64,14 +69,24 @@ class WorkflowState:
             return {}
 
     def write_state(self, data: dict[str, Any]) -> None:
-        """Write state.json."""
+        """Atomically replace state.json with *data*."""
         if not self._instance_dir:
             return
-        p = self._instance_dir / "state.json"
-        p.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
+        self._atomic_write_json(
+            self._instance_dir / "state.json",
+            data,
         )
+
+    def update_state(self, patch: dict[str, Any]) -> dict[str, Any]:
+        """Merge *patch* into state.json and write atomically.
+
+        Returns the merged document.  Prefer this over
+        :meth:`write_state` when the gate only owns some keys.
+        """
+        data = self.read_state()
+        data.update(patch)
+        self.write_state(data)
+        return data
 
     def read_prd(self) -> dict[str, Any]:
         """Read prd.json, returning empty dict if absent."""
@@ -95,11 +110,33 @@ class WorkflowState:
             f.write(entry + "\n")
 
     def cleanup(self) -> None:
-        """Delete state files, keeping directory and progress.txt."""
-        if not self._instance_dir:
+        """Remove instance artifacts, keeping progress.txt if present."""
+        if not self._instance_dir or not self._instance_dir.exists():
             return
-        for name in ("state.json", "prd.json"):
-            p = self._instance_dir / name
-            if p.exists():
-                p.unlink()
+        keep = {"progress.txt"}
+        for child in list(self._instance_dir.iterdir()):
+            if child.name in keep:
+                continue
+            try:
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+            except OSError:
+                logger.warning(
+                    "Failed to remove %s during cleanup",
+                    child,
+                    exc_info=True,
+                )
         logger.info("Cleaned up state files in %s", self._instance_dir)
+
+    @staticmethod
+    def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+        """Write JSON via temp file + replace."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        tmp.replace(path)

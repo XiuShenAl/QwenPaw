@@ -71,6 +71,10 @@ class QwenPawLocalWorkspace(AgentScopeLocalWorkspace):
             "subagent_allowed_tools",
         )
         if isinstance(subagent_whitelist, list):
+            # Empty list means deny-all workspace tools (unlike
+            # ToolRegistry.filter, where empty allowed == unrestricted).
+            if not subagent_whitelist:
+                return []
             sa_set = set(subagent_whitelist)
             allowed = (allowed & sa_set) if allowed is not None else sa_set
 

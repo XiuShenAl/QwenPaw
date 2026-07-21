@@ -50,7 +50,9 @@ Execute the current step:
        background=true
    )
 {deslop_block}\
-8. Clean up: delete state files and report completion.
+8. When the reviewer approves, update {loop_dir}/state.json:
+   set completed=true (required for the loop to terminate).
+9. Then report completion to the user.
 
 WARNING — POLITE-STOP ANTI-PATTERN:
 After the reviewer approves, do NOT stop to report results.
