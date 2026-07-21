@@ -155,15 +155,20 @@ async def list_tools(
 ) -> List[ToolInfo]:
     """List all built-in tools and enabled status for active agent.
 
+    Resolves the agent id from the request and reads ``agent.json`` without
+    waiting for a full workspace startup. Listing tools is a config read and
+    must not block on channel/toolkit init (macos integration tests use a
+    15s HTTP timeout that races with ``schedule_agent_startup``).
+
     Returns:
         List of tool information
     """
-    from ..agent_context import get_agent_for_request
+    from ..agent_context import resolve_agent_id_for_request
     from ...config.config import load_agent_config
     from ...plugins.registry import PluginRegistry
 
-    workspace = await get_agent_for_request(request)
-    agent_config = load_agent_config(workspace.agent_id)
+    agent_id = resolve_agent_id_for_request(request)
+    agent_config = load_agent_config(agent_id)
 
     # Ensure tools config exists with defaults
     if not agent_config.tools or not agent_config.tools.builtin_tools:

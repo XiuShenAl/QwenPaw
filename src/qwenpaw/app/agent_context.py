@@ -47,6 +47,55 @@ _current_approval_route: ContextVar[Optional[dict]] = ContextVar(
 )
 
 
+def resolve_agent_id_for_request(
+    request: Request,
+    agent_id: Optional[str] = None,
+    *,
+    require_enabled: bool = True,
+) -> str:
+    """Resolve the target agent id for a request without starting a workspace.
+
+    Priority matches :func:`get_agent_for_request`:
+    1. ``agent_id`` parameter (explicit override)
+    2. ``request.state.agent_id`` (from agent-scoped router)
+    3. ``X-Agent-Id`` header (from frontend)
+    4. Active agent from config
+
+    Raises:
+        HTTPException: If the agent is missing or disabled.
+    """
+    from fastapi import HTTPException
+
+    target_agent_id = agent_id
+
+    if not target_agent_id and hasattr(request.state, "agent_id"):
+        target_agent_id = request.state.agent_id
+
+    if not target_agent_id:
+        target_agent_id = request.headers.get("X-Agent-Id")
+
+    config = None
+    if not target_agent_id:
+        config = load_config()
+        target_agent_id = config.agents.active_agent or "default"
+
+    if config is None:
+        config = load_config()
+    if target_agent_id not in config.agents.profiles:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Agent '{target_agent_id}' not found",
+        )
+
+    agent_ref = config.agents.profiles[target_agent_id]
+    if require_enabled and not getattr(agent_ref, "enabled", True):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Agent '{target_agent_id}' is disabled",
+        )
+    return target_agent_id
+
+
 async def get_agent_for_request(
     request: Request,
     agent_id: Optional[str] = None,
@@ -71,39 +120,7 @@ async def get_agent_for_request(
     """
     from fastapi import HTTPException
 
-    # Determine which agent to use
-    target_agent_id = agent_id
-
-    # Check request.state.agent_id (set by agent-scoped router)
-    if not target_agent_id and hasattr(request.state, "agent_id"):
-        target_agent_id = request.state.agent_id
-
-    # Check X-Agent-Id header
-    if not target_agent_id:
-        target_agent_id = request.headers.get("X-Agent-Id")
-
-    # Load config once for fallback and validation
-    config = None
-    if not target_agent_id:
-        # Fallback to active agent from config
-        config = load_config()
-        target_agent_id = config.agents.active_agent or "default"
-
-    # Check if agent exists and is enabled
-    if config is None:
-        config = load_config()
-    if target_agent_id not in config.agents.profiles:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Agent '{target_agent_id}' not found",
-        )
-
-    agent_ref = config.agents.profiles[target_agent_id]
-    if not getattr(agent_ref, "enabled", True):
-        raise HTTPException(
-            status_code=403,
-            detail=f"Agent '{target_agent_id}' is disabled",
-        )
+    target_agent_id = resolve_agent_id_for_request(request, agent_id)
 
     # Get MultiAgentManager
     if not hasattr(request.app.state, "multi_agent_manager"):
