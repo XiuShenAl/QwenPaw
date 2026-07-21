@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ..shared.role_prompts import format_spawn_call, resolve_role
+
 
 def build_continuation(
     iteration: int,
@@ -23,32 +25,36 @@ def build_continuation(
             "no regressions from deslop.\n"
         )
 
+    reviewer = resolve_role(critic_type)
+    executor_spawn = format_spawn_call(
+        "executor",
+        "Implement the following user story:\\n"
+        "<story details + acceptance criteria>",
+        fork=True,
+    )
+    reviewer_spawn = format_spawn_call(
+        reviewer,
+        "REVIEW: Verify the complete implementation against the PRD...",
+    )
+
     return f"""\
 Ralph PRD-driven loop — iteration {iteration}/{max_iterations}.
 {prd_summary}
+
+Use the omp-roles skill for role tool/skill config.
 
 Execute the current step:
 
 1. Read {loop_dir}/prd.json for the user stories list.
 2. Pick the highest-priority story with passes=false.
 3. Dispatch an executor subagent to implement it:
-   spawn_subagent(
-       task="Implement the following user story:"
-            "\\n<story details + acceptance criteria>",
-       fork=true,
-       background=true
-   )
+{executor_spawn}
 4. After completion, verify every acceptance criterion (run tests/build/lint).
 5. If verified, update prd.json: set passes=true for this story.
    Write progress to {loop_dir}/progress.txt.
 6. If all stories pass, proceed to step 7. Otherwise loop to step 2.
-7. Dispatch a {critic_type} reviewer to verify the overall implementation:
-   spawn_subagent(
-       task="REVIEW: Verify the complete implementation against the PRD...",
-       allowed_tools=["read_file", "grep_search", "glob_search", "ast_search"],
-       skills=[],
-       background=true
-   )
+7. Dispatch a {reviewer} reviewer to verify the overall implementation:
+{reviewer_spawn}
 {deslop_block}\
 8. When the reviewer approves, update {loop_dir}/state.json:
    set completed=true (required for the loop to terminate).

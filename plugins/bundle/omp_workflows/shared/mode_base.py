@@ -57,14 +57,17 @@ class OMPModeBase(AgentMode):
                 ),
             )
 
-    def is_active(self, ctx: Any) -> bool:  # noqa: ARG002
+    def is_active(
+        self,
+        ctx: Any,  # pylint: disable=unused-argument
+    ) -> bool:
         # Follows upstream MissionMode pattern (LoopGate lacks public API)
         # pylint: disable=protected-access
         return self._gate is not None and self._gate._state() is not None
 
-    def on_conversation_reset(
+    async def on_conversation_reset(
         self,
-        ctx: HookContext,  # noqa: ARG002
+        ctx: HookContext,  # pylint: disable=unused-argument
     ) -> None:
         """Clear gate state on /new and /clear."""
         if self._gate is not None:

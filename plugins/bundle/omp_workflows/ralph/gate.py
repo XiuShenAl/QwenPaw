@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -26,6 +26,8 @@ class _RalphState:
     no_deslop: bool = False
     critic_type: str = "architect"
     prd_summary: str = ""
+    prd_cache: dict[str, Any] = field(default_factory=dict)
+    prd_mtime_ns: int = -1
 
 
 class RalphGate(LoopGate):
@@ -79,10 +81,8 @@ class RalphGate(LoopGate):
             "ralph",
             st.loop_dir,
         )
-        data, prd = await asyncio.gather(
-            asyncio.to_thread(wf.read_state),
-            asyncio.to_thread(wf.read_prd),
-        )
+        data = await asyncio.to_thread(wf.read_state)
+        prd = await asyncio.to_thread(_read_prd_cached, st, wf)
 
         # Gate owns iteration in memory.
         st.iteration += 1
@@ -127,6 +127,24 @@ class RalphGate(LoopGate):
             loop_dir=st.loop_dir,
             prd_summary=st.prd_summary,
         )
+
+
+def _read_prd_cached(
+    st: _RalphState,
+    wf: WorkflowState,
+) -> dict[str, Any]:
+    """Reload prd.json only when the file mtime changes."""
+    prd_path = st.loop_dir / "prd.json"
+    try:
+        mtime_ns = prd_path.stat().st_mtime_ns if prd_path.exists() else -1
+    except OSError:
+        mtime_ns = -1
+    if mtime_ns == st.prd_mtime_ns:
+        return st.prd_cache
+    prd = wf.read_prd()
+    st.prd_cache = prd
+    st.prd_mtime_ns = mtime_ns
+    return prd
 
 
 def _all_stories_passed(prd: dict) -> bool:

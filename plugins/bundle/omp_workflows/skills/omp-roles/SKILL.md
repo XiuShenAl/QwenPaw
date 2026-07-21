@@ -4,6 +4,13 @@ When using spawn_subagent (single or batch mode) to dispatch sub-agents,
 set the corresponding allowed_tools and skills parameters based on the
 sub-agent's role.
 
+**Canonical source of truth in code:**
+`plugins/bundle/omp_workflows/shared/constants.py`
+(`ROLE_ALLOWED_TOOLS`, `ROLE_SKILLS`, `TOOL_*` names) and
+`shared/role_prompts.py` (`ROLE_PROMPTS`, `build_worker_prompt`,
+`format_spawn_call`). Tool strings must match registered ToolRegistry
+names — do not invent aliases.
+
 ## Role Definitions
 
 ### executor (Code Executor)
@@ -74,12 +81,13 @@ sub-agent's role.
 
 ```text
 spawn_subagent(
-    task="<role identity prompt>\n\n## Task\n<task description>",
-    allowed_tools=<role's allowed_tools>,
-    skills=<role's skills>,
+    task="<role identity from ROLE_PROMPTS>\n\n## Task\n<task description>",
+    allowed_tools=<ROLE_ALLOWED_TOOLS[role] or omit if null>,
+    skills=<ROLE_SKILLS[role] or omit if null>,
     fork=True,         # if worktree isolation needed
     background=True,   # if background execution needed
 )
 ```
 
 When allowed_tools or skills is null, omit the parameter (uses default None).
+For batch mode, pass `task=""` and put per-item role config in each batch dict.

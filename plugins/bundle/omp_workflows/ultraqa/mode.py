@@ -5,12 +5,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from qwenpaw.runtime.slash_command_registry import CommandSpec
 
+from ..shared.args import split_args
 from ..shared.mode_base import OMPModeBase, info_msg, rewrite_user_msg
 from .gate import UltraQAGate
 
@@ -83,10 +83,9 @@ class UltraQAMode(OMPModeBase):
 
 
 def _parse_args(raw: str) -> dict | None:
-    """Parse /ultraqa arguments."""
-    try:
-        tokens = shlex.split(raw)
-    except ValueError:
+    """Parse /ultraqa arguments.  ``None`` means invalid input."""
+    tokens = split_args(raw)
+    if tokens is None:
         return None
 
     goal_type = "tests"

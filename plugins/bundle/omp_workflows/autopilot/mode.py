@@ -5,12 +5,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from qwenpaw.runtime.slash_command_registry import CommandSpec
 
+from ..shared.args import split_args
 from ..shared.mode_base import OMPModeBase, info_msg, rewrite_user_msg
 from .gate import AutopilotGate
 
@@ -55,6 +55,8 @@ class AutopilotMode(OMPModeBase):
             return info_msg(_HELP)
 
         parsed = _parse_args(args)
+        if parsed is None:
+            return info_msg("Invalid arguments. " + _HELP)
         task = parsed["task"]
         if len(task) < 5:
             return info_msg("Please provide a task description.\n\n" + _HELP)
@@ -82,11 +84,11 @@ class AutopilotMode(OMPModeBase):
         return None
 
 
-def _parse_args(raw: str) -> dict:
-    try:
-        tokens = shlex.split(raw)
-    except ValueError:
-        return {"task": raw, "skip_qa": False, "skip_validation": False}
+def _parse_args(raw: str) -> dict | None:
+    """Parse /autopilot arguments.  ``None`` means invalid input."""
+    tokens = split_args(raw)
+    if tokens is None:
+        return None
 
     skip_qa = False
     skip_validation = False

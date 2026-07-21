@@ -6,13 +6,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from qwenpaw.runtime.slash_command_registry import CommandSpec
 
+from ..shared.args import split_args
 from ..shared.mode_base import OMPModeBase, info_msg, rewrite_user_msg
+from ..shared.role_prompts import resolve_role
 from .gate import TeamPipelineGate
 
 if TYPE_CHECKING:
@@ -57,6 +58,8 @@ class TeamMode(OMPModeBase):
             return info_msg(_HELP)
 
         parsed = _parse_args(args)
+        if parsed is None:
+            return info_msg("Invalid arguments. " + _HELP)
         task = parsed["task"]
         if len(task) < 5:
             return info_msg("Please provide a task description.\n\n" + _HELP)
@@ -89,11 +92,11 @@ class TeamMode(OMPModeBase):
 _TEAM_SPEC_RE = re.compile(r"^(\d+):(\w[\w-]*)$")
 
 
-def _parse_args(raw: str) -> dict:
-    try:
-        tokens = shlex.split(raw)
-    except ValueError:
-        return {"task": raw, "agent_count": 3, "agent_role": "executor"}
+def _parse_args(raw: str) -> dict | None:
+    """Parse /team arguments.  ``None`` means invalid input."""
+    tokens = split_args(raw)
+    if tokens is None:
+        return None
 
     agent_count = 3
     agent_role = "executor"
@@ -112,5 +115,5 @@ def _parse_args(raw: str) -> dict:
     return {
         "task": " ".join(task_parts),
         "agent_count": max(1, min(agent_count, 10)),
-        "agent_role": agent_role,
+        "agent_role": resolve_role(agent_role),
     }

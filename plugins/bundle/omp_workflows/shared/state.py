@@ -37,6 +37,7 @@ class WorkflowState:
         base = self.workspace_dir / ".qwenpaw" / "omp_workflows"
         self._instance_dir = base / f"{self.mode_name}-{ts}-{suffix}"
         self._instance_dir.mkdir(parents=True, exist_ok=True)
+        self.append_log(f"[{self.mode_name}] instance created")
         return self._instance_dir
 
     @property
@@ -102,7 +103,7 @@ class WorkflowState:
             return {}
 
     def append_log(self, entry: str) -> None:
-        """Append a line to progress.txt."""
+        """Append a line to progress.txt (survives :meth:`cleanup`)."""
         if not self._instance_dir:
             return
         p = self._instance_dir / "progress.txt"
@@ -128,6 +129,7 @@ class WorkflowState:
                     child,
                     exc_info=True,
                 )
+        self.append_log(f"[{self.mode_name}] cleanup complete")
         logger.info("Cleaned up state files in %s", self._instance_dir)
 
     @staticmethod
