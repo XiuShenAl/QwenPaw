@@ -898,10 +898,11 @@ class TestRuleBasedToolGuardianGuard:
             "execute_shell_command",
             {"command": "rm -rf /tmp"},
         )
-        yaml_findings = [f for f in findings if f.rule_id == "R1"]
-        assert len(yaml_findings) == 1
-        assert yaml_findings[0].snippet is not None
-        assert "rm" in yaml_findings[0].snippet
+        # /tmp is not a catastrophic root wipe — only the YAML rule fires.
+        assert len(findings) == 1
+        assert findings[0].rule_id == "R1"
+        assert findings[0].snippet is not None
+        assert "rm" in findings[0].snippet
 
     @pytest.mark.skipif(
         platform.system() == "Windows",
@@ -965,6 +966,10 @@ class TestRuleBasedToolGuardianGuard:
             "execute_shell_command",
             {"command": f"rm -rf {target}"},
         )
+        # Workspace absolute paths must not trip the shared catastrophic rule.
+        assert not any(
+            f.rule_id == "SAFETY_CHECKS_DESTRUCTIVE_COMMAND" for f in findings
+        )
         yaml_findings = [
             f for f in findings if f.rule_id == "TOOL_CMD_DANGEROUS_RM"
         ]
@@ -994,8 +999,10 @@ class TestSharedSafetyChecksIntegration:
             )
         assert result is True
         mock_boundary.assert_called_once()
-        args = mock_boundary.call_args[0]
-        assert str(mock_workspace_root.resolve()) in args[1]
+        args, kwargs = mock_boundary.call_args
+        assert Path(args[1]).resolve() == mock_workspace_root.resolve()
+        assert kwargs.get("cwd_is_resolved") is True
+        assert kwargs.get("path_is_resolved") is True
 
     def test_guard_emits_shared_destructive_finding(
         self,
@@ -1008,6 +1015,47 @@ class TestSharedSafetyChecksIntegration:
         findings = guardian.guard(
             "execute_shell_command",
             {"command": "rm -rf /"},
+        )
+        assert any(
+            f.rule_id == "SAFETY_CHECKS_DESTRUCTIVE_COMMAND"
+            and f.severity == GuardSeverity.CRITICAL
+            for f in findings
+        )
+
+    def test_guard_skips_shared_check_for_tmp_path(
+        self,
+        tmp_path,
+        mock_config_rules,
+    ):
+        """rm -rf /tmp must not hit the shared catastrophic rule."""
+        guardian = RuleBasedToolGuardian(rules_dir=tmp_path)
+        findings = guardian.guard(
+            "execute_shell_command",
+            {"command": "rm -rf /tmp"},
+        )
+        assert not any(
+            f.rule_id == "SAFETY_CHECKS_DESTRUCTIVE_COMMAND" for f in findings
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "Remove-Item -Recurse -Force C:\\",
+            "del /s /q C:\\*",
+            "format C:",
+        ],
+    )
+    def test_guard_emits_shared_finding_for_windows_catastrophic(
+        self,
+        tmp_path,
+        mock_config_rules,
+        command: str,
+    ):
+        """Windows catastrophic commands hit the shared CRITICAL finding."""
+        guardian = RuleBasedToolGuardian(rules_dir=tmp_path)
+        findings = guardian.guard(
+            "execute_shell_command",
+            {"command": command},
         )
         assert any(
             f.rule_id == "SAFETY_CHECKS_DESTRUCTIVE_COMMAND"

@@ -17,7 +17,9 @@ class TestIsCommandDestructive:
         "command",
         [
             "rm -rf /",
-            "rm -r --recursive /home/user",
+            "rm -rf /*",
+            "rm -rf /home",
+            "rm -rf /etc/passwd",
             "rm --recursive ~",
             "rm -rf *",
             "mkfs.ext4 /dev/sda1",
@@ -28,6 +30,11 @@ class TestIsCommandDestructive:
             "halt",
             "poweroff",
             ": () { : | : & } ; :",
+            # Windows catastrophic patterns
+            "Remove-Item -Recurse -Force C:\\",
+            "Remove-Item -Recurse -Force C:\\*",
+            "del /s /q C:\\*",
+            "format C:",
         ],
     )
     def test_blocks_known_dangerous_commands(self, command: str) -> None:
@@ -44,6 +51,13 @@ class TestIsCommandDestructive:
             "rm file.txt",
             "rm -f single_file.log",
             "mkdir new_dir",
+            # Must NOT treat ordinary absolute paths as system-root wipes.
+            "rm -rf /tmp",
+            "rm -rf /tmp/cache",
+            "rm -rf /var/folders/xx/workspace/build",
+            # Windows non-catastrophic deletes.
+            "Remove-Item -Recurse -Force C:\\Users\\me\\project\\build",
+            "del /s /q D:\\work\\out\\*",
         ],
     )
     def test_allows_safe_commands(self, command: str) -> None:
@@ -53,6 +67,15 @@ class TestIsCommandDestructive:
         assert is_command_destructive("SHUTDOWN now") is True
         assert is_command_destructive("ReBoot") is True
         assert is_command_destructive("RM -RF /") is True
+        assert (
+            is_command_destructive("remove-item -recurse -force c:\\") is True
+        )
+
+    def test_workspace_absolute_path_not_catastrophic(self, tmp_path) -> None:
+        """Workspace abs paths must not hit the shared catastrophic rule."""
+        target = tmp_path / "build"
+        target.mkdir()
+        assert is_command_destructive(f"rm -rf {target}") is False
 
 
 class TestIsPathOutsideBoundary:

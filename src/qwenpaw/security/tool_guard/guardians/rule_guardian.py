@@ -137,11 +137,24 @@ def _is_outside_workspace(abs_path: Path) -> bool:
     """Check if the given absolute path is outside the workspace.
 
     Delegates to :func:`is_path_outside_boundary` so ACP hard-block and
-    ToolGuard share the same path-boundary primitive.
+    ToolGuard share the same path-boundary primitive.  Both sides are
+    already resolved here to avoid duplicate ``Path.resolve()`` I/O on
+    the synchronous ToolGuard hot path.
     """
     try:
         workspace = _get_workspace_root().resolve()
-        return is_path_outside_boundary(str(abs_path), str(workspace))
+        try:
+            resolved_path = abs_path.resolve()
+        except OSError:
+            return True
+        # Both values are already resolved — skip re-resolve in the
+        # shared primitive to avoid duplicate filesystem I/O.
+        return is_path_outside_boundary(
+            resolved_path,
+            workspace,
+            cwd_is_resolved=True,
+            path_is_resolved=True,
+        )
     except (OSError, RuntimeError) as e:
         logger.debug(
             "Error checking workspace boundary for '%s': %s",
