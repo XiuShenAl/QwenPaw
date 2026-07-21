@@ -9,41 +9,74 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-# After ``rm -rf``, only these targets are treated as catastrophic.
+# Token boundary after a catastrophic path (whitespace, shell metachar, or
+# closing quote).
+_PATH_END = r"(?=[\s|;|&)\"']|$)"
+
+# After a recursive ``rm``, these targets are treated as catastrophic.
 #
-# Bare ``/`` and top-level system dirs (``/home``, ``/var``, …) MUST be
-# complete arguments.  Prefix matching would false-positive on
-# ``rm -rf /tmp`` and on workspace absolute paths such as
-# ``/home/user/proj/build`` or macOS ``/private/var/folders/...``.
-# Critical non-workspace prefixes (``/etc/``, ``/usr/``, …) stay covered.
+# Design notes:
+# - Bare ``/`` / ``/*`` must be complete arguments (so ``/tmp`` is safe).
+# - ``/home/...`` and ``/Users/...`` stay blocked (user-home wipes).
+# - ``/var/...`` and ``/private/...`` stay blocked, except macOS temp
+#   trees ``/var/folders`` and ``/private/var/folders`` used by pytest
+#   and typical local workspaces.
+# - Critical system prefixes (``/etc``, ``/usr``, …) stay blocked.
+# - Optional quotes around the target token are accepted.
+# - ``$HOME`` / ``${HOME}`` / ``%USERPROFILE%`` are treated like ``~``.
 _RM_CATASTROPHIC_TARGET = (
     r"(?:"
+    r"['\"]?"
+    r"(?:"
     # / or /*
-    r"/(?=[\s|;|&)]|$|\*)"
-    # complete system dir only (not /home/user/...)
-    r"|/(?:home|users|etc|var|usr|bin|sbin|lib|opt|private|"
-    r"system|windows)(?=[\s|;|&)]|$)"
-    # critical system prefixes that are not typical workspaces
-    r"|/(?:etc|usr|bin|sbin|lib|opt|System|Windows)/"
+    r"/(?:" + _PATH_END + r"|\*)"
+    # user homes and all subpaths
+    r"|/(?:home|users)(?:/|" + _PATH_END + r")"
+    # critical system trees
+    r"|/(?:etc|usr|bin|sbin|lib|opt|system|windows)(?:/|" + _PATH_END + r")"
+    # /var/* except macOS /var/folders (temp / workspace roots)
+    r"|/var(?!/folders\b)(?:/|" + _PATH_END + r")"
+    # /private/* except /private/var/folders
+    r"|/private(?!/var/folders\b)(?:/|" + _PATH_END + r")"
     # ~/... or bare ~
-    r"|~(?:/|(?=[\s|;|&)]|$))"
+    r"|~(?:/|" + _PATH_END + r")"
+    # shell / Windows home-directory expansions
+    r"|\$(?:\{HOME\}|HOME)(?:/|" + _PATH_END + r")"
+    r"|%USERPROFILE%(?:\\|/|" + _PATH_END + r")"
     r"|\*"
+    r")"
+    r"['\"]?"
     r")"
 )
 
+# Recursive flag in any position among short/long options.
+_RM_RECURSIVE_LOOKAHEAD = r"(?=[^\n]*(?:-[a-z]*r[a-z]*|--recursive|-Recurse))"
+
+# Drive-root token: optional quotes, ``C:`` / ``C:\`` / ``C:\*``.
+_WIN_DRIVE_ROOT = r"['\"]?[A-Za-z]:\\?(?:\*|['\"]|" + _PATH_END + r")"
+
 BLOCKED_COMMAND_PATTERNS: tuple[str, ...] = (
-    # POSIX catastrophic recursive deletion targets.
+    # POSIX / PowerShell-unix-style: flags may appear in any order.
+    # Covers: rm -rf /, rm -f -r /, rm --force --recursive /, …
     (
-        r"\brm\s+(?:-[a-z]*r[a-z]*|--recursive)(?:\s+(?:-\S+|--\S+))*\s+"
+        r"\brm\b"
+        + _RM_RECURSIVE_LOOKAHEAD
+        + r"(?:\s+(?:-\S+|--\S+))+\s+"
         + _RM_CATASTROPHIC_TARGET
     ),
-    # Windows PowerShell: recursive force delete of a drive root.
+    # Windows PowerShell Remove-Item family (incl. rm/ri aliases)
+    # targeting a drive root.  ``rm -Recurse`` is required for the rm
+    # alias so Unix ``rm -rf /`` is not double-matched here.
     (
-        r"\bRemove-Item\b(?=[^\n]*-(?:Recurse|r)\b)"
-        r"[^\n]*[A-Za-z]:\\(?:\*|(?=[\s\"';|&)]|$))"
+        r"\b(?:Remove-Item|ri)\b(?=[^\n]*-(?:Recurse|r)\b)"
+        + r"[^\n]*"
+        + _WIN_DRIVE_ROOT
     ),
-    # Windows cmd: recursive quiet delete of a drive root glob.
-    r"\bdel\s+(?:/[a-zA-Z]+\s+)*[A-Za-z]:\\\*",
+    (r"\brm\b(?=[^\n]*-Recurse\b)" + r"[^\n]*" + _WIN_DRIVE_ROOT),
+    # Windows cmd: recursive quiet delete of a drive root (optional *).
+    r"\bdel\s+(?:/[a-zA-Z]+\s+)*" + _WIN_DRIVE_ROOT,
+    # Windows cmd: recursive remove of a drive root only.
+    r"\b(?:rd|rmdir)\s+(?:/[a-zA-Z]+\s+)*" + _WIN_DRIVE_ROOT,
     # Windows format of a drive letter.
     r"\bformat\s+[A-Za-z]:",
     # Filesystem and raw block-device operations.

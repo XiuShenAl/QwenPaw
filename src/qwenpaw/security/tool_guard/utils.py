@@ -126,6 +126,13 @@ def resolve_denied_tools(
     return set()
 
 
+# Shared catastrophic-command findings hard-deny by default so ToolGuard
+# matches ACP's hard-block posture for ``is_command_destructive`` hits.
+_DEFAULT_AUTO_DENIED_RULES: frozenset[str] = frozenset(
+    {"SAFETY_CHECKS_DESTRUCTIVE_COMMAND"},
+)
+
+
 def resolve_auto_denied_rules(
     user_defined: set[str] | list[str] | tuple[str, ...] | None = None,
 ) -> set[str]:
@@ -135,7 +142,8 @@ def resolve_auto_denied_rules(
     1) constructor-provided ``user_defined``
     2) ``QWENPAW_TOOL_GUARD_AUTO_DENIED_RULES`` env var (comma-separated)
     3) ``config.json`` -> ``security.tool_guard.auto_denied_rules``
-    4) built-in default (empty)
+       (``[]`` disables auto-deny; omitted keys use the config model default)
+    4) built-in default (``SAFETY_CHECKS_DESTRUCTIVE_COMMAND``)
 
     Returns
     -------
@@ -150,10 +158,14 @@ def resolve_auto_denied_rules(
         return {r.strip() for r in raw.split(",") if r.strip()}
 
     cfg = _load_config_tool_guard()
-    if cfg is not None and cfg.auto_denied_rules:
+    if cfg is not None:
+        # ``None`` only appears on incomplete mocks; treat as unset → default.
+        # A real config always has a list (possibly empty for opt-out).
+        if cfg.auto_denied_rules is None:
+            return set(_DEFAULT_AUTO_DENIED_RULES)
         return {r.strip() for r in cfg.auto_denied_rules if r.strip()}
 
-    return set()
+    return set(_DEFAULT_AUTO_DENIED_RULES)
 
 
 def log_findings(tool_name: str, result: "ToolGuardResult") -> None:

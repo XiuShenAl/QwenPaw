@@ -18,9 +18,23 @@ class TestIsCommandDestructive:
         [
             "rm -rf /",
             "rm -rf /*",
+            "rm -f -r /",
+            "rm --force --recursive /",
             "rm -rf /home",
+            "rm -rf /home/alice",
+            "rm -rf /Users/alice",
+            "rm -rf /var/lib",
+            "rm -rf /private/etc",
             "rm -rf /etc/passwd",
+            "rm -rf '/home/alice'",
+            'rm -rf "/Users/alice"',
+            "rm -rf '/'",
             "rm --recursive ~",
+            "rm -rf '~'",
+            "rm -rf $HOME",
+            "rm -rf ${HOME}",
+            'rm -rf "$HOME"',
+            "rm -rf %USERPROFILE%",
             "rm -rf *",
             "mkfs.ext4 /dev/sda1",
             "mke2fs /dev/sdb",
@@ -33,7 +47,15 @@ class TestIsCommandDestructive:
             # Windows catastrophic patterns
             "Remove-Item -Recurse -Force C:\\",
             "Remove-Item -Recurse -Force C:\\*",
+            'Remove-Item -Recurse -Force "C:\\"',
+            "rm -Recurse -Force C:\\",
+            'rm -Recurse -Force "C:\\"',
+            "del /s /q C:\\",
             "del /s /q C:\\*",
+            'del /s /q "C:\\"',
+            "rd /s /q C:\\",
+            'rd /s /q "C:\\"',
+            "rmdir /s /q C:\\",
             "format C:",
         ],
     )
@@ -51,13 +73,17 @@ class TestIsCommandDestructive:
             "rm file.txt",
             "rm -f single_file.log",
             "mkdir new_dir",
-            # Must NOT treat ordinary absolute paths as system-root wipes.
+            # Must NOT treat ordinary temp / workspace trees as root wipes.
             "rm -rf /tmp",
             "rm -rf /tmp/cache",
+            "rm -rf '/tmp/cache'",
             "rm -rf /var/folders/xx/workspace/build",
+            "rm -rf /private/var/folders/xx/workspace/build",
+            "rm -rf /homeless",
             # Windows non-catastrophic deletes.
             "Remove-Item -Recurse -Force C:\\Users\\me\\project\\build",
             "del /s /q D:\\work\\out\\*",
+            "rd /s /q C:\\Users\\me\\project",
         ],
     )
     def test_allows_safe_commands(self, command: str) -> None:
@@ -72,7 +98,7 @@ class TestIsCommandDestructive:
         )
 
     def test_workspace_absolute_path_not_catastrophic(self, tmp_path) -> None:
-        """Workspace abs paths must not hit the shared catastrophic rule."""
+        """Workspace abs paths under temp trees must not be catastrophic."""
         target = tmp_path / "build"
         target.mkdir()
         assert is_command_destructive(f"rm -rf {target}") is False

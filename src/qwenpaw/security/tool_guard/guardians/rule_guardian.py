@@ -133,22 +133,29 @@ def _normalize_path(raw_path: str) -> Path:
         return Path(raw_path).absolute()
 
 
-def _is_outside_workspace(abs_path: Path) -> bool:
+def _is_outside_workspace(
+    abs_path: Path,
+    *,
+    path_is_resolved: bool = False,
+) -> bool:
     """Check if the given absolute path is outside the workspace.
 
     Delegates to :func:`is_path_outside_boundary` so ACP hard-block and
-    ToolGuard share the same path-boundary primitive.  Both sides are
-    already resolved here to avoid duplicate ``Path.resolve()`` I/O on
-    the synchronous ToolGuard hot path.
+    ToolGuard share the same path-boundary primitive.
+
+    Pass ``path_is_resolved=True`` when *abs_path* already came from
+    :func:`_normalize_path` (which ``resolve()``-s) to avoid a second
+    filesystem walk on the synchronous ToolGuard hot path.
     """
     try:
         workspace = _get_workspace_root().resolve()
-        try:
-            resolved_path = abs_path.resolve()
-        except OSError:
-            return True
-        # Both values are already resolved — skip re-resolve in the
-        # shared primitive to avoid duplicate filesystem I/O.
+        if path_is_resolved:
+            resolved_path = abs_path
+        else:
+            try:
+                resolved_path = abs_path.resolve()
+            except OSError:
+                return True
         return is_path_outside_boundary(
             resolved_path,
             workspace,
@@ -327,7 +334,7 @@ def _check_rm_targets_outside_workspace(
     for target in targets:
         try:
             abs_path = _normalize_path(target)
-            if _is_outside_workspace(abs_path):
+            if _is_outside_workspace(abs_path, path_is_resolved=True):
                 outside_paths.append(f"{target} → {abs_path}")
         except (OSError, ValueError, RuntimeError) as e:
             logger.debug("Failed to check target '%s': %s", target, e)

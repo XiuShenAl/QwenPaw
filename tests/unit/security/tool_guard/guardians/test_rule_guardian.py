@@ -1041,7 +1041,10 @@ class TestSharedSafetyChecksIntegration:
         "command",
         [
             "Remove-Item -Recurse -Force C:\\",
+            "rm -Recurse -Force C:\\",
             "del /s /q C:\\*",
+            "rd /s /q C:\\",
+            "rmdir /s /q C:\\",
             "format C:",
         ],
     )
