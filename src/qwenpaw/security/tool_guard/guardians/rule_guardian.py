@@ -35,6 +35,10 @@ from typing import Any
 import yaml
 
 from ..models import GuardFinding, GuardSeverity, GuardThreatCategory
+from ..safety_checks import (
+    is_command_destructive,
+    is_path_outside_boundary,
+)
 from . import BaseToolGuardian
 
 logger = logging.getLogger(__name__)
@@ -132,31 +136,12 @@ def _normalize_path(raw_path: str) -> Path:
 def _is_outside_workspace(abs_path: Path) -> bool:
     """Check if the given absolute path is outside the workspace.
 
-    Handles:
-    - Windows: Different drive letters are always outside workspace
-    - Unix/macOS: Standard relative_to check
+    Delegates to :func:`is_path_outside_boundary` so ACP hard-block and
+    ToolGuard share the same path-boundary primitive.
     """
     try:
         workspace = _get_workspace_root().resolve()
-
-        # Windows: Different drives are always outside workspace
-        if (
-            os.name == "nt"
-            and hasattr(abs_path, "drive")
-            and hasattr(workspace, "drive")
-        ):
-            if (
-                abs_path.drive
-                and workspace.drive
-                and abs_path.drive != workspace.drive
-            ):
-                return True
-
-        abs_path.relative_to(workspace)
-        return False
-    except ValueError:
-        # Path is not relative to workspace
-        return True
+        return is_path_outside_boundary(str(abs_path), str(workspace))
     except (OSError, RuntimeError) as e:
         logger.debug(
             "Error checking workspace boundary for '%s': %s",
@@ -627,6 +612,54 @@ class RuleBasedToolGuardian(BaseToolGuardian):
     # Core interface
     # ------------------------------------------------------------------
 
+    def _check_shared_destructive(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+    ) -> list[GuardFinding]:
+        """Apply shared ``is_command_destructive`` hard-check.
+
+        Runs independently of YAML rules so ACP hard-block patterns and
+        ToolGuard stay aligned on the same ``BLOCKED_COMMAND_PATTERNS``.
+        """
+        if tool_name != "execute_shell_command":
+            return []
+
+        findings: list[GuardFinding] = []
+        for param_name, param_value in params.items():
+            if param_name != "command" and "command" not in param_name:
+                continue
+            value_str = str(param_value) if param_value is not None else ""
+            if not value_str or not is_command_destructive(value_str):
+                continue
+            findings.append(
+                GuardFinding(
+                    id=f"GUARD-{uuid.uuid4().hex}",
+                    rule_id="SAFETY_CHECKS_DESTRUCTIVE_COMMAND",
+                    category=GuardThreatCategory.RESOURCE_ABUSE,
+                    severity=GuardSeverity.CRITICAL,
+                    title=(
+                        "[CRITICAL] Destructive command matched shared "
+                        "safety check"
+                    ),
+                    description=(
+                        "Shared safety_checks.is_command_destructive "
+                        f"matched parameter '{param_name}' of tool "
+                        f"'{tool_name}'."
+                    ),
+                    tool_name=tool_name,
+                    param_name=param_name,
+                    matched_value=value_str[:200],
+                    remediation=(
+                        "Do not run catastrophic shell commands "
+                        "(e.g. recursive delete of system roots, "
+                        "mkfs, shutdown)."
+                    ),
+                    guardian=self.name,
+                ),
+            )
+        return findings
+
     def guard(
         self,
         tool_name: str,
@@ -634,6 +667,8 @@ class RuleBasedToolGuardian(BaseToolGuardian):
     ) -> list[GuardFinding]:
         """Scan all string-like parameter values against loaded rules."""
         findings: list[GuardFinding] = []
+        findings.extend(self._check_shared_destructive(tool_name, params))
+
         applicable_rules = [
             r for r in self._rules if r.applies_to_tool(tool_name)
         ]

@@ -898,9 +898,10 @@ class TestRuleBasedToolGuardianGuard:
             "execute_shell_command",
             {"command": "rm -rf /tmp"},
         )
-        assert len(findings) == 1
-        assert findings[0].snippet is not None
-        assert "rm" in findings[0].snippet
+        yaml_findings = [f for f in findings if f.rule_id == "R1"]
+        assert len(yaml_findings) == 1
+        assert yaml_findings[0].snippet is not None
+        assert "rm" in yaml_findings[0].snippet
 
     @pytest.mark.skipif(
         platform.system() == "Windows",
@@ -929,11 +930,15 @@ class TestRuleBasedToolGuardianGuard:
             "execute_shell_command",
             {"command": "rm -rf /etc/passwd"},
         )
-        assert len(findings) == 1
+        yaml_findings = [
+            f for f in findings if f.rule_id == "TOOL_CMD_DANGEROUS_RM"
+        ]
+        assert len(yaml_findings) == 1
         # Should have custom_hint metadata for outside workspace
-        assert "custom_hint" in findings[0].metadata
+        assert "custom_hint" in yaml_findings[0].metadata
         assert (
-            findings[0].metadata["custom_hint"]["type"] == "outside_workspace"
+            yaml_findings[0].metadata["custom_hint"]["type"]
+            == "outside_workspace"
         )
 
     def test_guard_rm_inside_workspace(
@@ -960,10 +965,84 @@ class TestRuleBasedToolGuardianGuard:
             "execute_shell_command",
             {"command": f"rm -rf {target}"},
         )
-        assert len(findings) == 1
-        assert "custom_hint" in findings[0].metadata
+        yaml_findings = [
+            f for f in findings if f.rule_id == "TOOL_CMD_DANGEROUS_RM"
+        ]
+        assert len(yaml_findings) == 1
+        assert "custom_hint" in yaml_findings[0].metadata
         assert (
-            findings[0].metadata["custom_hint"]["type"] == "general_reminder"
+            yaml_findings[0].metadata["custom_hint"]["type"]
+            == "general_reminder"
+        )
+
+
+class TestSharedSafetyChecksIntegration:
+    """ToolGuard guardians call shared safety_checks primitives."""
+
+    def test_is_outside_workspace_delegates_to_safety_checks(
+        self,
+        mock_workspace_root,
+    ):
+        """_is_outside_workspace uses is_path_outside_boundary."""
+        with patch(
+            "qwenpaw.security.tool_guard.guardians.rule_guardian"
+            ".is_path_outside_boundary",
+            return_value=True,
+        ) as mock_boundary:
+            result = _is_outside_workspace(
+                mock_workspace_root / "evil.txt",
+            )
+        assert result is True
+        mock_boundary.assert_called_once()
+        args = mock_boundary.call_args[0]
+        assert str(mock_workspace_root.resolve()) in args[1]
+
+    def test_guard_emits_shared_destructive_finding(
+        self,
+        tmp_path,
+        mock_config_rules,
+    ):
+        """is_command_destructive hits produce a CRITICAL finding."""
+        # Empty rules dir — shared check must still fire without YAML.
+        guardian = RuleBasedToolGuardian(rules_dir=tmp_path)
+        findings = guardian.guard(
+            "execute_shell_command",
+            {"command": "rm -rf /"},
+        )
+        assert any(
+            f.rule_id == "SAFETY_CHECKS_DESTRUCTIVE_COMMAND"
+            and f.severity == GuardSeverity.CRITICAL
+            for f in findings
+        )
+
+    def test_guard_skips_shared_check_for_safe_command(
+        self,
+        tmp_path,
+        mock_config_rules,
+    ):
+        """Safe shell commands do not get the shared destructive finding."""
+        guardian = RuleBasedToolGuardian(rules_dir=tmp_path)
+        findings = guardian.guard(
+            "execute_shell_command",
+            {"command": "echo hello"},
+        )
+        assert not any(
+            f.rule_id == "SAFETY_CHECKS_DESTRUCTIVE_COMMAND" for f in findings
+        )
+
+    def test_guard_skips_shared_check_for_non_shell_tools(
+        self,
+        tmp_path,
+        mock_config_rules,
+    ):
+        """Non-shell tools are not scanned by the shared hard-check."""
+        guardian = RuleBasedToolGuardian(rules_dir=tmp_path)
+        findings = guardian.guard(
+            "write_file",
+            {"path": "/tmp/x", "content": "rm -rf /"},
+        )
+        assert not any(
+            f.rule_id == "SAFETY_CHECKS_DESTRUCTIVE_COMMAND" for f in findings
         )
 
 
