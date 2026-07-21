@@ -125,6 +125,49 @@ def test_build_available_commands_set():
     assert names == set()
 
 
+async def test_registered_help_text_command_is_executed_and_advertised():
+    """A CommandSpec with help_text is executable and auto-advertised.
+
+    No secondary ``_ADVERTISED_*`` list is required — registering the
+    command with ``help_text`` is enough for ACP autocomplete.
+    """
+    from types import SimpleNamespace
+
+    from qwenpaw.runtime.slash_command_registry import (
+        CommandSpec,
+        SlashCommandRegistry,
+    )
+
+    registry = SlashCommandRegistry()
+    executed: list[str] = []
+
+    async def _handler(_ctx: object, args: str) -> None:
+        executed.append(args)
+        return None
+
+    registry.register(
+        CommandSpec(
+            name="demo_cmd",
+            handler=_handler,
+            help_text="Demo command for ACP advertise regression",
+        ),
+    )
+
+    # Executable via the shared registry.
+    result = await registry.dispatch("/demo_cmd hello", ctx=None)
+    assert result is None
+    assert executed == ["hello"]
+
+    # Auto-advertised through ACP without touching any advertise map.
+    agent = object.__new__(QwenPawACPAgent)
+    agent._workspace = SimpleNamespace(
+        plugins=SimpleNamespace(slash_command_registry=registry),
+    )
+    commands = agent._build_available_commands()
+    by_name = {cmd.name: cmd.description for cmd in commands}
+    assert by_name["demo_cmd"] == "Demo command for ACP advertise regression"
+
+
 async def test_new_session_advertises_commands():
     agent = QwenPawACPAgent(agent_id="default")
     conn = _FakeConn()

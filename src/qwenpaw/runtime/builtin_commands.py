@@ -247,12 +247,6 @@ def _make_control_adapter(
 def _collect_control_specs() -> list[CommandSpec]:
     from .commands.control import _COMMAND_REGISTRY
 
-    # Commands that should be advertised via ACP with descriptions.
-    _ADVERTISED_CONTROL_COMMANDS: dict[str, str] = {
-        "model": "Switch the active LLM model",
-        "skills": "List or manage available skills",
-    }
-
     specs = []
     seen_names: set[str] = set()
     for raw_name, handler in _COMMAND_REGISTRY.items():
@@ -260,7 +254,8 @@ def _collect_control_specs() -> list[CommandSpec]:
         if name in seen_names:
             continue
         seen_names.add(name)
-        help_text = _ADVERTISED_CONTROL_COMMANDS.get(name, "")
+        # Advertise from the handler's own definition site — no secondary map.
+        help_text = getattr(handler, "description", "") or ""
         specs.append(_make_control_adapter(handler, name, help_text=help_text))
     return specs
 
@@ -495,20 +490,16 @@ def _make_conversation_adapter(
     )
 
 
-# Commands that should be advertised via ACP with descriptions.
-_ADVERTISED_CONVERSATION_COMMANDS: dict[str, str] = {
-    "clear": "Clear the conversation context",
-    "compact": (
-        "Compact the conversation context; " "optional instruction supported"
-    ),
-}
-
-
 def _collect_conversation_specs() -> list[CommandSpec]:
+    # Advertise from SYSTEM_COMMAND_DESCRIPTIONS — the curated subset defined
+    # next to SYSTEM_COMMANDS in command_handler.py. Commands absent from that
+    # dict keep help_text="" and are not shown in ACP autocomplete.
+    from ..agents.command_handler import SYSTEM_COMMAND_DESCRIPTIONS
+
     return [
         _make_conversation_adapter(
             n,
-            help_text=_ADVERTISED_CONVERSATION_COMMANDS.get(n, ""),
+            help_text=SYSTEM_COMMAND_DESCRIPTIONS.get(n, ""),
         )
         for n in sorted(_CONVERSATION_COMMANDS)
     ]
