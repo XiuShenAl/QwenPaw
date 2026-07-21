@@ -91,6 +91,9 @@ class AgentBuilder:
                     ),
                 )
 
+        # Final pass: cover workspace + extras + memory in one filter.
+        tools = self.apply_subagent_tool_whitelist(tools, request_context)
+
         skill_dirs = self._resolve_skill_loader_dirs(
             effective_skills,
             workspace_dir,
@@ -110,24 +113,37 @@ class AgentBuilder:
         return getattr(tool, "__name__", "") or ""
 
     @classmethod
+    def apply_subagent_tool_whitelist(
+        cls,
+        tools: Iterable[Any],
+        request_context: dict[str, Any] | None,
+    ) -> list[Any]:
+        """Filter *tools* by ``subagent_allowed_tools`` (final-pass API).
+
+        - ``None`` / non-list → inherit (no filter)
+        - ``[]`` → deny all tools
+        - non-empty list → keep only matching python tool names
+        """
+        items = list(tools)
+        whitelist = (request_context or {}).get("subagent_allowed_tools")
+        if not isinstance(whitelist, list):
+            return items
+        if not whitelist:
+            return []
+        allow = set(whitelist)
+        return [t for t in items if cls._tool_name(t) in allow]
+
+    @classmethod
     def _filter_extra_tools_for_subagent(
         cls,
         extra_tools: Iterable[Any],
         request_context: dict[str, Any] | None,
     ) -> list[Any]:
-        """Apply ``subagent_allowed_tools`` to post-list_tools extras.
-
-        When the whitelist is an empty list, all extras are dropped.
-        When unset / not a list, extras pass through unchanged.
-        """
-        tools = list(extra_tools)
-        whitelist = (request_context or {}).get("subagent_allowed_tools")
-        if not isinstance(whitelist, list):
-            return tools
-        if not whitelist:
-            return []
-        allow = set(whitelist)
-        return [t for t in tools if cls._tool_name(t) in allow]
+        """Apply ``subagent_allowed_tools`` to post-list_tools extras."""
+        return cls.apply_subagent_tool_whitelist(
+            extra_tools,
+            request_context,
+        )
 
     @staticmethod
     def _resolve_skill_loader_dirs(
@@ -523,8 +539,11 @@ class AgentBuilder:
         agent_config: Any,
         request_context: dict[str, Any],
     ) -> Any:
-        """Enable Coding Mode for this request when ACP supplies a project."""
+        """Enable Coding Mode when ACP or fork worktree supplies a project."""
         raw_project_dir = request_context.get(ACP_CODING_PROJECT_META_KEY)
+        if not isinstance(raw_project_dir, str) or not raw_project_dir.strip():
+            # spawn_subagent(fork=True) places the worktree here.
+            raw_project_dir = request_context.get("fork_project_dir")
         if not isinstance(raw_project_dir, str) or not raw_project_dir.strip():
             return agent_config
 

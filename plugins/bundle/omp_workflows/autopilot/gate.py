@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Autopilot gate — 6-phase pipeline with anti-stall detection."""
+"""Autopilot gate — lifecycle pipeline with cleanup + completed."""
 
 from __future__ import annotations
 
@@ -16,8 +16,14 @@ from ..shared.constants import (
     AUTOPILOT_MAX_PHASE_ITERATIONS,
     AUTOPILOT_MAX_VALIDATION_ROUNDS,
 )
+from ..shared.fork_guard import forks_integrated, merge_blocked_continuation
+from ..shared.role_prompts import FORK_MERGE_PROTOCOL
 from ..shared.state import WorkflowState
 from .prompts import build_continuation as _build_prompt
+
+_POST_FORK_PHASES = frozenset(
+    {"qa", "validation", "cleanup", "completed"},
+)
 
 
 @dataclass
@@ -35,6 +41,7 @@ class _AutopilotState:
     validation_round: int = 0
     max_validation_rounds: int = AUTOPILOT_MAX_VALIDATION_ROUNDS
     phase: str = "expansion"
+    blocked_on_merge: bool = False
 
 
 class AutopilotGate(LoopGate):
@@ -107,7 +114,21 @@ class AutopilotGate(LoopGate):
             st.validation_round,
         )
 
-        if phase == "cleanup":
+        if phase in _POST_FORK_PHASES and not forks_integrated(data):
+            st.blocked_on_merge = True
+            st.phase = "execution"
+            await asyncio.to_thread(
+                wf.update_state,
+                {"phase": "execution"},
+            )
+            return StopHandlerResult(
+                action=StopAction.INTERRUPT_AND_CONTINUE,
+                reason="Autopilot blocked: forks not integrated",
+            )
+
+        st.blocked_on_merge = False
+
+        if phase == "completed":
             await asyncio.to_thread(wf.cleanup)
             self.deactivate()
             return StopHandlerResult(
@@ -151,6 +172,8 @@ class AutopilotGate(LoopGate):
         st: _AutopilotState | None = self._state()
         if st is None:
             return ""
+        if st.blocked_on_merge:
+            return merge_blocked_continuation(FORK_MERGE_PROTOCOL)
         return _build_prompt(
             phase=st.phase,
             iteration=st.iteration,

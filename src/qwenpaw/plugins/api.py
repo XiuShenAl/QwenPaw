@@ -846,39 +846,40 @@ class PluginApi:  # pylint: disable=too-many-public-methods
     ) -> None:
         """Register a plugin-contributed AgentMode.
 
-        The mode is instantiated and registered into every workspace
-        on startup, and into newly created workspaces via a
-        workspace_created hook. Runtime lifecycle callbacks receive
-        the current ``HookContext``.
+        A **fresh instance** is created for each workspace on startup
+        and for every newly created workspace.  Stateful modes (gates,
+        stop handlers) must not share a single instance across
+        workspaces — ``setup()`` binds a gate to that workspace's
+        stop-handler list.
 
         Args:
             mode_cls: An ``AgentMode`` subclass with a unique
                 ``name`` class attribute.
         """
-        mode_instance = mode_cls()
+        mode_name = getattr(mode_cls, "name", None) or mode_cls.__name__
 
         def _register_mode():
-            self._register_mode_to_all_workspaces(mode_instance)
+            self._register_mode_cls_to_all_workspaces(mode_cls)
 
         def _on_workspace_created(workspace_info: dict):
-            self._register_mode_to_workspace(
-                mode_instance,
+            self._register_mode_cls_to_workspace(
+                mode_cls,
                 workspace_info,
             )
 
         self.register_startup_hook(
-            hook_name=(f"mode_{self.plugin_id}_{mode_instance.name}"),
+            hook_name=(f"mode_{self.plugin_id}_{mode_name}"),
             callback=_register_mode,
             priority=70,
         )
         self.register_workspace_created_hook(
-            hook_name=(f"mode_ws_{self.plugin_id}_{mode_instance.name}"),
+            hook_name=(f"mode_ws_{self.plugin_id}_{mode_name}"),
             callback=_on_workspace_created,
             priority=70,
         )
         logger.info(
             f"Plugin '{self.plugin_id}' scheduled mode "
-            f"'{mode_instance.name}' for registration",
+            f"'{mode_name}' for registration",
         )
 
     def register_runtime_hook(
@@ -1102,27 +1103,27 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 f"Slash cmd already registered: {exc}",
             )
 
-    def _register_mode_to_all_workspaces(self, mode):
-        """Register an AgentMode to all workspaces."""
+    def _register_mode_cls_to_all_workspaces(self, mode_cls: Type) -> None:
+        """Instantiate and register *mode_cls* on every workspace."""
         for ws in self._get_all_workspaces():
             try:
-                ws.plugins.register_mode(mode, ws)
+                ws.plugins.register_mode(mode_cls(), ws)
             except ValueError as exc:
                 logger.debug(
                     f"Mode already registered: {exc}",
                 )
 
-    def _register_mode_to_workspace(
+    def _register_mode_cls_to_workspace(
         self,
-        mode,
+        mode_cls: Type,
         workspace_info: dict,
-    ):
-        """Register an AgentMode to a specific workspace."""
+    ) -> None:
+        """Instantiate and register *mode_cls* on one workspace."""
         ws = self._get_workspace_from_info(workspace_info)
         if ws is None:
             return
         try:
-            ws.plugins.register_mode(mode, ws)
+            ws.plugins.register_mode(mode_cls(), ws)
         except ValueError as exc:
             logger.debug(
                 f"Mode already registered: {exc}",

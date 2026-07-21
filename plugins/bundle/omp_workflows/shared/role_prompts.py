@@ -196,3 +196,28 @@ def format_batch_item(
         lines.append(f'{pad}  "fork": true,')
     lines.append(f"{pad}}}")
     return "\n".join(lines)
+
+
+FORK_MERGE_PROTOCOL = """\
+Fork integration (REQUIRED when any worker used fork=True):
+- Each forked worker result includes [FORK_BRANCH: <branch>] and works
+  in an isolated git worktree. Changes are NOT in the main workspace
+  until you merge them.
+- After ALL workers finish, for each [FORK_BRANCH]:
+  1. `git merge --no-ff <branch>` (or cherry-pick the commits) into
+     the current branch of the main workspace.
+  2. On conflict: resolve or abort. Do NOT advance the workflow phase
+     and do NOT report completion while conflicts remain.
+- If no worker used fork=True, still set forks_integrated=true explicitly.
+- After successful integration, update state.json:
+  set forks_integrated=true.
+- The stop gate REJECTS phase completion until forks_integrated=true."""
+
+
+def fork_merge_instructions(indent: str = "") -> str:
+    """Return the fork merge protocol block, optionally indented."""
+    if not indent:
+        return FORK_MERGE_PROTOCOL
+    return "\n".join(
+        indent + line for line in FORK_MERGE_PROTOCOL.splitlines()
+    )

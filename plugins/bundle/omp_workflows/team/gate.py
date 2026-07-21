@@ -15,8 +15,12 @@ from ..shared.constants import (
     TEAM_MAX_FIX_ATTEMPTS,
     TEAM_MAX_ITERATIONS,
 )
+from ..shared.fork_guard import forks_integrated, merge_blocked_continuation
+from ..shared.role_prompts import FORK_MERGE_PROTOCOL
 from ..shared.state import WorkflowState
 from .prompts import build_continuation as _build_prompt
+
+_POST_FORK_PHASES = frozenset({"verify", "fix", "completed"})
 
 
 @dataclass
@@ -31,6 +35,7 @@ class _TeamState:
     fix_attempts: int = 0
     max_fix_attempts: int = TEAM_MAX_FIX_ATTEMPTS
     phase: str = "plan"
+    blocked_on_merge: bool = False
 
 
 class TeamPipelineGate(LoopGate):
@@ -73,7 +78,10 @@ class TeamPipelineGate(LoopGate):
         self.activate(state)
         return loop_dir
 
-    async def check(self, ctx: Any) -> Optional[StopHandlerResult]:
+    async def check(  # pylint: disable=too-many-return-statements
+        self,
+        ctx: Any,
+    ) -> Optional[StopHandlerResult]:
         if isinstance(ctx, dict) and ctx.get("has_tool_calls"):
             return StopHandlerResult(action=StopAction.BYPASS)
 
@@ -102,6 +110,20 @@ class TeamPipelineGate(LoopGate):
         prev_phase = st.phase
         phase = data.get("current_phase", "plan")
         st.phase = phase
+
+        if phase in _POST_FORK_PHASES and not forks_integrated(data):
+            st.blocked_on_merge = True
+            st.phase = "exec"
+            await asyncio.to_thread(
+                wf.update_state,
+                {"current_phase": "exec"},
+            )
+            return StopHandlerResult(
+                action=StopAction.INTERRUPT_AND_CONTINUE,
+                reason="Team blocked: forks not integrated",
+            )
+
+        st.blocked_on_merge = False
 
         if phase == "completed":
             await asyncio.to_thread(wf.cleanup)
@@ -136,6 +158,8 @@ class TeamPipelineGate(LoopGate):
         st: _TeamState | None = self._state()
         if st is None:
             return ""
+        if st.blocked_on_merge:
+            return merge_blocked_continuation(FORK_MERGE_PROTOCOL)
         return _build_prompt(
             phase=st.phase,
             iteration=st.iteration,

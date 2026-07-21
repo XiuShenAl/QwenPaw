@@ -1188,7 +1188,17 @@ async def _spawn_forked_subagent(
     worktree_path = fork_result.get("worktree_path", "")
     worktree_branch = fork_result.get("worktree_branch", "")
 
-    fork_extra = {"fork_project_dir": worktree_path} if worktree_path else None
+    fork_extra: dict[str, Any] | None = None
+    if worktree_path:
+        # ``fork_project_dir`` is the spawn-level key; also set the ACP
+        # coding-project meta key so AgentBuilder rebinds tools/cwd to
+        # the worktree (see ``_apply_request_coding_project``).
+        from ..acp.meta import ACP_CODING_PROJECT_META_KEY
+
+        fork_extra = {
+            "fork_project_dir": worktree_path,
+            ACP_CODING_PROJECT_META_KEY: worktree_path,
+        }
     request_context = _build_subagent_request_context(
         current_agent_id,
         allowed_tools=allowed_tools,

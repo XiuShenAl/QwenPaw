@@ -105,7 +105,9 @@ class QwenPawAgent(CodingModeMixin, Agent):
 
         self.memory_manager = memory_manager
 
-        # Register memory tools into toolkit
+        # Register memory tools, then apply a final whitelist pass so
+        # subagent_allowed_tools=[] truly denies every tool (including
+        # memory / future post-toolkit injections).
         if self.memory_manager is not None:
             memory_tools = self.memory_manager.list_memory_tools()
             basic_group = toolkit.tool_groups[0]
@@ -123,6 +125,7 @@ class QwenPawAgent(CodingModeMixin, Agent):
                 "Registered memory tools: %s",
                 [fn.__name__ for fn in memory_tools],
             )
+        self._apply_subagent_tool_whitelist(toolkit)
 
         init_kwargs: dict[str, Any] = {
             "name": name,
@@ -147,6 +150,20 @@ class QwenPawAgent(CodingModeMixin, Agent):
         self.memory = None  # type: ignore[assignment]
 
         self._register_tool_call_hooks()
+
+    def _apply_subagent_tool_whitelist(self, toolkit: Any) -> None:
+        """Filter every toolkit group by ``subagent_allowed_tools``."""
+        from ..runtime.builder import AgentBuilder
+
+        groups = getattr(toolkit, "tool_groups", None) or []
+        for group in groups:
+            tools = getattr(group, "tools", None)
+            if not isinstance(tools, list):
+                continue
+            group.tools = AgentBuilder.apply_subagent_tool_whitelist(
+                tools,
+                self._request_context,
+            )
 
     async def compress_context(
         self,
