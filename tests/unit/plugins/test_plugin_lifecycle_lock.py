@@ -1,0 +1,158 @@
+# -*- coding: utf-8 -*-
+# pylint: disable=protected-access
+"""Per-plugin lifecycle lock serializes load/unload/reinstall."""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import pytest
+
+from qwenpaw.governance.tool_registry import (
+    DEFAULT_REGISTRY,
+    register_tool_governance,
+)
+from qwenpaw.plugins.api import (
+    _TOOL_PLUGIN_OWNERS,
+    release_tool_ownership_for_plugin,
+)
+from qwenpaw.plugins.architecture import (
+    PluginEntryPoints,
+    PluginManifest,
+    PluginRecord,
+)
+from qwenpaw.plugins.loader import PluginLoader
+from qwenpaw.plugins.registry import PluginRegistry
+
+
+@pytest.mark.asyncio
+async def test_plugin_lifecycle_serializes_same_id():
+    """Same plugin_id critical sections must not interleave."""
+    loader = PluginLoader(plugin_dirs=[])
+    order: list[str] = []
+
+    async def hold(tag: str) -> None:
+        async with loader.plugin_lifecycle("p1"):
+            order.append(f"{tag}-enter")
+            await asyncio.sleep(0.05)
+            order.append(f"{tag}-exit")
+
+    await asyncio.gather(hold("a"), hold("b"))
+    assert order in (
+        ["a-enter", "a-exit", "b-enter", "b-exit"],
+        ["b-enter", "b-exit", "a-enter", "a-exit"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_plugin_lifecycle_allows_different_ids_concurrently():
+    """Unrelated plugins may enter lifecycle sections together."""
+    loader = PluginLoader(plugin_dirs=[])
+    in_critical = 0
+    max_in_critical = 0
+    lock = asyncio.Lock()
+
+    async def hold(plugin_id: str) -> None:
+        nonlocal in_critical, max_in_critical
+        async with loader.plugin_lifecycle(plugin_id):
+            async with lock:
+                in_critical += 1
+                max_in_critical = max(max_in_critical, in_critical)
+            await asyncio.sleep(0.05)
+            async with lock:
+                in_critical -= 1
+
+    await asyncio.gather(hold("p-a"), hold("p-b"))
+    assert max_in_critical == 2
+
+
+@pytest.mark.asyncio
+async def test_stale_unload_cannot_delete_tools_from_concurrent_reload():
+    """Unload must not race a force-reinstall and wipe the new tools."""
+    plugin_id = "__ut_lifecycle_race__"
+    tool_name = "__ut_lifecycle_race_tool__"
+    release_tool_ownership_for_plugin(plugin_id)
+    DEFAULT_REGISTRY.unregister_python_tool(tool_name)
+
+    old = PluginRegistry._instance
+    PluginRegistry._instance = None
+    try:
+        preg = PluginRegistry()
+        loader = PluginLoader(plugin_dirs=[])
+        loader.registry = preg
+        manifest = PluginManifest(
+            id=plugin_id,
+            name="Race",
+            version="1.0.0",
+            entry=PluginEntryPoints(backend="plugin.py"),
+            meta={"tool_name": tool_name},
+        )
+        loader._loaded_plugins[plugin_id] = PluginRecord(
+            manifest=manifest,
+            source_path=Path("/fake-lifecycle-race"),
+            enabled=True,
+            instance=None,
+        )
+        register_tool_governance(
+            DEFAULT_REGISTRY,
+            python_name=tool_name,
+            tool_type="network",
+            owner=plugin_id,
+        )
+        _TOOL_PLUGIN_OWNERS[tool_name] = plugin_id
+
+        reinstall_entered = asyncio.Event()
+        unload_started = asyncio.Event()
+        release_reinstall = asyncio.Event()
+
+        async def force_reinstall() -> None:
+            async with loader.plugin_lifecycle(plugin_id):
+                reinstall_entered.set()
+                await unload_started.wait()
+                # Yield so a racy unload would proceed without the lock.
+                await asyncio.sleep(0)
+                await loader.unload_plugin(plugin_id)
+                # Simulate reload re-claiming the same tool identity.
+                register_tool_governance(
+                    DEFAULT_REGISTRY,
+                    python_name=tool_name,
+                    tool_type="shell",
+                    target_param="command",
+                    owner=plugin_id,
+                )
+                _TOOL_PLUGIN_OWNERS[tool_name] = plugin_id
+                loader._loaded_plugins[plugin_id] = PluginRecord(
+                    manifest=manifest,
+                    source_path=Path("/fake-lifecycle-race-v2"),
+                    enabled=True,
+                    instance=None,
+                )
+                await release_reinstall.wait()
+
+        async def stale_unload() -> None:
+            await reinstall_entered.wait()
+            unload_started.set()
+            await loader.unload_plugin(plugin_id)
+
+        reinstall_task = asyncio.create_task(force_reinstall())
+        unload_task = asyncio.create_task(stale_unload())
+
+        # Stale unload must block while reinstall holds the lifecycle lock.
+        await asyncio.sleep(0.05)
+        assert not unload_task.done()
+        assert _TOOL_PLUGIN_OWNERS.get(tool_name) == plugin_id
+        assert DEFAULT_REGISTRY.get_owner(tool_name) == plugin_id
+
+        release_reinstall.set()
+        await reinstall_task
+        await unload_task
+
+        # Stale unload ran only after reinstall finished, so it removed
+        # the post-reload registration cleanly (no torn mid-reload state).
+        assert tool_name not in _TOOL_PLUGIN_OWNERS
+        assert plugin_id not in loader._loaded_plugins
+    finally:
+        release_tool_ownership_for_plugin(plugin_id)
+        DEFAULT_REGISTRY.unregister_python_tool(tool_name)
+        PluginRegistry._instance = old

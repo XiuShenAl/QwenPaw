@@ -439,6 +439,61 @@ def _collect_plugin_runtime_ids(
     return provider_ids, command_names
 
 
+async def _load_plugin_with_optional_force_reinstall(
+    loader,
+    request: Request,
+    source_path: Path,
+    *,
+    force: bool,
+):
+    """Load a plugin, optionally unloading first under one lifecycle lock.
+
+    Force-reinstall must hold :meth:`PluginLoader.plugin_lifecycle` across
+    unload + load so a concurrent unload cannot delete tools that the
+    reload just registered.
+    """
+    from ...config.utils import get_plugins_dir
+
+    install_dir = get_plugins_dir()
+    existing_id: Optional[str] = None
+    if force:
+        manifest_path = source_path / "plugin.json"
+        if manifest_path.exists():
+            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+            existing_id = raw.get("id")
+
+    if not (force and existing_id):
+        return await loader.load_plugin_from_path(
+            source_path=source_path,
+            install_dir=install_dir,
+        )
+
+    async with loader.plugin_lifecycle(existing_id):
+        if loader.get_loaded_plugin(existing_id) is not None:
+            logger.info(
+                "Force-reinstall: unloading '%s' before re-installing",
+                existing_id,
+            )
+            provider_ids, command_names = _collect_plugin_runtime_ids(
+                loader.registry,
+                existing_id,
+            )
+            await loader.unload_plugin(
+                existing_id,
+                delete_files=False,
+            )
+            _post_unload_cleanup(
+                request,
+                existing_id,
+                provider_ids,
+                command_names,
+            )
+        return await loader.load_plugin_from_path(
+            source_path=source_path,
+            install_dir=install_dir,
+        )
+
+
 # ── Routes ───────────────────────────────────────────────────────────────
 
 
@@ -554,43 +609,11 @@ async def install_plugin(
                     detail=f"Path not found: {source}",
                 )
 
-        from ...config.utils import get_plugins_dir
-
-        # Force-reinstall: unload the existing plugin first so that
-        # load_plugin_from_path can proceed without a conflict.
-        if body.force:
-            manifest_path = source_path / "plugin.json"
-            if manifest_path.exists():
-                raw = json.loads(
-                    manifest_path.read_text(encoding="utf-8"),
-                )
-                existing_id = raw.get("id")
-                if (
-                    existing_id
-                    and loader.get_loaded_plugin(existing_id) is not None
-                ):
-                    logger.info(
-                        f"Force-reinstall: unloading '{existing_id}'"
-                        " before re-installing",
-                    )
-                    _f_pids, _f_cmds = _collect_plugin_runtime_ids(
-                        loader.registry,
-                        existing_id,
-                    )
-                    await loader.unload_plugin(
-                        existing_id,
-                        delete_files=False,
-                    )
-                    _post_unload_cleanup(
-                        request,
-                        existing_id,
-                        _f_pids,
-                        _f_cmds,
-                    )
-
-        record = await loader.load_plugin_from_path(
-            source_path=source_path,
-            install_dir=get_plugins_dir(),
+        record = await _load_plugin_with_optional_force_reinstall(
+            loader,
+            request,
+            source_path,
+            force=body.force,
         )
     except HTTPException:
         raise
@@ -664,42 +687,11 @@ async def upload_plugin(
 
         source_path = _find_plugin_dir(temp_dir)
 
-        from ...config.utils import get_plugins_dir
-
-        # Force-reinstall: unload existing plugin before re-installing
-        if force:
-            manifest_path = source_path / "plugin.json"
-            if manifest_path.exists():
-                raw = json.loads(
-                    manifest_path.read_text(encoding="utf-8"),
-                )
-                existing_id = raw.get("id")
-                if (
-                    existing_id
-                    and loader.get_loaded_plugin(existing_id) is not None
-                ):
-                    logger.info(
-                        f"Force-reinstall: unloading '{existing_id}'"
-                        " before re-installing",
-                    )
-                    _u_pids, _u_cmds = _collect_plugin_runtime_ids(
-                        loader.registry,
-                        existing_id,
-                    )
-                    await loader.unload_plugin(
-                        existing_id,
-                        delete_files=False,
-                    )
-                    _post_unload_cleanup(
-                        request,
-                        existing_id,
-                        _u_pids,
-                        _u_cmds,
-                    )
-
-        record = await loader.load_plugin_from_path(
-            source_path=source_path,
-            install_dir=get_plugins_dir(),
+        record = await _load_plugin_with_optional_force_reinstall(
+            loader,
+            request,
+            source_path,
+            force=force,
         )
     except HTTPException:
         raise

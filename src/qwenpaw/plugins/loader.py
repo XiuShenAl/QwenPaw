@@ -12,8 +12,10 @@ import shutil
 import subprocess
 import sys
 import threading
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _dist_version
@@ -90,6 +92,15 @@ def _is_disabled_plugin_dir(path: Path) -> bool:
     return name.startswith(".") or name.endswith(".disabled")
 
 
+# Task-local plugin_id currently holding PluginLoader.plugin_lifecycle.
+# Enables re-entrant load_plugin_from_path → load_plugin and router
+# force-reinstall (unload then load) under one critical section.
+_LIFECYCLE_HELD_PLUGIN: ContextVar[Optional[str]] = ContextVar(
+    "qwenpaw_plugin_lifecycle_held",
+    default=None,
+)
+
+
 def _ensure_plugin_site_on_path() -> None:
     """Put the plugin-deps site dir on ``sys.path`` (idempotent).
 
@@ -128,6 +139,45 @@ class PluginLoader:
         self.plugin_dirs = [Path(d) for d in plugin_dirs]
         self.registry = PluginRegistry()
         self._loaded_plugins: Dict[str, PluginRecord] = {}
+        # In-process per-plugin serialization for load/unload/reinstall.
+        # Distinct from the inter-process install-deps file lock.
+        self._lifecycle_locks: Dict[str, asyncio.Lock] = {}
+        self._lifecycle_locks_mu = threading.Lock()
+
+    def _lifecycle_lock_for(self, plugin_id: str) -> asyncio.Lock:
+        """Return the asyncio lock that serializes *plugin_id* lifecycle."""
+        with self._lifecycle_locks_mu:
+            lock = self._lifecycle_locks.get(plugin_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._lifecycle_locks[plugin_id] = lock
+            return lock
+
+    @asynccontextmanager
+    async def plugin_lifecycle(
+        self,
+        plugin_id: str,
+    ) -> AsyncIterator[None]:
+        """Serialize load/unload/reinstall for one *plugin_id*.
+
+        Re-entrant for the same plugin on the same task so nested
+        ``load_plugin_from_path`` → ``load_plugin`` and router
+        force-reinstall (unload then load) share one critical section.
+        Unrelated plugin IDs may proceed concurrently.
+        """
+        if not plugin_id:
+            yield
+            return
+        if _LIFECYCLE_HELD_PLUGIN.get() == plugin_id:
+            yield
+            return
+        lock = self._lifecycle_lock_for(plugin_id)
+        async with lock:
+            token = _LIFECYCLE_HELD_PLUGIN.set(plugin_id)
+            try:
+                yield
+            finally:
+                _LIFECYCLE_HELD_PLUGIN.reset(token)
 
     def discover_plugins(self) -> List[Tuple[PluginManifest, Path]]:
         """Discover all plugins in plugin directories.
@@ -535,6 +585,20 @@ class PluginLoader:
             AttributeError: If plugin module doesn't export required objects
             Exception: If plugin registration fails
         """
+        async with self.plugin_lifecycle(manifest.id):
+            return await self._load_plugin_unlocked(
+                manifest,
+                source_path,
+                config,
+            )
+
+    async def _load_plugin_unlocked(
+        self,
+        manifest: PluginManifest,
+        source_path: Path,
+        config: Optional[Dict] = None,
+    ) -> PluginRecord:
+        """Load a plugin; caller must hold :meth:`plugin_lifecycle`."""
         plugin_id = manifest.id
 
         if plugin_id in self._loaded_plugins:
@@ -930,6 +994,23 @@ class PluginLoader:
 
         manifest = self._load_manifest(manifest_path)
         plugin_id = manifest.id
+        async with self.plugin_lifecycle(plugin_id):
+            return await self._load_plugin_from_path_unlocked(
+                source_path,
+                manifest,
+                config,
+                install_dir,
+            )
+
+    async def _load_plugin_from_path_unlocked(
+        self,
+        source_path: Path,
+        manifest: PluginManifest,
+        config: Optional[Dict] = None,
+        install_dir: Optional[Path] = None,
+    ) -> PluginRecord:
+        """Install+load from path; caller must hold lifecycle for id."""
+        plugin_id = manifest.id
 
         if plugin_id in self._loaded_plugins:
             raise ValueError(
@@ -994,6 +1075,15 @@ class PluginLoader:
         Raises:
             KeyError: If the plugin is not currently loaded
         """
+        async with self.plugin_lifecycle(plugin_id):
+            await self._unload_plugin_unlocked(plugin_id, delete_files)
+
+    async def _unload_plugin_unlocked(
+        self,
+        plugin_id: str,
+        delete_files: bool = False,
+    ) -> None:
+        """Unload a plugin; caller must hold :meth:`plugin_lifecycle`."""
         record = self._loaded_plugins.get(plugin_id)
         if record is None:
             raise KeyError(
