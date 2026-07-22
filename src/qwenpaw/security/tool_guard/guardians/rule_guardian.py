@@ -600,7 +600,12 @@ def _shared_safety_findings(
         value_str = str(param_value) if param_value is not None else ""
         if not value_str:
             continue
-        kind = classify_destructive_command(value_str)
+        # Resolve relative wipe targets against the ToolGuard workspace,
+        # not the process cwd (which may differ from the shell cwd).
+        kind = classify_destructive_command(
+            value_str,
+            cwd=_get_workspace_root(),
+        )
         if kind is None:
             continue
         if kind == "catastrophic":

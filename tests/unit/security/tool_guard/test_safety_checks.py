@@ -12,7 +12,7 @@ from qwenpaw.security.tool_guard.safety_checks import (
 )
 
 
-class TestIsCommandDestructive:
+class TestIsCommandDestructive:  # pylint: disable=too-many-public-methods
     """Verify destructive command pattern matching."""
 
     @pytest.mark.parametrize(
@@ -20,6 +20,9 @@ class TestIsCommandDestructive:
         [
             "rm -rf /",
             "rm -rf /*",
+            "rm -rf -- /*",
+            "rm -rf --/*",
+            "rm -rf --/",
             "rm -f -r /",
             "rm --force --recursive /",
             "rm -rf /./",
@@ -30,6 +33,20 @@ class TestIsCommandDestructive:
             "rm -rf /home",
             "rm -rf /home/alice",
             "rm -rf /Users/alice",
+            "rm -rf /Users/alice/*",
+            "rm -rf /home/alice/*",
+            "rm -rf /Users/alice/./*",
+            "rm -rf /home/alice/./*",
+            "rm -rf /Users/*",
+            "rm -rf ~/*",
+            "rm -rf ~/./*",
+            "rm -rf $HOME/*",
+            "rm -rf $HOME/./*",
+            "rm -rf ~alice",
+            "rm -rf ~root",
+            "rm -rf ~alice/*",
+            "rm -rf ~alice/./*",
+            "rm -rf ~root/*",
             "rm -rf /root",
             "rm -rf /boot",
             "rm -rf /dev",
@@ -61,15 +78,30 @@ class TestIsCommandDestructive:
             "Remove-Item -Recurse -Force C:\\",
             "Remove-Item -Recurse -Force C:\\*",
             'Remove-Item -Recurse -Force "C:\\"',
+            "Remove-Item -Recurse -Force C:\\Users",
+            "Remove-Item -Recurse -Force C:\\Users\\*",
+            "Remove-Item -Recurse -Force C:\\Users\\me",
+            "Remove-Item -Recurse -Force C:\\Users\\me\\*",
+            "Remove-Item -Recurse -Force C:\\Windows",
+            "Remove-Item -Recurse -Force C:\\Windows\\*",
+            "Remove-Item -Recurse -Force C:\\Windows\\System32",
             "rm -Recurse -Force C:\\",
             'rm -Recurse -Force "C:\\"',
             "del /s /q C:\\",
             "del /s /q C:\\*",
+            "del /s /q C:\\Users",
             'del /s /q "C:\\"',
             "rd /s /q C:\\",
+            "rd /s /q C:\\Windows",
             'rd /s /q "C:\\"',
             "rmdir /s /q C:\\",
             "format C:",
+            # Mount/runtime roots (not full subtree).
+            "rm -rf /mnt",
+            "rm -rf /mnt/*",
+            "rm -rf /media",
+            "rm -rf /run",
+            "rm -rf /srv",
         ],
     )
     def test_blocks_known_dangerous_commands(self, command: str) -> None:
@@ -90,9 +122,31 @@ class TestIsCommandDestructive:
             "rm -rf /tmp",
             "rm -rf /tmp/cache",
             "rm -rf '/tmp/cache'",
+            "rm -rf /private/tmp/foo",
+            "rm -rf /var/tmp/foo",
+            "rm -rf /private/var/tmp/foo",
             "rm -rf /var/folders/xx/workspace/build",
             "rm -rf /private/var/folders/xx/workspace/build",
             "rm -rf /homeless",
+            # Home *workspace* absolute paths must not be shared-catastrophic
+            # (default auto-deny would hard-reject normal cleanups).
+            "rm -rf /Users/alice/AgentScope/QwenPaw/build",
+            "rm -rf /home/alice/project/dist",
+            "rm -rf /Users/alice/.qwenpaw/build",
+            "rm -rf ~/project",
+            "rm -rf ~/project/build",
+            "rm -rf ~/project/./*",
+            "rm -rf ~alice/project",
+            "rm -rf ~alice/project/build",
+            "rm -rf ~alice/project/./*",
+            "rm -rf $HOME/project",
+            "rm -rf $HOME/project/dist",
+            # WSL / mount / runtime workspace paths (root-only policy).
+            "rm -rf /mnt/c/Users/me/project/build",
+            "rm -rf /mnt/data/workspace/.cache",
+            "rm -rf /media/user/USB/project/dist",
+            "rm -rf /run/user/1000/project/tmp",
+            "rm -rf /srv/www/app/cache",
             # Substring / script-name false positives must not hard-match.
             "echo reboot later",
             "npm run reboot",
@@ -130,6 +184,421 @@ class TestIsCommandDestructive:
         assert classify_destructive_command("npm run reboot") is None
         assert is_command_catastrophic("rm -rf /") is True
         assert is_command_catastrophic("reboot") is False
+
+    def test_glued_endopts_root_wipe_is_catastrophic(self) -> None:
+        """``--/*`` must not be skipped as a long option flag."""
+        assert is_command_catastrophic("rm -rf --/*") is True
+        assert is_command_catastrophic("rm -rf --/") is True
+
+    def test_home_root_still_catastrophic_but_workspace_subpath_not(
+        self,
+    ) -> None:
+        """Wipe the home directory itself; not a project under the home."""
+        assert is_command_catastrophic("rm -rf /Users/alice") is True
+        assert is_command_catastrophic("rm -rf /home/alice") is True
+        assert is_command_catastrophic("rm -rf /Users") is True
+        assert is_command_catastrophic("rm -rf ~") is True
+        assert is_command_catastrophic("rm -rf $HOME") is True
+        # Home-content globs are equivalent to wiping the home.
+        assert is_command_catastrophic("rm -rf /Users/alice/*") is True
+        assert is_command_catastrophic("rm -rf /home/alice/*") is True
+        assert is_command_catastrophic("rm -rf /Users/alice/./*") is True
+        assert is_command_catastrophic("rm -rf /home/alice/./*") is True
+        assert is_command_catastrophic("rm -rf ~/*") is True
+        assert is_command_catastrophic("rm -rf ~/./*") is True
+        assert is_command_catastrophic("rm -rf $HOME/*") is True
+        assert is_command_catastrophic("rm -rf $HOME/./*") is True
+        # Named-user home wipe (~user / ~user/* / ~user/./*).
+        assert is_command_catastrophic("rm -rf ~alice") is True
+        assert is_command_catastrophic("rm -rf ~root") is True
+        assert is_command_catastrophic("rm -rf ~alice/*") is True
+        assert is_command_catastrophic("rm -rf ~alice/./*") is True
+        assert is_command_catastrophic("rm -rf ~root/*") is True
+        assert (
+            is_command_catastrophic("rm -rf /Users/alice/proj/build") is False
+        )
+        assert is_command_catastrophic("rm -rf ~/proj") is False
+        assert is_command_catastrophic("rm -rf ~/proj/build") is False
+        assert is_command_catastrophic("rm -rf ~/proj/./*") is False
+        assert is_command_catastrophic("rm -rf ~alice/proj") is False
+        assert is_command_catastrophic("rm -rf ~alice/proj/build") is False
+        assert is_command_catastrophic("rm -rf ~alice/proj/./*") is False
+
+    def test_relative_wipe_uses_provided_cwd(self, tmp_path) -> None:
+        """Relative ``../`` resolves against *cwd*, not process cwd."""
+        import os
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        # From a temp workspace, ``../`` stays inside the temp tree.
+        assert (
+            classify_destructive_command(
+                "rm -rf ../",
+                cwd=workspace,
+            )
+            is None
+        )
+        if os.name == "nt":
+            return
+        # On POSIX, parent of /etc/ssl is /etc → catastrophic.
+        assert (
+            classify_destructive_command(
+                "rm -rf ../",
+                cwd="/etc/ssl",
+            )
+            == "catastrophic"
+        )
+
+    def test_b1_normalize_before_home_glob_match(self) -> None:
+        """B1: collapse /./ // .. before home-root / home-content checks."""
+        import os
+
+        # Equivalent spellings of home-content wipes (must HIT).
+        assert is_command_catastrophic("rm -rf ~/././*") is True
+        assert is_command_catastrophic("rm -rf $HOME/././*") is True
+        assert is_command_catastrophic("rm -rf /Users/alice/././*") is True
+        assert is_command_catastrophic("rm -rf ~alice/././*") is True
+        assert is_command_catastrophic("rm -rf /Users/alice//*") is True
+        assert is_command_catastrophic("rm -rf /Users//alice/*") is True
+        assert is_command_catastrophic("rm -rf //Users/alice/*") is True
+        assert is_command_catastrophic("rm -rf /./Users/alice/*") is True
+        assert is_command_catastrophic("rm -rf /./home/alice/*") is True
+        assert is_command_catastrophic("rm -rf /Users/alice/foo/../*") is True
+        assert is_command_catastrophic("rm -rf ~/foo/../*") is True
+        assert is_command_catastrophic("rm -rf $HOME/foo/../*") is True
+        assert is_command_catastrophic("rm -rf ~alice/bar/baz/../../*") is True
+        # Must NOT false-positive on workspace globs / concrete subpaths.
+        assert is_command_catastrophic("rm -rf ~/project/./*") is False
+        assert (
+            is_command_catastrophic("rm -rf /Users/alice/project/build")
+            is False
+        )
+
+        if os.name == "nt":
+            return
+        home = os.path.expanduser("~")
+        project = os.path.join(home, "project")
+        assert is_command_catastrophic("rm -rf ../*", cwd=project) is True
+        assert is_command_catastrophic("rm -rf .././*", cwd=project) is True
+        assert is_command_catastrophic("rm -rf ./../*", cwd=project) is True
+        # Sibling wipe under a temp workspace must stay non-catastrophic.
+        assert (
+            is_command_catastrophic(
+                "rm -rf ../*",
+                cwd=os.path.join("/tmp", "qwenpaw-b1-ws"),
+            )
+            is False
+        )
+
+    def test_macos_temp_trees_not_catastrophic(self) -> None:
+        """Regex + resolve must both allow /private/tmp and /var/tmp."""
+        assert is_command_catastrophic("rm -rf /private/tmp/foo") is False
+        assert is_command_catastrophic("rm -rf /var/tmp/foo") is False
+        assert is_command_catastrophic("rm -rf /private/var/tmp/foo") is False
+        # Non-temp /private and /var stay blocked.
+        assert is_command_catastrophic("rm -rf /private/etc") is True
+        assert is_command_catastrophic("rm -rf /var/lib") is True
+
+    def test_mount_runtime_roots_not_full_subtree(self) -> None:
+        """WSL/USB/runtime workspace paths must not be default auto-deny."""
+        assert is_command_catastrophic("rm -rf /mnt") is True
+        assert is_command_catastrophic("rm -rf /mnt/*") is True
+        assert (
+            is_command_catastrophic("rm -rf /mnt/c/Users/me/project/build")
+            is False
+        )
+        assert (
+            is_command_catastrophic("rm -rf /media/user/USB/project/dist")
+            is False
+        )
+        assert (
+            is_command_catastrophic("rm -rf /run/user/1000/project/tmp")
+            is False
+        )
+        assert is_command_catastrophic("rm -rf /srv/www/app") is False
+
+    def test_windows_users_and_windows_tree_parity(self) -> None:
+        """Windows Users/Windows roots match Unix /Users + /windows."""
+        assert (
+            is_command_catastrophic("Remove-Item -Recurse -Force C:\\Users")
+            is True
+        )
+        assert (
+            is_command_catastrophic("Remove-Item -Recurse -Force C:\\Users\\*")
+            is True
+        )
+        assert (
+            is_command_catastrophic(
+                "Remove-Item -Recurse -Force C:\\Users\\me",
+            )
+            is True
+        )
+        assert (
+            is_command_catastrophic(
+                "Remove-Item -Recurse -Force C:\\Windows",
+            )
+            is True
+        )
+        assert (
+            is_command_catastrophic(
+                "Remove-Item -Recurse -Force C:\\Windows\\System32",
+            )
+            is True
+        )
+        assert (
+            is_command_catastrophic(
+                "Remove-Item -Recurse -Force C:\\Users\\me\\project\\build",
+            )
+            is False
+        )
+
+    def test_wsl_windows_drive_users_windows_not_bypassed(self) -> None:
+        """WSL /mnt/<drive>/... mirrors Windows drive/Users/Windows policy."""
+        assert is_command_catastrophic("rm -rf /mnt/c") is True
+        assert is_command_catastrophic("rm -rf /mnt/c/*") is True
+        assert is_command_catastrophic("rm -rf /mnt/c/Users") is True
+        assert is_command_catastrophic("rm -rf /mnt/c/Users/alice") is True
+        assert is_command_catastrophic("rm -rf /mnt/c/Users/alice/*") is True
+        assert is_command_catastrophic("rm -rf /mnt/c/Windows") is True
+        assert (
+            is_command_catastrophic("rm -rf /mnt/c/Windows/System32") is True
+        )
+        assert is_command_catastrophic("rm -rf /mnt/c/../c/Windows") is True
+        # Project workspace under WSL Users still allowed.
+        assert (
+            is_command_catastrophic(
+                "rm -rf /mnt/c/Users/me/project/build",
+            )
+            is False
+        )
+
+    def test_windows_normalize_resolve_parity(self) -> None:
+        """Windows targets use normalize (/ and ..), not only literals."""
+        assert (
+            is_command_catastrophic("Remove-Item -Recurse -Force C:/Users")
+            is True
+        )
+        assert (
+            is_command_catastrophic("Remove-Item -Recurse -Force C:/Windows")
+            is True
+        )
+        assert (
+            is_command_catastrophic(
+                r"Remove-Item -Recurse -Force C:\Users\alice\..",
+            )
+            is True
+        )
+        assert (
+            is_command_catastrophic(
+                r"Remove-Item -Recurse -Force C:\Users\alice\project\..\..",
+            )
+            is True
+        )
+        assert is_command_catastrophic(r"rm -rf C:\Users") is True
+        assert is_command_catastrophic("rm -rf C:/Windows") is True
+        assert (
+            is_command_catastrophic("rm -rf C:/Users/me/project/build")
+            is False
+        )
+        assert (
+            is_command_catastrophic(
+                "Remove-Item -Recurse -Force C:/Users/me/project/build",
+            )
+            is False
+        )
+
+    def test_win_path_token_not_substring_false_positive(self) -> None:
+        """Drive tokens must not be carved from $env:/version:/foo:bar text."""
+        assert (
+            is_command_catastrophic(
+                r"Remove-Item -Recurse -Force $env:TEMP\myproject\build",
+            )
+            is False
+        )
+        assert (
+            is_command_catastrophic(
+                r"Remove-Item -Recurse -Force $env:USERPROFILE\project\build",
+            )
+            is False
+        )
+        assert is_command_catastrophic("rm -rf version:1/build") is False
+        assert is_command_catastrophic("rm -rf ./namespace:pkg/dist") is False
+        assert is_command_catastrophic("rm -rf /tmp/foo:bar/baz") is False
+        assert (
+            is_command_catastrophic(
+                r"Remove-Item -Recurse -Force .\namespace:pkg\dist",
+            )
+            is False
+        )
+
+    def test_git_bash_and_cygwin_windows_path_parity(self) -> None:
+        """Git Bash /c/... and Cygwin /cygdrive/<d>/... match WSL policy."""
+        assert is_command_catastrophic("rm -rf /c") is True
+        assert is_command_catastrophic("rm -rf /c/*") is True
+        assert is_command_catastrophic("rm -rf /c/Users") is True
+        assert is_command_catastrophic("rm -rf /c/Users/alice") is True
+        assert is_command_catastrophic("rm -rf /c/Users/alice/*") is True
+        assert is_command_catastrophic("rm -rf /c/Windows") is True
+        assert is_command_catastrophic("rm -rf /c/Windows/System32") is True
+        assert is_command_catastrophic("rm -rf /cygdrive/c") is True
+        assert is_command_catastrophic("rm -rf /cygdrive/c/Users") is True
+        assert is_command_catastrophic("rm -rf /cygdrive/c/Windows") is True
+        assert (
+            is_command_catastrophic("rm -rf /c/Users/alice/project/build")
+            is False
+        )
+        assert (
+            is_command_catastrophic(
+                "rm -rf /cygdrive/c/Users/alice/project/build",
+            )
+            is False
+        )
+
+    def test_cmd_env_and_powershell_home_targets(self) -> None:
+        """rd/del %USERPROFILE%/%SystemRoot% and Remove-Item ~/ $HOME."""
+        assert is_command_catastrophic("rd /s /q %USERPROFILE%") is True
+        assert is_command_catastrophic("del /s /q %USERPROFILE%") is True
+        assert is_command_catastrophic(r"del /s /q %USERPROFILE%\*") is True
+        assert is_command_catastrophic("rd /s /q %SystemRoot%") is True
+        assert is_command_catastrophic("rd /s /q %WINDIR%") is True
+        assert is_command_catastrophic("del /s /q %SystemRoot%") is True
+        assert is_command_catastrophic("Remove-Item -Recurse -Force ~") is True
+        assert (
+            is_command_catastrophic("Remove-Item -Recurse -Force $HOME")
+            is True
+        )
+        assert (
+            is_command_catastrophic(
+                r"Remove-Item -Recurse -Force $env:USERPROFILE",
+            )
+            is True
+        )
+        # Workspace under profile must stay allowed.
+        assert (
+            is_command_catastrophic(
+                r"Remove-Item -Recurse -Force $env:USERPROFILE\project\build",
+            )
+            is False
+        )
+        assert (
+            is_command_catastrophic(
+                r"rd /s /q %USERPROFILE%\project\build",
+            )
+            is False
+        )
+
+    def test_windows_env_parent_climb_and_equivalents(self) -> None:
+        """SystemRoot/WINDIR .. climb, PUBLIC/HOMEDRIVE, SystemDrive parity."""
+        assert is_command_catastrophic(r"rd /s /q %SystemRoot%\..") is True
+        assert is_command_catastrophic(r"rd /s /q %WINDIR%/..") is True
+        assert (
+            is_command_catastrophic(r'cmd /c "rd /s /q %SystemRoot%\.."')
+            is True
+        )
+        assert (
+            is_command_catastrophic(
+                r"Remove-Item -Recurse -Force $env:SystemRoot",
+            )
+            is True
+        )
+        assert (
+            is_command_catastrophic(
+                r"Remove-Item -Recurse -Force $env:WinDir\..",
+            )
+            is True
+        )
+        assert (
+            is_command_catastrophic(r"rd /s /q %HOMEDRIVE%%HOMEPATH%") is True
+        )
+        assert (
+            is_command_catastrophic(r"rd /s /q %HOMEDRIVE%\%HOMEPATH%") is True
+        )
+        assert is_command_catastrophic("rd /s /q %PUBLIC%") is True
+        assert (
+            is_command_catastrophic(
+                r"Remove-Item -Recurse -Force $env:PUBLIC",
+            )
+            is True
+        )
+        assert (
+            is_command_catastrophic(
+                r"Remove-Item -Recurse -Force $env:HOMEDRIVE$env:HOMEPATH",
+            )
+            is True
+        )
+        assert is_command_catastrophic(r"rd /s /q %SystemDrive%\Users") is True
+        assert (
+            is_command_catastrophic(r"rd /s /q %SystemDrive%\Windows") is True
+        )
+        assert is_command_catastrophic(r"rd /s /q %SystemDrive%\*") is True
+        assert (
+            is_command_catastrophic(
+                r"Remove-Item -Recurse -Force $env:SystemDrive\Users",
+            )
+            is True
+        )
+        assert (
+            is_command_catastrophic(
+                r"rd /s /q %SystemDrive%\Users\me\project",
+            )
+            is False
+        )
+
+    def test_emulated_windows_inside_shell_c_wrapper(self) -> None:
+        """WSL/Git Bash targets must hit as raw substrings inside bash -c."""
+        assert (
+            is_command_catastrophic('bash -lc "rm -rf /mnt/c/Users"') is True
+        )
+        assert is_command_catastrophic('bash -c "rm -rf /c/Windows"') is True
+        assert is_command_catastrophic('sh -c "rm -rf /mnt/c"') is True
+        assert (
+            is_command_catastrophic(
+                'bash -lc "bash -lc \\"rm -rf /mnt/c/Users\\""',
+            )
+            is True
+        )
+
+    def test_indirect_rm_command_substitution(self) -> None:
+        """$(which rm) / backticks / ${RM:-rm} unwrap to bare rm checks."""
+        assert is_command_catastrophic("$(which rm) -rf /") is True
+        assert is_command_catastrophic("`which rm` -rf /") is True
+        assert is_command_catastrophic("$(command -v rm) -rf /") is True
+        assert is_command_catastrophic("`(command -v rm)` -rf /") is True
+        assert is_command_catastrophic("${RM:-rm} -rf /") is True
+        # Must not blank real ${HOME} targets (regression vs #5090 class).
+        assert is_command_catastrophic("rm -rf ${HOME}") is True
+        assert is_command_catastrophic("rm -rf ${HOME}/project") is False
+        # Full wipe inside $(...) / backticks must still hit on the original
+        # string (unwrap alone would collapse them to bare ``rm``).
+        assert is_command_catastrophic("$(rm -rf /)") is True
+        assert is_command_catastrophic("`rm -rf /`") is True
+        assert is_command_catastrophic("$(sudo rm -rf /)") is True
+        assert is_command_catastrophic("x=$(rm -rf /)") is True
+        # Non-catastrophic substitution forms stay allowed.
+        assert is_command_catastrophic("$(which rm) -rf /tmp/foo") is False
+        assert is_command_catastrophic("echo $(which rm)") is False
+
+    def test_expand_before_normpath_home_parent_climb(self) -> None:
+        """Expand ~ / $HOME before normpath so ~/.. is not '.' ."""
+        import os
+
+        assert is_command_catastrophic("rm -rf ~/..") is True
+        assert is_command_catastrophic("rm -rf $HOME/..") is True
+        assert is_command_catastrophic("rm -rf ~/project/../..") is True
+        assert is_command_catastrophic("rm -rf $HOME/project/../..") is True
+        # Unknown ~user / Windows env form: must not normpath ``..`` away.
+        assert is_command_catastrophic("rm -rf ~alice/..") is True
+        assert is_command_catastrophic("rm -rf ~nosuchuser999/..") is True
+        # POSIX shlex eats unquoted ``\``; use ``/`` or a quoted Windows form.
+        assert is_command_catastrophic("rm -rf %USERPROFILE%/..") is True
+        assert is_command_catastrophic(r"rm -rf '%USERPROFILE%\..'") is True
+        if os.name != "nt":
+            user = os.environ.get("USER") or os.environ.get("LOGNAME")
+            if user:
+                assert is_command_catastrophic(f"rm -rf ~{user}/..") is True
+        # Workspace subpaths must still be allowed.
+        assert is_command_catastrophic("rm -rf ~/project/./*") is False
+        assert is_command_catastrophic("rm -rf ~/project/../project") is False
 
 
 class TestIsPathOutsideBoundary:

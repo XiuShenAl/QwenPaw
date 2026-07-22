@@ -217,7 +217,9 @@ class ACPPermissionAdapter:
         )
 
         command = str(self._command(tool_call) or "")
-        if is_command_destructive(command):
+        # Pass ACP session cwd so relative rm targets (e.g. ``../``) resolve
+        # against the same root as path-boundary checks.
+        if is_command_destructive(command, cwd=self.cwd):
             return True
 
         for path_value in self._paths(tool_call):
