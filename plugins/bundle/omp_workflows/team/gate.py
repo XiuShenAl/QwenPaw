@@ -55,6 +55,12 @@ class TeamPipelineGate(LoopGate):
         agent_count: int = 3,
         agent_role: str = "executor",
     ) -> Path:
+        try:
+            from qwenpaw.agents.fork_project import begin_fork_scope
+
+            begin_fork_scope(workspace_dir)
+        except ImportError:
+            pass
         wf = WorkflowState(workspace_dir, "team")
         loop_dir = wf.create_instance()
 
@@ -111,18 +117,30 @@ class TeamPipelineGate(LoopGate):
         phase = data.get("current_phase", "plan")
         st.phase = phase
 
-        if phase in _POST_FORK_PHASES and not forks_integrated(data):
+        if phase in _POST_FORK_PHASES and not forks_integrated(
+            data,
+            st.workspace_dir,
+        ):
+            # Preserve the rejected target phase; resume it after merge.
             st.blocked_on_merge = True
-            st.phase = "exec"
+            st.phase = phase
             await asyncio.to_thread(
                 wf.update_state,
-                {"current_phase": "exec"},
+                {
+                    "merge_blocked": True,
+                    "resume_phase": phase,
+                },
             )
             return StopHandlerResult(
                 action=StopAction.INTERRUPT_AND_CONTINUE,
                 reason="Team blocked: forks not integrated",
             )
 
+        if data.get("merge_blocked"):
+            await asyncio.to_thread(
+                wf.update_state,
+                {"merge_blocked": False},
+            )
         st.blocked_on_merge = False
 
         if phase == "completed":

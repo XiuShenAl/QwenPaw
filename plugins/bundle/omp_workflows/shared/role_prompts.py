@@ -5,6 +5,14 @@ from __future__ import annotations
 
 from .constants import ROLE_ALLOWED_TOOLS, ROLE_SKILLS
 
+try:
+    from qwenpaw.agents.fork_project import FORK_WORKER_COMMIT_PROTOCOL
+except ImportError:  # pragma: no cover - offline / partial installs
+    FORK_WORKER_COMMIT_PROTOCOL = (
+        "## Fork worktree commit protocol (REQUIRED)\n"
+        "Commit all changes in the worktree before finishing.\n"
+    )
+
 ROLE_PROMPTS: dict[str, str] = {
     "analyst": (
         "You are a requirements analyst. "
@@ -105,9 +113,14 @@ def build_worker_prompt(
     role: str,
     task: str,
     context: str = "",
+    *,
+    fork: bool = False,
 ) -> str:
     """Build a complete worker prompt for spawn_subagent's *task* param."""
-    parts = [get_role_prompt(role), f"\n## Task\n{task}"]
+    parts = [get_role_prompt(role)]
+    if fork:
+        parts.append("\n" + FORK_WORKER_COMMIT_PROTOCOL)
+    parts.append(f"\n## Task\n{task}")
     if context:
         parts.append(f"\n## Context\n{context}")
     return "\n".join(parts)
@@ -201,17 +214,21 @@ def format_batch_item(
 FORK_MERGE_PROTOCOL = """\
 Fork integration (REQUIRED when any worker used fork=True):
 - Each forked worker result includes [FORK_BRANCH: <branch>] and works
-  in an isolated git worktree. Changes are NOT in the main workspace
-  until you merge them.
+  in an isolated git worktree. Workers must commit before finishing;
+  `git merge <branch>` only brings commits, not dirty files.
 - After ALL workers finish, for each [FORK_BRANCH]:
   1. `git merge --no-ff <branch>` (or cherry-pick the commits) into
      the current branch of the main workspace.
   2. On conflict: resolve or abort. Do NOT advance the workflow phase
      and do NOT report completion while conflicts remain.
-- If no worker used fork=True, still set forks_integrated=true explicitly.
-- After successful integration, update state.json:
-  set forks_integrated=true.
-- The stop gate REJECTS phase completion until forks_integrated=true."""
+- Keep the target workflow phase as-is while merging (do not rewrite
+  it back to execution/exec/working).
+- If no worker used fork=True, still set forks_integrated=true
+  (JSON boolean, not a string).
+- After successful integration, update state.json with the JSON
+  boolean forks_integrated=true.
+- The stop gate REJECTS phase completion until that flag is true AND
+  registered fork commits are ancestors of HEAD."""
 
 
 def fork_merge_instructions(indent: str = "") -> str:

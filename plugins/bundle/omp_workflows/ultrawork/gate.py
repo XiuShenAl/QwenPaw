@@ -42,6 +42,12 @@ class UltraworkGate(LoopGate):
 
     def activate_for_work(self, workspace_dir: Path) -> Path:
         """Create state directory and activate."""
+        try:
+            from qwenpaw.agents.fork_project import begin_fork_scope
+
+            begin_fork_scope(workspace_dir)
+        except ImportError:
+            pass
         wf = WorkflowState(workspace_dir, "ultrawork")
         loop_dir = wf.create_instance()
         state = _UltraworkState(
@@ -73,17 +79,25 @@ class UltraworkGate(LoopGate):
         st.phase = phase
 
         if phase == "done":
-            if not forks_integrated(data):
+            if not forks_integrated(data, st.workspace_dir):
+                # Keep target phase "done"; do not rewind to working.
                 st.blocked_on_merge = True
-                st.phase = "working"
+                st.phase = "done"
                 await asyncio.to_thread(
                     wf.update_state,
-                    {"phase": "working"},
+                    {
+                        "merge_blocked": True,
+                        "resume_phase": "done",
+                    },
                 )
                 return StopHandlerResult(
                     action=StopAction.INTERRUPT_AND_CONTINUE,
                     reason="Ultrawork blocked: forks not integrated",
                 )
+            await asyncio.to_thread(
+                wf.update_state,
+                {"merge_blocked": False},
+            )
             await asyncio.to_thread(wf.cleanup)
             self.deactivate()
             return StopHandlerResult(

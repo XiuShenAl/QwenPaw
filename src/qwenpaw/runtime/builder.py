@@ -502,6 +502,9 @@ class AgentBuilder:
             "root_session_id": getattr(ctx, "root_session_id", "") or "",
             "root_agent_id": getattr(ctx, "root_agent_id", "") or "",
         }
+        _ws = getattr(ctx, "workspace_dir", None)
+        if _ws is not None:
+            rc.setdefault("workspace_dir", str(_ws))
         app_services = getattr(ctx, "app_services", None)
         if app_services is not None:
             rc["approval_coordinator"] = getattr(
@@ -540,12 +543,42 @@ class AgentBuilder:
         request_context: dict[str, Any],
     ) -> Any:
         """Enable Coding Mode when ACP or fork worktree supplies a project."""
+        from ..agents.fork_project import resolve_allowed_fork_project_dir
+
         raw_project_dir = request_context.get(ACP_CODING_PROJECT_META_KEY)
+        fork_raw = request_context.get("fork_project_dir")
         if not isinstance(raw_project_dir, str) or not raw_project_dir.strip():
             # spawn_subagent(fork=True) places the worktree here.
-            raw_project_dir = request_context.get("fork_project_dir")
+            raw_project_dir = fork_raw
         if not isinstance(raw_project_dir, str) or not raw_project_dir.strip():
             return agent_config
+
+        # When the path came from fork_project_dir, require the worktree
+        # boundary check (same as legacy Runner).
+        if isinstance(fork_raw, str) and fork_raw.strip():
+            existing_cm = getattr(agent_config, "coding_mode", None)
+            existing_pd = (
+                getattr(existing_cm, "project_dir", None)
+                if existing_cm and getattr(existing_cm, "enabled", False)
+                else None
+            )
+            workspace_hint = request_context.get("workspace_dir") or getattr(
+                agent_config,
+                "workspace_dir",
+                None,
+            )
+            validated = resolve_allowed_fork_project_dir(
+                fork_raw,
+                workspace_dir=workspace_hint,
+                coding_project_dir=existing_pd,
+            )
+            if validated is None and (
+                not isinstance(raw_project_dir, str)
+                or raw_project_dir.strip() == fork_raw.strip()
+            ):
+                return agent_config
+            if validated is not None:
+                raw_project_dir = str(validated)
 
         project_dir = Path(raw_project_dir).expanduser().resolve()
         if not project_dir.is_dir():
@@ -592,6 +625,22 @@ class AgentBuilder:
             and getattr(_cm, "project_dir", None)
             else None
         )
+        # Prefer validated fork worktree as the shell/file working_dir.
+        request = getattr(ctx, "request", None)
+        _payload = (
+            getattr(request, "request_context", None) if request else None
+        )
+        if isinstance(_payload, dict):
+            from ..agents.fork_project import resolve_allowed_fork_project_dir
+
+            _fork = resolve_allowed_fork_project_dir(
+                _payload.get("fork_project_dir"),
+                workspace_dir=workspace_dir,
+                coding_project_dir=_project_dir,
+            )
+            if _fork is not None:
+                ws = str(_fork)
+                _project_dir = str(_fork)
         _configured_shell = getattr(
             getattr(agent_config, "running", None),
             "shell_command_executable",
@@ -602,7 +651,6 @@ class AgentBuilder:
             or os.environ.get("SHELL")
             or ("cmd.exe" if sys.platform == "win32" else "/bin/sh")
         )
-        request = getattr(ctx, "request", None)
         _active = getattr(agent_config, "active_model", None)
         _model_name = (
             _active.model

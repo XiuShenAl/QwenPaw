@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import logging
 import re
 import time
 from pathlib import Path
@@ -17,6 +18,8 @@ from agentscope.message import ToolResultState
 from ...config.utils import read_last_api
 from ...runtime.tool_registry import tool_descriptor
 from ...utils.http import trust_env_for_url
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_AGENT_API_BASE_URL = "http://127.0.0.1:8088"
 DEFAULT_AGENT_API_TIMEOUT = 30.0
@@ -687,6 +690,43 @@ async def check_agent_task(
         to_agent=None,
         timeout=10,
     )
+    # Background fork workers: commit on success, mark failed otherwise.
+    if isinstance(result, dict) and result.get("status") == "finished":
+        task_result = result.get("result")
+        if isinstance(task_result, dict):
+            try:
+                from ..fork_project import (
+                    finalize_fork_for_task,
+                    mark_fork_failed_for_task,
+                )
+                from ...config.context import get_current_workspace_dir
+
+                ws = get_current_workspace_dir()
+                if task_result.get("status") == "completed":
+                    await asyncio.to_thread(
+                        finalize_fork_for_task,
+                        normalized_task_id,
+                        workspace_dir=ws,
+                    )
+                else:
+                    err = task_result.get("error") or {}
+                    reason = (
+                        err.get("message", "background task failed")
+                        if isinstance(err, dict)
+                        else "background task failed"
+                    )
+                    await asyncio.to_thread(
+                        mark_fork_failed_for_task,
+                        normalized_task_id,
+                        workspace_dir=ws,
+                        reason=str(reason),
+                    )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Fork finalize/fail on check_agent_task failed for %s",
+                    normalized_task_id,
+                    exc_info=True,
+                )
     return _tool_text_response(
         format_background_status_text(normalized_task_id, result),
     )
@@ -1159,6 +1199,7 @@ async def _spawn_forked_subagent(
     skills: Optional[list[str]] = None,
 ) -> ToolChunk:
     """Fork path: call /api/fork/agent then dispatch subagent."""
+    # pylint: disable=too-many-branches,too-many-statements
     from ...app.agent_context import (
         get_current_session_id,
         get_current_user_id,
@@ -1188,17 +1229,37 @@ async def _spawn_forked_subagent(
     worktree_path = fork_result.get("worktree_path", "")
     worktree_branch = fork_result.get("worktree_branch", "")
 
+    from ..fork_project import (
+        FORK_WORKER_COMMIT_PROTOCOL,
+        bind_fork_task,
+        finalize_fork_worktree,
+        register_fork,
+    )
+    from ...config.context import get_current_workspace_dir
+
+    # Workers must commit; inject protocol even when the caller forgot.
+    worker_task = task
+    if worktree_path and FORK_WORKER_COMMIT_PROTOCOL not in task:
+        worker_task = f"{FORK_WORKER_COMMIT_PROTOCOL}\n\n{task}"
+
     fork_extra: dict[str, Any] | None = None
     if worktree_path:
         # ``fork_project_dir`` is the spawn-level key; also set the ACP
-        # coding-project meta key so AgentBuilder rebinds tools/cwd to
-        # the worktree (see ``_apply_request_coding_project``).
+        # coding-project meta key so AgentBuilder / ContextVars rebind
+        # tools/cwd to the worktree.
         from ..acp.meta import ACP_CODING_PROJECT_META_KEY
 
         fork_extra = {
             "fork_project_dir": worktree_path,
             ACP_CODING_PROJECT_META_KEY: worktree_path,
+            "fork_worktree_branch": worktree_branch,
         }
+        register_fork(
+            worktree_path,
+            worktree_branch,
+            session_id=fork_session_id,
+            workspace_dir=get_current_workspace_dir(),
+        )
     request_context = _build_subagent_request_context(
         current_agent_id,
         allowed_tools=allowed_tools,
@@ -1213,7 +1274,7 @@ async def _spawn_forked_subagent(
         "input": [
             {
                 "role": "user",
-                "content": [{"type": "text", "text": task}],
+                "content": [{"type": "text", "text": worker_task}],
             },
         ],
         "request_context": request_context,
@@ -1227,6 +1288,18 @@ async def _spawn_forked_subagent(
             current_agent_id,
             int(DEFAULT_AGENT_API_TIMEOUT),
         )
+        task_id = result.get("task_id") if isinstance(result, dict) else None
+        if worktree_path and task_id:
+            bind_fork_task(worktree_path, worktree_branch, str(task_id))
+            # Poller fallback if the console completion hook is unavailable.
+            asyncio.create_task(
+                _watch_background_fork_finalize(
+                    str(task_id),
+                    worktree_path,
+                    worktree_branch,
+                    timeout=timeout,
+                ),
+            )
         submission_text = format_background_submission_text(
             result,
             fork_session_id,
@@ -1266,8 +1339,26 @@ async def _spawn_forked_subagent(
         except Exception:  # noqa: BLE001
             _project_dir = ""
 
+    # Only commit on a successful worker response (avoid half-baked commits).
+    if worktree_path and response_data:
+        await asyncio.to_thread(
+            finalize_fork_worktree,
+            worktree_path,
+            worktree_branch,
+            message=f"fork worker {worktree_branch or fork_session_id}",
+        )
+    elif worktree_path:
+        from ..fork_project import mark_fork_failed
+
+        await asyncio.to_thread(
+            mark_fork_failed,
+            worktree_path,
+            worktree_branch,
+            reason="No response from forked subagent",
+        )
+
     cleaned = False
-    if worktree_path and _project_dir:
+    if worktree_path and _project_dir and response_data:
         cleaned = await _maybe_cleanup_worktree(
             worktree_path,
             _project_dir,
@@ -1291,3 +1382,55 @@ async def _spawn_forked_subagent(
         )
 
     return _tool_text_response(result_text)
+
+
+async def _watch_background_fork_finalize(
+    task_id: str,
+    worktree_path: str,
+    worktree_branch: str,
+    *,
+    timeout: int = 600,
+) -> None:
+    """Poll until the background task finishes or *timeout* elapses."""
+    from ..fork_project import finalize_fork_worktree, mark_fork_failed
+
+    # Align with worker timeout (default 600s); console hook remains primary.
+    deadline = time.time() + max(30, int(timeout) + 30)
+    delay = 2.0
+    while time.time() < deadline:
+        await asyncio.sleep(delay)
+        delay = min(delay * 1.5, 30.0)
+        try:
+            status = await asyncio.to_thread(
+                get_agent_chat_task_status,
+                None,
+                task_id,
+                to_agent=None,
+                timeout=10,
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        if status.get("status") != "finished":
+            continue
+        result = status.get("result") or {}
+        if result.get("status") == "completed":
+            await asyncio.to_thread(
+                finalize_fork_worktree,
+                worktree_path,
+                worktree_branch,
+                message=f"fork worker {worktree_branch}",
+            )
+        else:
+            err = result.get("error") or {}
+            reason = (
+                err.get("message", "background task failed")
+                if isinstance(err, dict)
+                else "background task failed"
+            )
+            await asyncio.to_thread(
+                mark_fork_failed,
+                worktree_path,
+                worktree_branch,
+                reason=str(reason),
+            )
+        return
