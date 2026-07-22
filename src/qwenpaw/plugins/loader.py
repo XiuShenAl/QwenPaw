@@ -1078,14 +1078,15 @@ class PluginLoader:
             p for p in sys.path if os.path.realpath(p) != plugin_dir_real
         ]
 
+        # Remove tools from agents.tools + runtime registries while
+        # ownership records still exist, then drop plugin registry state.
+        self._cleanup_plugin_tools(plugin_id, record)
+
         # Clear all in-memory registry entries for this plugin
         self.registry.unregister_plugin(plugin_id)
 
         # Remove from the loaded-plugins dict
         del self._loaded_plugins[plugin_id]
-
-        # Remove tools that this plugin registered in agents.tools
-        self._cleanup_plugin_tools(plugin_id, record)
 
         # Optionally delete files from disk
         if delete_files:
@@ -1103,20 +1104,21 @@ class PluginLoader:
         plugin_id: str,
         record: PluginRecord,
     ) -> None:
-        """Remove plugin tools from ``qwenpaw.agents.tools``.
+        """Remove plugin tools from agents.tools and runtime registries.
 
         Uses ``sys.modules`` directly to avoid the parent-package
         attribute cache that would bypass any test/runtime overrides.
+        Also unbridges workspace ``ToolRegistry`` / ``builtin_tool_funcs``
+        so hot-reload cannot keep a stale callable.
 
         Args:
             plugin_id: Plugin identifier (for logging)
             record: PluginRecord whose tools should be removed
         """
         try:
-            tools_module = sys.modules.get("qwenpaw.agents.tools")
-            if tools_module is None:
-                return
+            from .api import _TOOL_PLUGIN_OWNERS, _unbridge_from_runtime
 
+            tools_module = sys.modules.get("qwenpaw.agents.tools")
             meta: Dict = record.manifest.meta or {}
             tool_names: List[str] = []
 
@@ -1130,7 +1132,35 @@ class PluginLoader:
                 if isinstance(tool, dict) and tool.get("name"):
                     tool_names.append(tool["name"])
 
+            # Tools registered via PluginApi may only appear in ownership.
+            for name, owner in list(_TOOL_PLUGIN_OWNERS.items()):
+                if owner == plugin_id and name not in tool_names:
+                    tool_names.append(name)
+
             for tool_name in tool_names:
+                tool_func = (
+                    getattr(tools_module, tool_name, None)
+                    if tools_module is not None
+                    else None
+                )
+                try:
+                    _unbridge_from_runtime(
+                        tool_name,
+                        tool_func,
+                        self.registry,
+                    )
+                except Exception as unbridge_exc:  # noqa: BLE001
+                    logger.debug(
+                        "Runtime unbridge failed for '%s' "
+                        "(plugin '%s'): %s",
+                        tool_name,
+                        plugin_id,
+                        unbridge_exc,
+                        exc_info=True,
+                    )
+
+                if tools_module is None:
+                    continue
                 if hasattr(tools_module, tool_name):
                     delattr(tools_module, tool_name)
                 if tool_name in tools_module.__all__:

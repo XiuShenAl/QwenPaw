@@ -16,6 +16,7 @@ import copy
 import logging
 import re
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from fnmatch import fnmatch
@@ -560,15 +561,12 @@ def get_default_user_rules() -> List[GovernanceRule]:
 
 # Backward-compatible name used by tests and callers. Resolved lazily so
 # descriptor imports are available when the list is first read.
-class _DefaultUserRulesProxy:
-    """Lazy sequence view over :func:`get_default_user_rules`.
+class _DefaultUserRulesProxy(Sequence):
+    """Lazy :class:`~collections.abc.Sequence` over default user rules.
 
-    Supported: iteration, ``len()``, integer index, ``repr``.
-
-    This intentionally does **not** subclass ``list`` — inherited ``+``,
-    ``==``, and in-place mutation would operate on an empty backing list
-    and silently diverge from the lazy rules. Prefer
-    ``list(DEFAULT_USER_RULES)`` / :func:`get_default_user_rules`.
+    Does **not** subclass ``list``. Prefer
+    :func:`get_default_user_rules` / ``list(DEFAULT_USER_RULES)`` for
+    mutation or persistence. ``+`` materializes to a real ``list``.
     """
 
     def _rules(self) -> List[GovernanceRule]:
@@ -585,6 +583,30 @@ class _DefaultUserRulesProxy:
 
     def __repr__(self) -> str:
         return repr(self._rules())
+
+    def __eq__(self, other: object) -> bool:
+        if other is self:
+            return True
+        # str/bytes are Sequences but must not compare element-wise.
+        if isinstance(other, (str, bytes)):
+            return False
+        if isinstance(other, (list, tuple, Sequence)):
+            return list(self._rules()) == list(other)
+        return NotImplemented
+
+    def __add__(self, other: object) -> List[GovernanceRule]:
+        if isinstance(other, (str, bytes)):
+            return NotImplemented
+        if isinstance(other, (list, tuple, Sequence)):
+            return list(self._rules()) + list(other)
+        return NotImplemented
+
+    def __radd__(self, other: object) -> List[GovernanceRule]:
+        if isinstance(other, (str, bytes)):
+            return NotImplemented
+        if isinstance(other, (list, tuple, Sequence)):
+            return list(other) + list(self._rules())
+        return NotImplemented
 
 
 DEFAULT_USER_RULES: List[
