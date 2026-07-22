@@ -3,6 +3,7 @@
 """Plugin API routes: list plugins with UI metadata and serve plugin
 static files.  Also provides runtime install / uninstall endpoints."""
 
+import asyncio
 import inspect
 import json
 import logging
@@ -209,7 +210,8 @@ async def _post_load_setup(  # pylint: disable=too-many-branches
             )
 
     # Sync the plugin's tools into every agent's builtin_tools config
-    _sync_plugin_tools_to_agents(loader, plugin_id)
+    # (config file I/O — keep off the event loop).
+    await asyncio.to_thread(_sync_plugin_tools_to_agents, loader, plugin_id)
 
     # Schedule a background reload for every configured agent
     _schedule_all_agents_reload(request)
@@ -451,8 +453,10 @@ async def _load_plugin_with_optional_force_reinstall(
     Force-reinstall is handled inside
     :meth:`PluginLoader.load_plugin_from_path` so this router never reads
     ``plugin.json`` from a user-supplied path (CodeQL path-injection).
-    Unload + load still share one :meth:`PluginLoader.plugin_lifecycle`
-    critical section inside the loader.
+
+    The full install transaction — unload (if force), load, and
+    :func:`_post_load_setup` — runs under one
+    :meth:`PluginLoader.plugin_lifecycle` critical section.
     """
     from ...config.utils import get_plugins_dir
 
@@ -479,13 +483,35 @@ async def _load_plugin_with_optional_force_reinstall(
             collected["command_names"],
         )
 
+    async def _after_load(record) -> None:
+        await _post_load_setup(request, record.manifest.id)
+
     return await loader.load_plugin_from_path(
         source_path=source_path,
         install_dir=install_dir,
         force=force,
         before_force_unload=_before_force_unload if force else None,
         after_force_unload=_after_force_unload if force else None,
+        after_load=_after_load,
     )
+
+
+def _extract_plugin_zip_bytes(content: bytes, temp_dir: Path) -> Path:
+    """Write ZIP bytes, safely extract, return plugin dir (sync I/O)."""
+    zip_path = temp_dir / "plugin.zip"
+    zip_path.write_bytes(content)
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        _safe_extract_zip(zf, temp_dir)
+    zip_path.unlink(missing_ok=True)
+    return _find_plugin_dir(temp_dir)
+
+
+def _extract_downloaded_plugin_zip(zip_path: Path, temp_dir: Path) -> Path:
+    """Safely extract an on-disk ZIP and return the plugin dir (sync I/O)."""
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        _safe_extract_zip(zf, temp_dir)
+    zip_path.unlink(missing_ok=True)
+    return _find_plugin_dir(temp_dir)
 
 
 # ── Routes ───────────────────────────────────────────────────────────────
@@ -586,23 +612,24 @@ async def install_plugin(
     try:
         if is_url:
             # Download and extract the zip archive
-            temp_dir = Path(tempfile.mkdtemp())
+            temp_dir = Path(await asyncio.to_thread(tempfile.mkdtemp))
             zip_path = temp_dir / "plugin.zip"
             logger.info(f"Downloading plugin from {source}")
             await _async_download(source, zip_path)
-
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                _safe_extract_zip(zf, temp_dir)
-            zip_path.unlink(missing_ok=True)
-            source_path = _find_plugin_dir(temp_dir)
+            source_path = await asyncio.to_thread(
+                _extract_downloaded_plugin_zip,
+                zip_path,
+                temp_dir,
+            )
         else:
             source_path = Path(source).resolve()
-            if not source_path.exists():
+            if not await asyncio.to_thread(source_path.exists):
                 raise HTTPException(
                     status_code=400,
                     detail=f"Path not found: {source}",
                 )
 
+        # Load + post-load setup share one lifecycle lock.
         record = await _load_plugin_with_optional_force_reinstall(
             loader,
             request,
@@ -622,10 +649,8 @@ async def install_plugin(
             detail=f"Plugin installation failed: {exc}",
         ) from exc
     finally:
-        if temp_dir and temp_dir.exists():
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    await _post_load_setup(request, record.manifest.id)
+        if temp_dir is not None and await asyncio.to_thread(temp_dir.exists):
+            await asyncio.to_thread(shutil.rmtree, temp_dir, True)
 
     return {
         "id": record.manifest.id,
@@ -669,18 +694,16 @@ async def upload_plugin(
             detail="Only .zip archives are accepted.",
         )
 
-    temp_dir = Path(tempfile.mkdtemp())
+    temp_dir = Path(await asyncio.to_thread(tempfile.mkdtemp))
     try:
-        zip_path = temp_dir / "plugin.zip"
         content = await file.read()
-        zip_path.write_bytes(content)
+        source_path = await asyncio.to_thread(
+            _extract_plugin_zip_bytes,
+            content,
+            temp_dir,
+        )
 
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            _safe_extract_zip(zf, temp_dir)
-        zip_path.unlink(missing_ok=True)
-
-        source_path = _find_plugin_dir(temp_dir)
-
+        # Load + post-load setup share one lifecycle lock.
         record = await _load_plugin_with_optional_force_reinstall(
             loader,
             request,
@@ -700,10 +723,8 @@ async def upload_plugin(
             detail=f"Plugin installation failed: {exc}",
         ) from exc
     finally:
-        if temp_dir.exists():
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    await _post_load_setup(request, record.manifest.id)
+        if await asyncio.to_thread(temp_dir.exists):
+            await asyncio.to_thread(shutil.rmtree, temp_dir, True)
 
     return {
         "id": record.manifest.id,
@@ -745,14 +766,27 @@ async def uninstall_plugin(plugin_id: str, request: Request):
 
     meta: dict = record.manifest.meta or {}
 
-    # Collect provider / command IDs *before* unload clears the registry
-    provider_ids, command_names = _collect_plugin_runtime_ids(
-        loader.registry,
-        plugin_id,
-    )
-
+    # Full uninstall transaction under one lifecycle lock so post-unload
+    # cleanup cannot race a concurrent install/reinstall of the same id.
     try:
-        await loader.unload_plugin(plugin_id, delete_files=True)
+        async with loader.plugin_lifecycle(plugin_id):
+            provider_ids, command_names = _collect_plugin_runtime_ids(
+                loader.registry,
+                plugin_id,
+            )
+            await loader.unload_plugin(plugin_id, delete_files=True)
+            _post_unload_cleanup(
+                request,
+                plugin_id,
+                provider_ids,
+                command_names,
+            )
+            await asyncio.to_thread(
+                _remove_plugin_tools_from_agents,
+                plugin_id,
+                meta,
+            )
+            _schedule_all_agents_reload(request)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -764,15 +798,6 @@ async def uninstall_plugin(plugin_id: str, request: Request):
             status_code=500,
             detail=f"Plugin uninstallation failed: {exc}",
         ) from exc
-
-    # Clean up providers and commands from runtime registries
-    _post_unload_cleanup(request, plugin_id, provider_ids, command_names)
-
-    # Remove tool entries from all agents
-    _remove_plugin_tools_from_agents(plugin_id, meta)
-
-    # Schedule agent reloads so tools disappear immediately
-    _schedule_all_agents_reload(request)
 
     return {
         "id": plugin_id,
@@ -940,7 +965,6 @@ async def _async_download(url: str, dest: Path) -> None:
     Raises:
         RuntimeError: If the download exceeds the size cap or times out.
     """
-    import asyncio
 
     def _download() -> None:
         with urllib.request.urlopen(

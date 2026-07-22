@@ -131,10 +131,13 @@ def _is_disabled_plugin_dir(path: Path) -> bool:
     return name.startswith(".") or name.endswith(".disabled")
 
 
-# Task-local plugin_id currently holding PluginLoader.plugin_lifecycle.
-# Enables re-entrant load_plugin_from_path → load_plugin and router
-# force-reinstall (unload then load) under one critical section.
-_LIFECYCLE_HELD_PLUGIN: ContextVar[Optional[str]] = ContextVar(
+# Re-entrancy token for PluginLoader.plugin_lifecycle.
+# Key is (loader_id, task_id, plugin_id) so:
+# - nested calls on the *same* task can re-enter;
+# - asyncio.create_task() children that inherit ContextVar cannot bypass;
+# - different PluginLoader instances never share re-entrancy.
+_LifecycleHoldKey = tuple[int, int, str]
+_LIFECYCLE_HELD: ContextVar[Optional[_LifecycleHoldKey]] = ContextVar(
     "qwenpaw_plugin_lifecycle_held",
     default=None,
 )
@@ -192,6 +195,16 @@ class PluginLoader:
                 self._lifecycle_locks[plugin_id] = lock
             return lock
 
+    def _lifecycle_hold_key(
+        self,
+        plugin_id: str,
+    ) -> Optional[_LifecycleHoldKey]:
+        """Return re-entrancy key for this loader + current task + plugin."""
+        task = asyncio.current_task()
+        if task is None:
+            return None
+        return (id(self), id(task), plugin_id)
+
     @asynccontextmanager
     async def plugin_lifecycle(
         self,
@@ -199,24 +212,30 @@ class PluginLoader:
     ) -> AsyncIterator[None]:
         """Serialize load/unload/reinstall for one *plugin_id*.
 
-        Re-entrant for the same plugin on the same task so nested
-        ``load_plugin_from_path`` → ``load_plugin`` and router
-        force-reinstall (unload then load) share one critical section.
+        Re-entrant only when the *same* ``PluginLoader`` instance, the
+        *same* ``asyncio`` task, and the *same* ``plugin_id`` already
+        hold the section — so nested ``load_plugin_from_path`` →
+        ``load_plugin`` works, but ``asyncio.create_task`` children that
+        inherit ContextVar cannot bypass the lock.
         Unrelated plugin IDs may proceed concurrently.
         """
         if not plugin_id:
             yield
             return
-        if _LIFECYCLE_HELD_PLUGIN.get() == plugin_id:
+        hold_key = self._lifecycle_hold_key(plugin_id)
+        if hold_key is not None and _LIFECYCLE_HELD.get() == hold_key:
             yield
             return
         lock = self._lifecycle_lock_for(plugin_id)
         async with lock:
-            token = _LIFECYCLE_HELD_PLUGIN.set(plugin_id)
+            if hold_key is None:
+                yield
+                return
+            token = _LIFECYCLE_HELD.set(hold_key)
             try:
                 yield
             finally:
-                _LIFECYCLE_HELD_PLUGIN.reset(token)
+                _LIFECYCLE_HELD.reset(token)
 
     def discover_plugins(self) -> List[Tuple[PluginManifest, Path]]:
         """Discover all plugins in plugin directories.
@@ -997,6 +1016,14 @@ class PluginLoader:
             target,
         )
 
+    def _read_source_manifest(
+        self,
+        source_path: Path,
+    ) -> Tuple[Path, PluginManifest]:
+        """Resolve and load ``plugin.json`` under *source_path* (sync I/O)."""
+        manifest_path = resolved_plugin_manifest_path(source_path)
+        return manifest_path, self._load_manifest(manifest_path)
+
     async def load_plugin_from_path(
         self,
         source_path: Path,
@@ -1006,6 +1033,7 @@ class PluginLoader:
         force: bool = False,
         before_force_unload: Optional[Any] = None,
         after_force_unload: Optional[Any] = None,
+        after_load: Optional[Any] = None,
     ) -> PluginRecord:
         """Copy plugin files, install deps, and load plugin at runtime.
 
@@ -1019,6 +1047,10 @@ class PluginLoader:
         before install (optional *before_force_unload* /
         *after_force_unload* callbacks run around that unload).
 
+        *after_load* runs still inside the lifecycle lock so router
+        post-load setup (providers / commands / agent config) cannot
+        race a concurrent uninstall.
+
         Args:
             source_path: Directory that contains ``plugin.json``
             config: Optional plugin configuration dict
@@ -1027,6 +1059,7 @@ class PluginLoader:
             force: Unload a same-id loaded plugin before installing
             before_force_unload: ``callback(plugin_id)`` before unload
             after_force_unload: ``callback(plugin_id)`` after unload
+            after_load: ``callback(record)`` after successful load
 
         Returns:
             Loaded PluginRecord
@@ -1037,8 +1070,11 @@ class PluginLoader:
             RuntimeError: If dependency installation fails
         """
         source_path = Path(source_path).resolve()
-        manifest_path = resolved_plugin_manifest_path(source_path)
-        manifest = self._load_manifest(manifest_path)
+        _manifest_path, manifest = await asyncio.to_thread(
+            self._read_source_manifest,
+            source_path,
+        )
+        del _manifest_path
         plugin_id = manifest.id
         async with self.plugin_lifecycle(plugin_id):
             if force and plugin_id in self._loaded_plugins:
@@ -1054,12 +1090,17 @@ class PluginLoader:
                     maybe_after = after_force_unload(plugin_id)
                     if inspect.isawaitable(maybe_after):
                         await maybe_after
-            return await self._load_plugin_from_path_unlocked(
+            record = await self._load_plugin_from_path_unlocked(
                 source_path,
                 manifest,
                 config,
                 install_dir,
             )
+            if after_load is not None:
+                maybe_loaded = after_load(record)
+                if inspect.isawaitable(maybe_loaded):
+                    await maybe_loaded
+            return record
 
     async def _load_plugin_from_path_unlocked(
         self,
@@ -1092,18 +1133,22 @@ class PluginLoader:
                 f"directory ({install_dir}). Refusing to install.",
             )
 
-        # Copy files when source is not already the target
+        # Copy files when source is not already the target (off the loop).
         if source_path != target_dir:
-            if target_dir.exists():
-                shutil.rmtree(target_dir)
-            shutil.copytree(source_path, target_dir)
+
+            def _replace_tree() -> None:
+                if target_dir.exists():
+                    shutil.rmtree(target_dir)
+                shutil.copytree(source_path, target_dir)
+
+            await asyncio.to_thread(_replace_tree)
             logger.info(
                 f"Copied plugin '{plugin_id}' to {target_dir}",
             )
 
         # Install Python dependencies (off the event loop)
         requirements_file = target_dir / "requirements.txt"
-        if requirements_file.exists():
+        if await asyncio.to_thread(requirements_file.exists):
             await asyncio.to_thread(
                 self._install_requirements_locked,
                 requirements_file,
@@ -1112,9 +1157,11 @@ class PluginLoader:
 
         # Re-read manifest from the installed location so that
         # source_path in the record points to the correct directory
-        installed_manifest = self._load_manifest(
-            resolved_plugin_manifest_path(target_dir),
+        _installed_path, installed_manifest = await asyncio.to_thread(
+            self._read_source_manifest,
+            target_dir,
         )
+        del _installed_path
         return await self.load_plugin(installed_manifest, target_dir, config)
 
     async def unload_plugin(
@@ -1239,11 +1286,11 @@ class PluginLoader:
         # Remove from the loaded-plugins dict
         del self._loaded_plugins[plugin_id]
 
-        # Optionally delete files from disk
+        # Optionally delete files from disk (off the event loop).
         if delete_files:
             source_path = record.source_path
-            if source_path.exists():
-                shutil.rmtree(source_path)
+            if await asyncio.to_thread(source_path.exists):
+                await asyncio.to_thread(shutil.rmtree, source_path)
                 logger.info(
                     f"Deleted plugin files at {source_path}",
                 )

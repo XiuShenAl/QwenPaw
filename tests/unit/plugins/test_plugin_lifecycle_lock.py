@@ -85,6 +85,72 @@ async def test_plugin_lifecycle_allows_different_ids_concurrently():
 
 
 @pytest.mark.asyncio
+async def test_child_task_cannot_bypass_lifecycle_lock():
+    """create_task children must not inherit re-entrancy and skip the lock."""
+    loader = PluginLoader(plugin_dirs=[])
+    child_entered = asyncio.Event()
+
+    async def child_body() -> None:
+        async with loader.plugin_lifecycle("p1"):
+            child_entered.set()
+
+    async with loader.plugin_lifecycle("p1"):
+        child_task = asyncio.create_task(child_body())
+        await asyncio.sleep(0.05)
+        assert not child_entered.is_set()
+        assert not child_task.done()
+
+    await child_task
+    assert child_entered.is_set()
+
+
+@pytest.mark.asyncio
+async def test_uninstall_waits_for_full_install_transaction():
+    """Uninstall waits until install post-load releases the lock."""
+    loader = PluginLoader(plugin_dirs=[])
+    plugin_id = "p-tx"
+    install_holding = asyncio.Event()
+    uninstall_started = asyncio.Event()
+    release_install = asyncio.Event()
+    order: list[str] = []
+
+    async def install_transaction() -> None:
+        # Mimic router: hold lifecycle across load + post-load setup.
+        async with loader.plugin_lifecycle(plugin_id):
+            order.append("install-enter")
+            install_holding.set()
+            await uninstall_started.wait()
+            await asyncio.sleep(0)
+            order.append("install-post-load")
+            await release_install.wait()
+            order.append("install-exit")
+
+    async def uninstall_transaction() -> None:
+        await install_holding.wait()
+        uninstall_started.set()
+        async with loader.plugin_lifecycle(plugin_id):
+            order.append("uninstall-enter")
+        order.append("uninstall-exit")
+
+    install_task = asyncio.create_task(install_transaction())
+    uninstall_task = asyncio.create_task(uninstall_transaction())
+
+    await asyncio.sleep(0.05)
+    assert not uninstall_task.done()
+    assert "uninstall-enter" not in order
+
+    release_install.set()
+    await asyncio.gather(install_task, uninstall_task)
+    assert order == [
+        "install-enter",
+        "install-post-load",
+        "install-exit",
+        "uninstall-enter",
+        "uninstall-exit",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_stale_unload_cannot_delete_tools_from_concurrent_reload():
     """Unload must not race a force-reinstall and wipe the new tools."""
     plugin_id = "__ut_lifecycle_race__"
