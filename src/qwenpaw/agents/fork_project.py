@@ -24,11 +24,19 @@ ACTIVE_SCOPE_REL = Path(".qwenpaw") / "fork_active_scope"
 
 # Terminal statuses are ignored by gate verification (won't block later runs).
 _STATUS_PENDING = "pending"
+_STATUS_FINALIZING = "finalizing"
 _STATUS_FINALIZED = "finalized"
 _STATUS_FAILED = "failed"
 _STATUS_MERGED = "merged"
 _STATUS_SUPERSEDED = "superseded"
-_ACTIVE_STATUSES = frozenset({_STATUS_PENDING, _STATUS_FINALIZED})
+# finalizing counts as active so merge gates stay blocked until commit lands.
+_ACTIVE_STATUSES = frozenset(
+    {_STATUS_PENDING, _STATUS_FINALIZING, _STATUS_FINALIZED},
+)
+# Cover git add+commit timeouts (30s each) so waiters/mark_failed do not
+# race a live claim. Keep aligned with stale reclaim below.
+_FINALIZE_STALE_S = 60.0
+_FINALIZE_CLAIM_WAIT_S = _FINALIZE_STALE_S
 
 FORK_WORKER_COMMIT_PROTOCOL = """\
 ## Fork worktree commit protocol (REQUIRED)
@@ -163,21 +171,28 @@ def resolve_git_project_dir(
     *,
     agent_id: str | None = None,
 ) -> Path | None:
-    """Resolve the git project root using the same rules as the fork API.
+    """Resolve the git project root for fork registry binding.
 
-    Priority: coding_mode.project_dir → agent workspace_dir → *workspace_dir*.
+    - When *workspace_dir* is provided without an explicit *agent_id*, only
+      that path is considered (no implicit active-agent fallback).
+    - When *agent_id* is provided, priority is:
+      ``coding_mode.project_dir`` → agent ``workspace_dir`` → *workspace_dir*.
+    - When *workspace_dir* is omitted, fall back to the active agent config.
+
     Returns None when no git repository is found.
     """
     candidates: list[Path] = []
     aid = agent_id
-    if not aid:
+    # Implicit active-agent lookup only when no explicit workspace was given.
+    # An explicit workspace must not be rebound to an unrelated agent project.
+    if aid is None and workspace_dir is None:
         try:
             from ..app.agent_context import get_current_agent_id
 
             aid = get_current_agent_id() or None
         except Exception:  # noqa: BLE001
             aid = None
-    if aid:
+    if aid is not None:
         try:
             from ..config.config import load_agent_config
 
@@ -215,13 +230,44 @@ def resolve_git_project_dir(
     return None
 
 
+def _matching_agent_id_for_workspace(
+    workspace_dir: Path,
+) -> str | None:
+    """Return active agent_id only when it owns *workspace_dir*."""
+    try:
+        from ..app.agent_context import get_current_agent_id
+        from ..config.config import load_agent_config
+
+        aid = get_current_agent_id() or None
+        if not aid:
+            return None
+        cfg = load_agent_config(aid)
+        raw = getattr(cfg, "workspace_dir", None)
+        if not raw:
+            return None
+        if Path(raw).expanduser().resolve() == workspace_dir:
+            return aid
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 def bind_integration_project_for_workspace(
     workspace_dir: str | Path | None,
     *,
     agent_id: str | None = None,
 ) -> Path | None:
     """Bind workspace → git project pointer (fork-API rules) and return it."""
-    project = resolve_git_project_dir(workspace_dir, agent_id=agent_id)
+    aid = agent_id
+    if aid is None and workspace_dir is not None:
+        try:
+            ws = Path(workspace_dir).expanduser().resolve()
+        except OSError:
+            ws = None
+        if ws is not None:
+            # Dual-root: only use active agent when it owns this workspace.
+            aid = _matching_agent_id_for_workspace(ws)
+    project = resolve_git_project_dir(workspace_dir, agent_id=aid)
     if project is not None and workspace_dir is not None:
         bind_workspace_integration_project(workspace_dir, project)
     return project
@@ -606,13 +652,29 @@ def bind_fork_task(
     return True
 
 
+def _is_fresh_finalizing(meta: dict[str, Any]) -> bool:
+    """True when *meta* holds a non-stale ``finalizing`` claim."""
+    if str(meta.get("status") or "") != _STATUS_FINALIZING:
+        return False
+    started = float(meta.get("finalizing_at") or 0.0)
+    if not started:
+        # Missing timestamp: treat as fresh to avoid clobbering a live claim.
+        return True
+    return (time.time() - started) < _FINALIZE_STALE_S
+
+
 def mark_fork_failed(
     worktree_path: str,
     branch: str,
     *,
     reason: str = "",
 ) -> None:
-    """Mark a fork as failed (kept until the next ``begin_fork_scope``)."""
+    """Mark a fork as failed (kept until the next ``begin_fork_scope``).
+
+    Refuses to overwrite ``finalized`` / ``merged`` / ``superseded``, and
+    also refuses non-stale ``finalizing`` claims so a watchdog/check race
+    cannot flip a live ``git commit`` into ``failed``.
+    """
     if not worktree_path or not branch:
         return
     try:
@@ -628,10 +690,23 @@ def mark_fork_failed(
             # Do not resurrect pruned entries as failed ghosts.
             return
         status = str(meta.get("status") or _STATUS_PENDING)
-        if status in (_STATUS_SUPERSEDED, _STATUS_MERGED):
+        if status in (
+            _STATUS_SUPERSEDED,
+            _STATUS_MERGED,
+            _STATUS_FINALIZED,
+        ):
+            return
+        if _is_fresh_finalizing(meta):
+            logger.info(
+                "Skipping mark_fork_failed for live finalizing fork %s "
+                "(reason=%s)",
+                branch,
+                (reason or "")[:120],
+            )
             return
         meta["status"] = _STATUS_FAILED
         meta["finalized"] = False
+        meta.pop("finalizing_at", None)
         if reason:
             meta["fail_reason"] = reason[:500]
         forks[branch] = meta
@@ -740,6 +815,50 @@ def commit_dirty_worktree(
     return True
 
 
+def _fork_status_unlocked(
+    project_dir: Path,
+    branch: str,
+) -> tuple[str | None, dict[str, Any] | None]:
+    data = _read_registry_unlocked(project_dir)
+    forks = data.get("forks") or {}
+    meta = forks.get(branch) if isinstance(forks, dict) else None
+    if not isinstance(meta, dict):
+        return None, None
+    return str(meta.get("status") or _STATUS_PENDING), meta
+
+
+def _claim_finalize_unlocked(
+    project_dir: Path,
+    branch: str,
+    wt: Path,
+) -> str:
+    """Try to claim finalize ownership.
+
+    Returns one of: ``claimed``, ``finalized``, ``busy``, ``skip``.
+    """
+    data = _read_registry_unlocked(project_dir)
+    forks = data.get("forks") or {}
+    meta = forks.get(branch) if isinstance(forks, dict) else None
+    if not isinstance(meta, dict):
+        return "skip"
+    status = str(meta.get("status") or _STATUS_PENDING)
+    if status in (_STATUS_FINALIZED, _STATUS_MERGED):
+        return "finalized"
+    if status == _STATUS_FINALIZING:
+        if _is_fresh_finalizing(meta):
+            return "busy"
+        # Stale claim — reclaim.
+    elif status != _STATUS_PENDING:
+        return "skip"
+    meta["status"] = _STATUS_FINALIZING
+    meta["finalizing_at"] = time.time()
+    meta["worktree"] = str(wt)
+    forks[branch] = meta
+    data["forks"] = forks
+    _write_registry_unlocked(project_dir, data)
+    return "claimed"
+
+
 def finalize_fork_worktree(
     worktree_path: str,
     branch: str,
@@ -750,32 +869,44 @@ def finalize_fork_worktree(
 
     Refuses to recreate registry entries that were pruned or superseded —
     late background completion after a new scope must not resurrect ghosts.
+
+    Concurrent finalize paths serialize via a ``finalizing`` claim: already
+    finalized forks return success idempotently; a peer mid-finalize is
+    waited on instead of starting a second ``git commit``.
     """
-    # pylint: disable=too-many-return-statements
+    # pylint: disable=too-many-return-statements,too-many-branches
     if not worktree_path or not branch:
         return False
     wt = Path(worktree_path).expanduser().resolve()
     if not wt.is_dir():
         return False
     project_dir = project_dir_from_worktree(wt)
-    with _registry_lock(project_dir):
-        data = _read_registry_unlocked(project_dir)
-        forks = data.get("forks") or {}
-        meta = forks.get(branch) if isinstance(forks, dict) else None
-        if not isinstance(meta, dict):
+
+    deadline = time.time() + _FINALIZE_CLAIM_WAIT_S
+    claimed = False
+    while True:
+        with _registry_lock(project_dir):
+            claim = _claim_finalize_unlocked(project_dir, branch, wt)
+        if claim == "finalized":
+            return True
+        if claim == "claimed":
+            claimed = True
+            break
+        if claim == "skip":
             logger.info(
-                "Skipping finalize for unknown/pruned fork branch %s",
+                "Skipping finalize for unknown/inactive fork %s",
                 branch,
             )
             return False
-        status = str(meta.get("status") or _STATUS_PENDING)
-        if status not in _ACTIVE_STATUSES:
-            logger.info(
-                "Skipping finalize for non-active fork %s (status=%s)",
-                branch,
-                status,
-            )
-            return False
+        # busy — wait for peer
+        if time.time() >= deadline:
+            with _registry_lock(project_dir):
+                status, _meta = _fork_status_unlocked(project_dir, branch)
+            return status in (_STATUS_FINALIZED, _STATUS_MERGED)
+        time.sleep(0.1)
+
+    if not claimed:
+        return False
 
     ok = commit_dirty_worktree(
         str(wt),
@@ -789,21 +920,33 @@ def finalize_fork_worktree(
         if not isinstance(meta, dict):
             return False
         status = str(meta.get("status") or _STATUS_PENDING)
-        if status not in _ACTIVE_STATUSES:
+        # Peer/cancel may have moved us; never resurrect non-active rows.
+        if status == _STATUS_FINALIZED:
+            return True
+        if status == _STATUS_MERGED:
+            return True
+        if status != _STATUS_FINALIZING:
+            return False
+        if not ok:
+            # Release claim so a retry/owner can try again; caller may fail.
+            meta["status"] = _STATUS_PENDING
+            meta.pop("finalizing_at", None)
+            forks[branch] = meta
+            _write_registry_unlocked(project_dir, data)
             return False
         base = str(meta.get("base") or "")
         # Compare against fork-time base so a worker that already committed
         # is not mislabeled no_changes.
-        no_changes = bool(ok) and bool(head) and head == base
+        no_changes = bool(head) and head == base
         meta["head"] = head
         meta["worktree"] = str(wt)
-        meta["finalized"] = bool(ok)
+        meta["finalized"] = True
         meta["no_changes"] = no_changes
-        if ok:
-            meta["status"] = _STATUS_FINALIZED
+        meta["status"] = _STATUS_FINALIZED
+        meta.pop("finalizing_at", None)
         forks[branch] = meta
         _write_registry_unlocked(project_dir, data)
-    return bool(ok)
+    return True
 
 
 def finalize_fork_worktree_or_fail(
@@ -812,19 +955,38 @@ def finalize_fork_worktree_or_fail(
     *,
     message: str | None = None,
 ) -> bool:
-    """Finalize a fork; on failure mark it ``failed`` so gates stay blocked."""
+    """Finalize a fork; on failure mark it ``failed`` so gates stay blocked.
+
+    Idempotent when another path already finalized successfully. Does not
+    mark ``failed`` while a peer still holds the ``finalizing`` claim.
+    """
     ok = finalize_fork_worktree(
         worktree_path,
         branch,
         message=message,
     )
-    if not ok:
-        mark_fork_failed(
-            worktree_path,
-            branch,
-            reason="finalize_fork_worktree failed",
-        )
-    return ok
+    if ok:
+        return True
+    try:
+        wt = Path(worktree_path).expanduser().resolve()
+        project_dir = project_dir_from_worktree(wt)
+    except OSError:
+        return False
+    with _registry_lock(project_dir):
+        status, meta = _fork_status_unlocked(project_dir, branch)
+        if status in (_STATUS_FINALIZED, _STATUS_MERGED):
+            return True
+        if meta is not None and _is_fresh_finalizing(meta):
+            # Peer still owns the critical section — do not clobber.
+            return False
+        if status is None:
+            return False
+    mark_fork_failed(
+        worktree_path,
+        branch,
+        reason="finalize_fork_worktree failed",
+    )
+    return False
 
 
 def finalize_fork_for_task(

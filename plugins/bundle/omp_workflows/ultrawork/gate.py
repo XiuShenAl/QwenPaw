@@ -83,7 +83,12 @@ class UltraworkGate(LoopGate):
         st.phase = phase
 
         if phase == "done":
-            if not forks_integrated(data, st.workspace_dir):
+            integrated = await asyncio.to_thread(
+                forks_integrated,
+                data,
+                st.workspace_dir,
+            )
+            if not integrated:
                 # Keep target phase "done"; do not rewind to working.
                 st.blocked_on_merge = True
                 st.phase = "done"

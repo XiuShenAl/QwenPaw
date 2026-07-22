@@ -1213,7 +1213,8 @@ async def _spawn_forked_subagent(
             ACP_CODING_PROJECT_META_KEY: worktree_path,
             "fork_worktree_branch": worktree_branch,
         }
-        registered = register_fork(
+        registered = await asyncio.to_thread(
+            register_fork,
             worktree_path,
             worktree_branch,
             session_id=fork_session_id,
@@ -1257,8 +1258,15 @@ async def _spawn_forked_subagent(
         )
         task_id = result.get("task_id") if isinstance(result, dict) else None
         if worktree_path and task_id:
-            bind_fork_task(worktree_path, worktree_branch, str(task_id))
+            await asyncio.to_thread(
+                bind_fork_task,
+                worktree_path,
+                worktree_branch,
+                str(task_id),
+            )
             # Poller fallback if the console completion hook is unavailable.
+            # finalize_fork_worktree is claim/idempotent so overlapping
+            # console-hook / check_agent_task paths are safe.
             asyncio.create_task(
                 _watch_background_fork_finalize(
                     str(task_id),

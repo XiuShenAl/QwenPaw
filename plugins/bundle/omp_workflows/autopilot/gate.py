@@ -115,25 +115,28 @@ class AutopilotGate(LoopGate):
             st.validation_round,
         )
 
-        if phase in _POST_FORK_PHASES and not forks_integrated(
-            data,
-            st.workspace_dir,
-        ):
-            # Preserve target phase; do not burn iteration/stall budget
-            # while waiting on merge (same as Ultrawork).
-            st.blocked_on_merge = True
-            st.phase = phase
-            await asyncio.to_thread(
-                wf.update_state,
-                {
-                    "merge_blocked": True,
-                    "resume_phase": phase,
-                },
+        if phase in _POST_FORK_PHASES:
+            integrated = await asyncio.to_thread(
+                forks_integrated,
+                data,
+                st.workspace_dir,
             )
-            return StopHandlerResult(
-                action=StopAction.INTERRUPT_AND_CONTINUE,
-                reason="Autopilot blocked: forks not integrated",
-            )
+            if not integrated:
+                # Preserve target phase; do not burn iteration/stall budget
+                # while waiting on merge (same as Ultrawork).
+                st.blocked_on_merge = True
+                st.phase = phase
+                await asyncio.to_thread(
+                    wf.update_state,
+                    {
+                        "merge_blocked": True,
+                        "resume_phase": phase,
+                    },
+                )
+                return StopHandlerResult(
+                    action=StopAction.INTERRUPT_AND_CONTINUE,
+                    reason="Autopilot blocked: forks not integrated",
+                )
 
         if data.get("merge_blocked"):
             await asyncio.to_thread(
