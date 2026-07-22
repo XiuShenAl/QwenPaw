@@ -332,8 +332,71 @@ def test_matching_agent_dual_root_bind(tmp_path: Path, monkeypatch) -> None:
     assert resolve_integration_project_dir(workspace) == project.resolve()
 
 
-def test_mark_fork_failed_skips_fresh_finalizing(tmp_path: Path) -> None:
-    """Watchdog/check must not clobber a live finalize claim."""
+def test_mark_fork_failed_waits_for_finalize_lock(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Watchdog blocks on the finalize lock and cannot overwrite success."""
+    from qwenpaw.agents import fork_project as fp
+
+    project = tmp_path / "repo"
+    _init_repo(project)
+    scope = begin_fork_scope(project)
+    wt = project / ".qwenpaw" / "worktrees" / "w1"
+    branch = "fork/w1"
+    _git(project, "worktree", "add", str(wt), "-b", branch)
+    register_fork(
+        str(wt),
+        branch,
+        workspace_dir=project,
+        scope_id=scope,
+    )
+    (wt / "feat.txt").write_text("feat\n", encoding="utf-8")
+    registry = project / REGISTRY_REL
+
+    hold = threading.Event()
+    release = threading.Event()
+    failed_done = threading.Event()
+    real_commit = fp.commit_dirty_worktree
+
+    def _slow_commit(worktree_path: str, message: str = "x") -> bool:
+        hold.set()
+        assert release.wait(timeout=10)
+        return real_commit(worktree_path, message)
+
+    monkeypatch.setattr(fp, "commit_dirty_worktree", _slow_commit)
+
+    results: list[bool] = []
+
+    def _run_finalize() -> None:
+        results.append(
+            finalize_fork_worktree(str(wt), branch, message="feat"),
+        )
+
+    def _watchdog() -> None:
+        assert hold.wait(timeout=5)
+        mark_fork_failed(str(wt), branch, reason="watchdog timeout")
+        failed_done.set()
+
+    t_fin = threading.Thread(target=_run_finalize)
+    t_watch = threading.Thread(target=_watchdog)
+    t_fin.start()
+    t_watch.start()
+    assert hold.wait(timeout=5)
+    # Watchdog must stay blocked while git finalize still holds the lock.
+    time.sleep(0.2)
+    assert not failed_done.is_set()
+    release.set()
+    t_fin.join(timeout=10)
+    assert failed_done.wait(timeout=5)
+    t_watch.join(timeout=5)
+    assert results == [True]
+    after = json.loads(registry.read_text(encoding="utf-8"))
+    assert after["forks"][branch]["status"] == "finalized"
+
+
+def test_recover_crashed_finalizing_clean_worktree(tmp_path: Path) -> None:
+    """Crash leftover + clean worktree is healed to finalized."""
     project = tmp_path / "repo"
     _init_repo(project)
     scope = begin_fork_scope(project)
@@ -349,20 +412,38 @@ def test_mark_fork_failed_skips_fresh_finalizing(tmp_path: Path) -> None:
     registry = project / REGISTRY_REL
     data = json.loads(registry.read_text(encoding="utf-8"))
     data["forks"][branch]["status"] = "finalizing"
-    data["forks"][branch]["finalizing_at"] = time.time()
     registry.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
-    mark_fork_failed(str(wt), branch, reason="watchdog timeout")
+    assert finalize_fork_worktree(str(wt), branch) is True
     after = json.loads(registry.read_text(encoding="utf-8"))
-    assert after["forks"][branch]["status"] == "finalizing"
+    assert after["forks"][branch]["status"] == "finalized"
+    assert after["forks"][branch]["no_changes"] is True
 
-    # Stale claim may be marked failed (aligned with reclaim window).
-    data = after
-    data["forks"][branch]["finalizing_at"] = time.time() - 120
+
+def test_recover_crashed_finalizing_dirty_worktree(tmp_path: Path) -> None:
+    """Crash leftover + dirty worktree re-runs commit and finalizes."""
+    project = tmp_path / "repo"
+    _init_repo(project)
+    scope = begin_fork_scope(project)
+    wt = project / ".qwenpaw" / "worktrees" / "w1"
+    branch = "fork/w1"
+    _git(project, "worktree", "add", str(wt), "-b", branch)
+    register_fork(
+        str(wt),
+        branch,
+        workspace_dir=project,
+        scope_id=scope,
+    )
+    registry = project / REGISTRY_REL
+    data = json.loads(registry.read_text(encoding="utf-8"))
+    data["forks"][branch]["status"] = "finalizing"
     registry.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    mark_fork_failed(str(wt), branch, reason="stale reclaim")
-    stale = json.loads(registry.read_text(encoding="utf-8"))
-    assert stale["forks"][branch]["status"] == "failed"
+    (wt / "feat.txt").write_text("feat\n", encoding="utf-8")
+
+    assert finalize_fork_worktree(str(wt), branch, message="feat") is True
+    after = json.loads(registry.read_text(encoding="utf-8"))
+    assert after["forks"][branch]["status"] == "finalized"
+    assert after["forks"][branch]["no_changes"] is False
 
 
 def test_finalize_idempotent_and_mark_failed_skips_finalized(

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -33,10 +34,6 @@ _STATUS_SUPERSEDED = "superseded"
 _ACTIVE_STATUSES = frozenset(
     {_STATUS_PENDING, _STATUS_FINALIZING, _STATUS_FINALIZED},
 )
-# Cover git add+commit timeouts (30s each) so waiters/mark_failed do not
-# race a live claim. Keep aligned with stale reclaim below.
-_FINALIZE_STALE_S = 60.0
-_FINALIZE_CLAIM_WAIT_S = _FINALIZE_STALE_S
 
 FORK_WORKER_COMMIT_PROTOCOL = """\
 ## Fork worktree commit protocol (REQUIRED)
@@ -103,43 +100,107 @@ def project_dir_from_worktree(worktree_path: Path) -> Path:
     return worktree_path.expanduser().resolve().parent.parent.parent
 
 
+def _lock_file_acquire(lock_file: Any, *, blocking: bool) -> bool:
+    """Acquire an exclusive lock on an open file; return success."""
+    if os.name == "nt":
+        import msvcrt
+
+        lock_file.seek(0)
+        if lock_file.read(1) == "":
+            lock_file.write("0")
+            lock_file.flush()
+        lock_file.seek(0)
+        flag = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+        try:
+            msvcrt.locking(lock_file.fileno(), flag, 1)
+            return True
+        except OSError:
+            if blocking:
+                raise
+            return False
+
+    import fcntl
+
+    flag = fcntl.LOCK_EX if blocking else (fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        fcntl.flock(lock_file.fileno(), flag)
+        return True
+    except (BlockingIOError, OSError):
+        if blocking:
+            raise
+        return False
+
+
+def _lock_file_release(lock_file: Any) -> None:
+    """Release an exclusive lock acquired by ``_lock_file_acquire``."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
+@contextmanager
+def _exclusive_file_lock(
+    lock_path: Path,
+    *,
+    blocking: bool = True,
+) -> Iterator[bool]:
+    """Acquire an exclusive file lock; yields whether the lock was acquired."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        acquired = False
+        try:
+            acquired = _lock_file_acquire(lock_file, blocking=blocking)
+            yield acquired
+        finally:
+            if acquired:
+                _lock_file_release(lock_file)
+
+
 @contextmanager
 def _registry_lock(project_dir: Path) -> Iterator[None]:
     """Exclusive lock around registry read-modify-write."""
     lock_path = _registry_path_for_project(project_dir).with_suffix(
         ".json.lock",
     )
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    # Use a dedicated lock file so Windows can replace the JSON atomically.
-    with lock_path.open("a+", encoding="utf-8") as lock_file:
-        try:
-            if os.name == "nt":
-                import msvcrt
+    # Dedicated lock file so Windows can replace the JSON atomically.
+    with _exclusive_file_lock(lock_path, blocking=True) as acquired:
+        if not acquired:
+            raise RuntimeError(f"failed to acquire registry lock: {lock_path}")
+        yield
 
-                lock_file.seek(0)
-                if lock_file.read(1) == "":
-                    lock_file.write("0")
-                    lock_file.flush()
-                lock_file.seek(0)
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
-            else:
-                import fcntl
 
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            yield
-        finally:
-            try:
-                if os.name == "nt":
-                    import msvcrt
+def _fork_finalize_lock_path(project_dir: Path, branch: str) -> Path:
+    digest = hashlib.sha256(branch.encode("utf-8")).hexdigest()[:24]
+    return project_dir / ".qwenpaw" / "fork_locks" / f"{digest}.lock"
 
-                    lock_file.seek(0)
-                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-                else:
-                    import fcntl
 
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-            except OSError:
-                pass
+@contextmanager
+def _fork_finalize_lock(
+    project_dir: Path,
+    branch: str,
+    *,
+    blocking: bool = True,
+) -> Iterator[bool]:
+    """Serialize finalize/fail (including git) for one branch.
+
+    Held for the whole critical section so a second path cannot start
+    ``git add``/``commit`` (or mark failed) while the owner is alive.
+    A crashed owner releases the OS lock automatically.
+    """
+    with _exclusive_file_lock(
+        _fork_finalize_lock_path(project_dir, branch),
+        blocking=blocking,
+    ) as acquired:
+        yield acquired
 
 
 def bind_workspace_integration_project(
@@ -652,15 +713,32 @@ def bind_fork_task(
     return True
 
 
-def _is_fresh_finalizing(meta: dict[str, Any]) -> bool:
-    """True when *meta* holds a non-stale ``finalizing`` claim."""
-    if str(meta.get("status") or "") != _STATUS_FINALIZING:
-        return False
-    started = float(meta.get("finalizing_at") or 0.0)
-    if not started:
-        # Missing timestamp: treat as fresh to avoid clobbering a live claim.
-        return True
-    return (time.time() - started) < _FINALIZE_STALE_S
+def _mark_fork_failed_unlocked(
+    project_dir: Path,
+    branch: str,
+    *,
+    reason: str = "",
+) -> None:
+    """Mark failed under an already-held finalize + registry lock."""
+    data = _read_registry_unlocked(project_dir)
+    forks = data.setdefault("forks", {})
+    meta = forks.get(branch)
+    if not isinstance(meta, dict):
+        # Do not resurrect pruned entries as failed ghosts.
+        return
+    status = str(meta.get("status") or _STATUS_PENDING)
+    if status in (
+        _STATUS_SUPERSEDED,
+        _STATUS_MERGED,
+        _STATUS_FINALIZED,
+    ):
+        return
+    meta["status"] = _STATUS_FAILED
+    meta["finalized"] = False
+    if reason:
+        meta["fail_reason"] = reason[:500]
+    forks[branch] = meta
+    _write_registry_unlocked(project_dir, data)
 
 
 def mark_fork_failed(
@@ -671,9 +749,9 @@ def mark_fork_failed(
 ) -> None:
     """Mark a fork as failed (kept until the next ``begin_fork_scope``).
 
-    Refuses to overwrite ``finalized`` / ``merged`` / ``superseded``, and
-    also refuses non-stale ``finalizing`` claims so a watchdog/check race
-    cannot flip a live ``git commit`` into ``failed``.
+    Blocks on the same per-branch finalize lock as ``finalize_fork_worktree``
+    so a watchdog waits for an in-flight finalize and cannot overwrite a
+    successful ``finalized`` result. Also refuses ``merged`` / ``superseded``.
     """
     if not worktree_path or not branch:
         return
@@ -682,35 +760,15 @@ def mark_fork_failed(
         project_dir = project_dir_from_worktree(wt)
     except OSError:
         return
-    with _registry_lock(project_dir):
-        data = _read_registry_unlocked(project_dir)
-        forks = data.setdefault("forks", {})
-        meta = forks.get(branch)
-        if not isinstance(meta, dict):
-            # Do not resurrect pruned entries as failed ghosts.
+    with _fork_finalize_lock(project_dir, branch, blocking=True) as acquired:
+        if not acquired:
             return
-        status = str(meta.get("status") or _STATUS_PENDING)
-        if status in (
-            _STATUS_SUPERSEDED,
-            _STATUS_MERGED,
-            _STATUS_FINALIZED,
-        ):
-            return
-        if _is_fresh_finalizing(meta):
-            logger.info(
-                "Skipping mark_fork_failed for live finalizing fork %s "
-                "(reason=%s)",
+        with _registry_lock(project_dir):
+            _mark_fork_failed_unlocked(
+                project_dir,
                 branch,
-                (reason or "")[:120],
+                reason=reason,
             )
-            return
-        meta["status"] = _STATUS_FAILED
-        meta["finalized"] = False
-        meta.pop("finalizing_at", None)
-        if reason:
-            meta["fail_reason"] = reason[:500]
-        forks[branch] = meta
-        _write_registry_unlocked(project_dir, data)
 
 
 def mark_fork_failed_for_task(
@@ -827,36 +885,63 @@ def _fork_status_unlocked(
     return str(meta.get("status") or _STATUS_PENDING), meta
 
 
-def _claim_finalize_unlocked(
+def _write_finalized_unlocked(
     project_dir: Path,
     branch: str,
     wt: Path,
-) -> str:
-    """Try to claim finalize ownership.
-
-    Returns one of: ``claimed``, ``finalized``, ``busy``, ``skip``.
-    """
+    *,
+    head: str,
+) -> bool:
+    """Mark *branch* finalized under the registry lock."""
     data = _read_registry_unlocked(project_dir)
-    forks = data.get("forks") or {}
-    meta = forks.get(branch) if isinstance(forks, dict) else None
+    forks = data.setdefault("forks", {})
+    meta = forks.get(branch)
     if not isinstance(meta, dict):
-        return "skip"
+        return False
     status = str(meta.get("status") or _STATUS_PENDING)
     if status in (_STATUS_FINALIZED, _STATUS_MERGED):
-        return "finalized"
-    if status == _STATUS_FINALIZING:
-        if _is_fresh_finalizing(meta):
-            return "busy"
-        # Stale claim — reclaim.
-    elif status != _STATUS_PENDING:
-        return "skip"
-    meta["status"] = _STATUS_FINALIZING
-    meta["finalizing_at"] = time.time()
+        return True
+    if status not in (_STATUS_PENDING, _STATUS_FINALIZING):
+        return False
+    base = str(meta.get("base") or "")
+    meta["head"] = head
     meta["worktree"] = str(wt)
+    meta["finalized"] = True
+    meta["no_changes"] = bool(head) and head == base
+    meta["status"] = _STATUS_FINALIZED
     forks[branch] = meta
-    data["forks"] = forks
     _write_registry_unlocked(project_dir, data)
-    return "claimed"
+    return True
+
+
+def _recover_crashed_finalizing_unlocked(
+    project_dir: Path,
+    branch: str,
+    wt: Path,
+) -> bool | None:
+    """Heal a leftover ``finalizing`` row after the previous owner crashed.
+
+    Returns:
+      - ``True`` / ``False`` when recovery fully decided the outcome
+      - ``None`` when the worktree is dirty and caller should re-run git
+    """
+    porcelain = _git_stdout(["status", "--porcelain"], wt)
+    if porcelain is None:
+        _mark_fork_failed_unlocked(
+            project_dir,
+            branch,
+            reason="git unreadable after crashed finalize",
+        )
+        return False
+    if porcelain:
+        return None
+    head = _git_stdout(["rev-parse", "HEAD"], wt) or ""
+    return _write_finalized_unlocked(
+        project_dir,
+        branch,
+        wt,
+        head=head,
+    )
 
 
 def finalize_fork_worktree(
@@ -870,9 +955,10 @@ def finalize_fork_worktree(
     Refuses to recreate registry entries that were pruned or superseded —
     late background completion after a new scope must not resurrect ghosts.
 
-    Concurrent finalize paths serialize via a ``finalizing`` claim: already
-    finalized forks return success idempotently; a peer mid-finalize is
-    waited on instead of starting a second ``git commit``.
+    Concurrent callers serialize on a per-branch OS lock held across
+    registry updates and ``git status``/``add``/``commit``. A second caller
+    blocks, then returns success if the fork is already finalized. After a
+    crash, a leftover ``finalizing`` row is healed from the worktree state.
     """
     # pylint: disable=too-many-return-statements,too-many-branches
     if not worktree_path or not branch:
@@ -882,71 +968,71 @@ def finalize_fork_worktree(
         return False
     project_dir = project_dir_from_worktree(wt)
 
-    deadline = time.time() + _FINALIZE_CLAIM_WAIT_S
-    claimed = False
-    while True:
+    with _fork_finalize_lock(project_dir, branch, blocking=True) as acquired:
+        if not acquired:
+            return False
+
         with _registry_lock(project_dir):
-            claim = _claim_finalize_unlocked(project_dir, branch, wt)
-        if claim == "finalized":
-            return True
-        if claim == "claimed":
-            claimed = True
-            break
-        if claim == "skip":
-            logger.info(
-                "Skipping finalize for unknown/inactive fork %s",
-                branch,
-            )
-            return False
-        # busy — wait for peer
-        if time.time() >= deadline:
-            with _registry_lock(project_dir):
-                status, _meta = _fork_status_unlocked(project_dir, branch)
-            return status in (_STATUS_FINALIZED, _STATUS_MERGED)
-        time.sleep(0.1)
-
-    if not claimed:
-        return False
-
-    ok = commit_dirty_worktree(
-        str(wt),
-        message or f"fork worker {branch}",
-    )
-    head = _git_stdout(["rev-parse", "HEAD"], wt) or ""
-    with _registry_lock(project_dir):
-        data = _read_registry_unlocked(project_dir)
-        forks = data.setdefault("forks", {})
-        meta = forks.get(branch)
-        if not isinstance(meta, dict):
-            return False
-        status = str(meta.get("status") or _STATUS_PENDING)
-        # Peer/cancel may have moved us; never resurrect non-active rows.
-        if status == _STATUS_FINALIZED:
-            return True
-        if status == _STATUS_MERGED:
-            return True
-        if status != _STATUS_FINALIZING:
-            return False
-        if not ok:
-            # Release claim so a retry/owner can try again; caller may fail.
-            meta["status"] = _STATUS_PENDING
-            meta.pop("finalizing_at", None)
-            forks[branch] = meta
+            status, meta = _fork_status_unlocked(project_dir, branch)
+            if status in (_STATUS_FINALIZED, _STATUS_MERGED):
+                return True
+            if meta is None or status not in (
+                _STATUS_PENDING,
+                _STATUS_FINALIZING,
+            ):
+                logger.info(
+                    "Skipping finalize for unknown/inactive fork %s",
+                    branch,
+                )
+                return False
+            if status == _STATUS_FINALIZING:
+                recovered = _recover_crashed_finalizing_unlocked(
+                    project_dir,
+                    branch,
+                    wt,
+                )
+                if recovered is not None:
+                    return recovered
+            data = _read_registry_unlocked(project_dir)
+            forks = data.setdefault("forks", {})
+            row = forks.get(branch)
+            if not isinstance(row, dict):
+                return False
+            row["status"] = _STATUS_FINALIZING
+            row["worktree"] = str(wt)
+            forks[branch] = row
             _write_registry_unlocked(project_dir, data)
-            return False
-        base = str(meta.get("base") or "")
-        # Compare against fork-time base so a worker that already committed
-        # is not mislabeled no_changes.
-        no_changes = bool(head) and head == base
-        meta["head"] = head
-        meta["worktree"] = str(wt)
-        meta["finalized"] = True
-        meta["no_changes"] = no_changes
-        meta["status"] = _STATUS_FINALIZED
-        meta.pop("finalizing_at", None)
-        forks[branch] = meta
-        _write_registry_unlocked(project_dir, data)
-    return True
+
+        ok = commit_dirty_worktree(
+            str(wt),
+            message or f"fork worker {branch}",
+        )
+        head = _git_stdout(["rev-parse", "HEAD"], wt) or ""
+        with _registry_lock(project_dir):
+            status, meta = _fork_status_unlocked(project_dir, branch)
+            if status in (_STATUS_FINALIZED, _STATUS_MERGED):
+                return True
+            if meta is None or status not in (
+                _STATUS_PENDING,
+                _STATUS_FINALIZING,
+            ):
+                return False
+            if not ok:
+                # Leave pending so finalize_or_fail / retry can decide.
+                data = _read_registry_unlocked(project_dir)
+                forks = data.setdefault("forks", {})
+                row = forks.get(branch)
+                if isinstance(row, dict):
+                    row["status"] = _STATUS_PENDING
+                    forks[branch] = row
+                    _write_registry_unlocked(project_dir, data)
+                return False
+            return _write_finalized_unlocked(
+                project_dir,
+                branch,
+                wt,
+                head=head,
+            )
 
 
 def finalize_fork_worktree_or_fail(
@@ -957,8 +1043,9 @@ def finalize_fork_worktree_or_fail(
 ) -> bool:
     """Finalize a fork; on failure mark it ``failed`` so gates stay blocked.
 
-    Idempotent when another path already finalized successfully. Does not
-    mark ``failed`` while a peer still holds the ``finalizing`` claim.
+    Idempotent when another path already finalized successfully. Uses the
+    same per-branch lock as finalize, so a peer cannot be marked failed
+    until its in-flight finalize finishes.
     """
     ok = finalize_fork_worktree(
         worktree_path,
@@ -967,26 +1054,20 @@ def finalize_fork_worktree_or_fail(
     )
     if ok:
         return True
+    mark_fork_failed(
+        worktree_path,
+        branch,
+        reason="finalize_fork_worktree failed",
+    )
+    # Peer may have finalized while we failed; treat that as success.
     try:
         wt = Path(worktree_path).expanduser().resolve()
         project_dir = project_dir_from_worktree(wt)
     except OSError:
         return False
     with _registry_lock(project_dir):
-        status, meta = _fork_status_unlocked(project_dir, branch)
-        if status in (_STATUS_FINALIZED, _STATUS_MERGED):
-            return True
-        if meta is not None and _is_fresh_finalizing(meta):
-            # Peer still owns the critical section — do not clobber.
-            return False
-        if status is None:
-            return False
-    mark_fork_failed(
-        worktree_path,
-        branch,
-        reason="finalize_fork_worktree failed",
-    )
-    return False
+        status, _meta = _fork_status_unlocked(project_dir, branch)
+    return status in (_STATUS_FINALIZED, _STATUS_MERGED)
 
 
 def finalize_fork_for_task(
