@@ -1116,26 +1116,46 @@ class PluginLoader:
             record: PluginRecord whose tools should be removed
         """
         try:
-            from .api import _TOOL_PLUGIN_OWNERS, _unbridge_from_runtime
+            from .api import (
+                _TOOL_PLUGIN_OWNERS,
+                _TOOL_PLUGIN_OWNERS_LOCK,
+                _unbridge_from_runtime,
+            )
 
             tools_module = sys.modules.get("qwenpaw.agents.tools")
             meta: Dict = record.manifest.meta or {}
-            tool_names: List[str] = []
+            # Manifest names are candidates only — never deletion authority.
+            # A misconfigured / malicious plugin must not unload another
+            # plugin's tool, a builtin, or a hot-reload replacement.
+            manifest_candidates: List[str] = []
 
             # Legacy single-tool format: meta.tool_name
             old_name = meta.get("tool_name")
             if old_name and isinstance(old_name, str):
-                tool_names.append(old_name)
+                manifest_candidates.append(old_name)
 
             # Multi-tool format: meta.tools[].name
             for tool in meta.get("tools", []):
                 if isinstance(tool, dict) and tool.get("name"):
-                    tool_names.append(tool["name"])
+                    manifest_candidates.append(tool["name"])
 
-            # Tools registered via PluginApi may only appear in ownership.
-            for name, owner in list(_TOOL_PLUGIN_OWNERS.items()):
-                if owner == plugin_id and name not in tool_names:
-                    tool_names.append(name)
+            with _TOOL_PLUGIN_OWNERS_LOCK:
+                tool_names = [
+                    name
+                    for name, owner in _TOOL_PLUGIN_OWNERS.items()
+                    if owner == plugin_id
+                ]
+
+            for claimed in manifest_candidates:
+                if claimed not in tool_names:
+                    logger.warning(
+                        "Skipping unload cleanup for tool '%s': "
+                        "manifest of plugin '%s' claims it but "
+                        "ownership is held by %r",
+                        claimed,
+                        plugin_id,
+                        _TOOL_PLUGIN_OWNERS.get(claimed),
+                    )
 
             for tool_name in tool_names:
                 tool_func = (

@@ -922,6 +922,116 @@ class TestLoaderGovernanceLifecycle:
             DEFAULT_REGISTRY.unregister_python_tool(tool_name)
             PluginRegistry._instance = old
 
+    @pytest.mark.asyncio
+    async def test_unload_ignores_manifest_tools_not_owned(self):
+        """Manifest claims must not delete other plugins' or builtin tools."""
+        # pylint: disable=too-many-statements
+        import sys
+
+        from qwenpaw.plugins.architecture import (
+            PluginEntryPoints,
+            PluginManifest,
+            PluginRecord,
+        )
+        from qwenpaw.plugins.loader import PluginLoader
+
+        attacker = "__ut_loader_attacker__"
+        victim = "__ut_loader_victim__"
+        foreign_tool = "__ut_loader_foreign_tool__"
+        builtin_name = "append_file"
+        release_tool_ownership_for_plugin(attacker)
+        release_tool_ownership_for_plugin(victim)
+        DEFAULT_REGISTRY.unregister_python_tool(foreign_tool)
+
+        runtime_tr = RuntimeToolRegistry()
+        bootstrap: dict = {"builtin_tool_funcs": []}
+
+        class _Plugins:
+            tool_registry = runtime_tr
+
+        class _Ws:
+            agent_id = "default"
+            plugins = _Plugins()
+
+        class _Wm:
+            agents = {"default": _Ws()}
+            _bootstrap_kwargs = bootstrap
+
+        old = PluginRegistry._instance
+        PluginRegistry._instance = None
+        tools_module = sys.modules["qwenpaw.agents.tools"]
+        had_foreign_attr = hasattr(tools_module, foreign_tool)
+        try:
+            preg = PluginRegistry()
+
+            def _wm_factory():
+                return _Wm()
+
+            # type: ignore[method-assign]
+            preg.get_workspace_manager = _wm_factory
+            loader = PluginLoader(plugin_dirs=[])
+            loader.registry = preg
+
+            async def _victim_tool() -> str:
+                return "victim"
+
+            _victim_tool.__name__ = foreign_tool  # type: ignore[attr-defined]
+            _bridge_to_runtime(
+                foreign_tool,
+                _victim_tool,
+                False,
+                "victim",
+                preg,
+            )
+            setattr(tools_module, foreign_tool, _victim_tool)
+            if foreign_tool not in tools_module.__all__:
+                tools_module.__all__.append(foreign_tool)
+            _TOOL_PLUGIN_OWNERS[foreign_tool] = victim
+            register_tool_governance(
+                DEFAULT_REGISTRY,
+                python_name=foreign_tool,
+                tool_type="network",
+                owner=victim,
+            )
+
+            # Attacker owns nothing, but manifest claims foreign + builtin.
+            loader._loaded_plugins[attacker] = PluginRecord(
+                manifest=PluginManifest(
+                    id=attacker,
+                    name="Attacker",
+                    version="1.0.0",
+                    entry=PluginEntryPoints(backend="plugin.py"),
+                    meta={
+                        "tool_name": foreign_tool,
+                        "tools": [{"name": builtin_name}],
+                    },
+                ),
+                source_path=Path("/fake-attacker"),
+                enabled=True,
+                instance=None,
+            )
+
+            assert hasattr(tools_module, builtin_name)
+            await loader.unload_plugin(attacker)
+
+            # Foreign ownership / runtime / agents.tools must survive.
+            assert _TOOL_PLUGIN_OWNERS.get(foreign_tool) == victim
+            assert foreign_tool in runtime_tr
+            assert getattr(tools_module, foreign_tool) is _victim_tool
+            assert foreign_tool in tools_module.__all__
+            # Builtin must not be deleted by a hostile manifest claim.
+            assert hasattr(tools_module, builtin_name)
+            assert DEFAULT_REGISTRY.get_owner(foreign_tool) == victim
+        finally:
+            release_tool_ownership_for_plugin(attacker)
+            release_tool_ownership_for_plugin(victim)
+            DEFAULT_REGISTRY.unregister_python_tool(foreign_tool)
+            if not had_foreign_attr and hasattr(tools_module, foreign_tool):
+                delattr(tools_module, foreign_tool)
+            if foreign_tool in getattr(tools_module, "__all__", []):
+                tools_module.__all__.remove(foreign_tool)
+            PluginRegistry._instance = old
+
 
 class TestWindowsStylePathExtraction:
     def test_extract_target_joins_backslash_relative_path(self):

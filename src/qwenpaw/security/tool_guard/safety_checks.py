@@ -45,6 +45,10 @@ _PATH_END = r"(?=[\s|;|&)\"'`]|\\[\"']|$)"
 #   (WSL ``/mnt/<d>/Users/<user>/project``, Git Bash ``/c/Users/.../proj``,
 #   Cygwin ``/cygdrive/c/...``) stay allowed, but drive/Users/Windows
 #   wipe equivalents stay blocked.
+# - ``/Volumes`` (macOS external / mounted disks) is depth-capped like
+#   home: ``/Volumes``, ``/Volumes/<vol>``, and volume-content globs are
+#   catastrophic; deeper project paths such as
+#   ``/Volumes/External/project/build`` stay allowed.
 # - Path forms like ``/./``, ``//``, ``foo/..``, ``~/././*``, ``~/..`` are
 #   handled by expanding ``~`` / ``$HOME`` *then* normalizing each rm
 #   target (see :func:`_normalize_rm_path_token`).  Never ``normpath``
@@ -53,6 +57,10 @@ _PATH_END = r"(?=[\s|;|&)\"'`]|\\[\"']|$)"
 # - Glued end-of-options forms like ``--/*`` / ``--/`` are accepted via
 #   an optional ``--`` prefix (real long-options stay in the flag group).
 _ONE_SEGMENT = r"[^/\s|;|&)\"']+"
+# macOS volume names commonly contain spaces (``My Disk``); allow them
+# inside a single path segment so ``"/Volumes/My Disk/proj"`` is not
+# truncated at the space and mis-classified as a volume-root wipe.
+_VOLUME_SEGMENT = r"[^/\"';|&)]+"
 # Home-content wipe globs: ``/*`` and the equivalent ``/./*``.
 _HOME_STAR_GLOB = r"(?:/\*|/\./\*)"
 # Suffix after WSL/Git Bash/Cygwin drive prefix (raw-string; bash -c safe).
@@ -92,10 +100,7 @@ _RM_CATASTROPHIC_TARGET = (
     + _PATH_END
     # Critical system trees (full subtree).
     + r"|/(?:root|boot|dev|applications|etc|usr|bin|sbin|lib|"
-    r"opt|system|windows|library|volumes|proc|sys)"
-    + r"(?:/|"
-    + _PATH_END
-    + r")"
+    r"opt|system|windows|library|proc|sys)" + r"(?:/|" + _PATH_END + r")"
     # Emulated Windows drive wipes (raw match so bash -c "rm -rf /mnt/c"
     # still hits; depth-capped like resolve path).
     + r"|/mnt/[A-Za-z]"
@@ -106,6 +111,18 @@ _RM_CATASTROPHIC_TARGET = (
     + _EMULATED_DRIVE_SUFFIX
     # Mount/runtime roots only (+ /*), not full subtree (WSL /mnt/c/...).
     + r"|/(?:mnt|media|run|srv)" + _HOME_STAR_GLOB + r"?/?" + _PATH_END
+    # macOS /Volumes: volume root + content globs only, not project paths.
+    # Atomic volume segment prevents backtracking to a whitespace PATH_END
+    # inside names like ``My Disk`` (otherwise ``/Volumes/My`` false-hits).
+    + r"|/volumes(?:/(?>"
+    + _VOLUME_SEGMENT
+    + r")(?:"
+    + _HOME_STAR_GLOB
+    + r")?/?"
+    + r"|"
+    + _HOME_STAR_GLOB
+    + r")?"
+    + _PATH_END
     # /var/* except temp trees /var/tmp and /var/folders
     + r"|/var(?!/(?:tmp|folders)\b)(?:/|" + _PATH_END + r")"
     # /private/* except /private/tmp and /private/var/{tmp,folders}
@@ -281,7 +298,8 @@ BLOCKED_COMMAND_PATTERNS: tuple[str, ...] = (
     _CATASTROPHIC_PATTERNS + _SYSTEM_POWER_PATTERNS
 )
 
-# Full-subtree catastrophic tops (home / mount-runtime are depth-capped).
+# Full-subtree catastrophic tops (home / volumes / mount-runtime are
+# depth-capped separately).
 _CATASTROPHIC_TOP_LEVEL = frozenset(
     {
         "root",
@@ -297,7 +315,6 @@ _CATASTROPHIC_TOP_LEVEL = frozenset(
         "system",
         "windows",
         "library",
-        "volumes",
         "proc",
         "sys",
         "private",
@@ -307,6 +324,10 @@ _CATASTROPHIC_TOP_LEVEL = frozenset(
 
 # /home, /Users, /home/<user>, /Users/<user> only (len 2 or 3).
 _HOME_TOP_LEVEL = frozenset({"home", "users"})
+
+# /Volumes, /Volumes/<volume> only (len 2 or 3).  Deeper paths are
+# common workspaces on external / mounted disks.
+_VOLUMES_TOP_LEVEL = "volumes"
 
 # /mnt, /media, /run, /srv roots only (len == 2).  Deeper paths are
 # common workspaces (WSL ``/mnt/c/...``, USB ``/media/...``).
@@ -384,6 +405,10 @@ def _is_resolved_path_catastrophic(resolved: Path) -> bool:
     # ('/', 'Users') or ('/', 'Users', 'alice') → catastrophic
     # ('/', 'Users', 'alice', 'proj') → not
     if top in _HOME_TOP_LEVEL:
+        return len(parts) <= 3
+    # macOS volumes: /Volumes or /Volumes/<vol> only — not project paths
+    # under an external disk (e.g. /Volumes/External/project/build).
+    if top == _VOLUMES_TOP_LEVEL:
         return len(parts) <= 3
     # Emulated Windows: WSL /mnt/<d>, Git Bash /<d>, Cygwin /cygdrive/<d>.
     if _is_emulated_windows_path_catastrophic(parts):

@@ -147,6 +147,9 @@ class TestIsCommandDestructive:  # pylint: disable=too-many-public-methods
             "rm -rf /media/user/USB/project/dist",
             "rm -rf /run/user/1000/project/tmp",
             "rm -rf /srv/www/app/cache",
+            # macOS external volume project paths (volume-root-only policy).
+            "rm -rf /Volumes/External/project/build",
+            "rm -rf /Volumes/MyDisk/workspace/.cache",
             # Substring / script-name false positives must not hard-match.
             "echo reboot later",
             "npm run reboot",
@@ -316,6 +319,29 @@ class TestIsCommandDestructive:  # pylint: disable=too-many-public-methods
             is False
         )
         assert is_command_catastrophic("rm -rf /srv/www/app") is False
+
+    def test_macos_volumes_depth_capped_like_home(self) -> None:
+        """External-disk project cleanups must not be default auto-deny."""
+        # Volume list / volume-root wipes stay catastrophic.
+        assert is_command_catastrophic("rm -rf /Volumes") is True
+        assert is_command_catastrophic("rm -rf /Volumes/*") is True
+        assert is_command_catastrophic("rm -rf /Volumes/External") is True
+        assert is_command_catastrophic("rm -rf /Volumes/External/*") is True
+        assert is_command_catastrophic("rm -rf /Volumes/External/./*") is True
+        # Spaced volume names (common on macOS) still wipe at volume root.
+        assert is_command_catastrophic('rm -rf "/Volumes/My Disk"') is True
+        assert is_command_catastrophic('rm -rf "/Volumes/My Disk/*"') is True
+        # Deeper project paths on an external volume stay allowed.
+        assert (
+            is_command_catastrophic("rm -rf /Volumes/External/project/build")
+            is False
+        )
+        assert (
+            is_command_catastrophic(
+                'rm -rf "/Volumes/My Disk/AgentScope/QwenPaw/dist"',
+            )
+            is False
+        )
 
     def test_windows_users_and_windows_tree_parity(self) -> None:
         """Windows Users/Windows roots match Unix /Users + /windows."""
