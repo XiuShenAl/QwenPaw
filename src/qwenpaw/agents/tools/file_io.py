@@ -86,7 +86,17 @@ def _get_encoding_for_file(file_path: str) -> str:
     return "utf-8"
 
 
-@tool_descriptor(requires_sandbox=("file_read",), async_execution=True)
+@tool_descriptor(
+    requires_sandbox=("file_read",),
+    async_execution=True,
+    tool_type="file",
+    target_param="file_path",
+    policy_name="Read",
+    default_policy="allow",
+    policy_reason="Read-only file access (global)",
+    ui_description="Read file contents",
+    ui_icon="📄",
+)
 async def read_file(  # pylint: disable=too-many-return-statements
     file_path: str,
     start_line: Optional[int] = None,
@@ -246,7 +256,15 @@ async def read_file(  # pylint: disable=too-many-return-statements
         )
 
 
-@tool_descriptor(requires_sandbox=("file_write",), async_execution=True)
+@tool_descriptor(
+    requires_sandbox=("file_write",),
+    async_execution=True,
+    tool_type="file",
+    target_param="file_path",
+    policy_name="Write",
+    ui_description="Write content to file",
+    ui_icon="✍️",
+)
 async def write_file(
     file_path: str,
     content: str,
@@ -302,7 +320,15 @@ async def write_file(
 
 
 # pylint: disable=too-many-return-statements
-@tool_descriptor(requires_sandbox=("file_write",), async_execution=True)
+@tool_descriptor(
+    requires_sandbox=("file_write",),
+    async_execution=True,
+    tool_type="file",
+    target_param="file_path",
+    policy_name="Edit",
+    ui_description="Edit file using find-and-replace",
+    ui_icon="🖊️",
+)
 async def edit_file(
     file_path: str,
     old_text: str,
@@ -411,6 +437,11 @@ async def edit_file(
     requires_sandbox=("file_write",),
     async_execution=True,
     enabled_by_default=False,
+    tool_type="file",
+    target_param="file_path",
+    policy_name="Append",
+    ui_description="Append content to a file",
+    ui_icon="📎",
 )
 async def append_file(
     file_path: str,

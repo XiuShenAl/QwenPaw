@@ -20,6 +20,8 @@ from ...utils.http import trust_env_for_url
 
 DEFAULT_AGENT_API_BASE_URL = "http://127.0.0.1:8088"
 DEFAULT_AGENT_API_TIMEOUT = 30.0
+MAX_SPAWN_BATCH_SIZE = 10
+MAX_SPAWN_BATCH_CONCURRENCY = 3
 
 
 def resolve_agent_api_base_url(base_url: Optional[str] = None) -> str:
@@ -382,7 +384,10 @@ def format_background_submission_text(
             f"[SESSION: {session_id}]",
             "",
             "Task submitted successfully.",
-            "Check status with: check_agent_task(" f"task_id='{task_id}')",
+            "The subagent is working autonomously"
+            " \u2014 do NOT poll immediately.",
+            "Wait at least 30 seconds, then check with:",
+            f"  check_agent_task(task_id='{task_id}')",
         ],
     )
 
@@ -421,6 +426,11 @@ def format_background_status_text(
         started_at = result.get("started_at", "N/A")
         parts.append("Task is still running...")
         parts.append(f"Started at: {started_at}")
+        parts.append("")
+        parts.append(
+            "Do NOT poll again immediately."
+            " Wait at least 30 seconds before next check.",
+        )
     elif status == "pending":
         parts.append("Task is pending in queue...")
     elif status == "submitted":
@@ -430,7 +440,13 @@ def format_background_status_text(
     return "\n".join(parts)
 
 
-@tool_descriptor(async_execution=True)
+@tool_descriptor(
+    async_execution=True,
+    tool_type="internal",
+    policy_name="ListAgents",
+    ui_description="List configured agents from the local API",
+    ui_icon="🤖",
+)
 async def list_agents(
     base_url: Optional[str] = None,
 ) -> ToolChunk:
@@ -445,7 +461,17 @@ async def list_agents(
     return _tool_text_response(_json_text(result))
 
 
-@tool_descriptor(async_execution=True)
+@tool_descriptor(
+    async_execution=True,
+    tool_type="internal",
+    target_param="to_agent",
+    policy_name="ChatWithAgent",
+    ui_description=(
+        "Send a message to another configured agent and wait for "
+        "the response"
+    ),
+    ui_icon="💬",
+)
 async def chat_with_agent(
     to_agent: str,
     text: str,
@@ -529,7 +555,14 @@ async def chat_with_agent(
     )
 
 
-@tool_descriptor(async_execution=True)
+@tool_descriptor(
+    async_execution=True,
+    tool_type="internal",
+    target_param="to_agent",
+    policy_name="SubmitToAgent",
+    ui_description="Submit a background task to another configured agent",
+    ui_icon="📨",
+)
 async def submit_to_agent(
     to_agent: str,
     text: str,
@@ -613,7 +646,14 @@ async def submit_to_agent(
     )
 
 
-@tool_descriptor(async_execution=True)
+@tool_descriptor(
+    async_execution=True,
+    tool_type="internal",
+    target_param="task_id",
+    policy_name="CheckAgentTask",
+    ui_description="Check the status of a background agent task",
+    ui_icon="⏳",
+)
 async def check_agent_task(
     task_id: str,
 ) -> ToolChunk:
@@ -707,42 +747,138 @@ def _build_spawn_request_context(current_agent_id: str) -> dict[str, Any]:
     return context
 
 
-@tool_descriptor(async_execution=True)
-async def spawn_subagent(
+def _normalize_str_list(
+    value: Any,
+    field_name: str,
+) -> Optional[list[str]]:
+    """Validate an optional list[str] tool argument.
+
+    Returns ``None`` when *value* is ``None``.  Raises ``ValueError``
+    when the value is not a list of strings (prevents ``list("abc")``
+    character-splitting on mistaken string inputs).
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) for item in value
+    ):
+        raise ValueError(
+            f"'{field_name}' must be a list of strings or null",
+        )
+    return list(value)
+
+
+def _build_subagent_request_context(
+    current_agent_id: str,
+    allowed_tools: Optional[list[str]] = None,
+    skills: Optional[list[str]] = None,
+    extra: Optional[dict] = None,
+) -> dict[str, Any]:
+    """Build request_context with approval routing + tool/skill filters."""
+    rc = _build_spawn_request_context(current_agent_id)
+    if extra:
+        rc.update(extra)
+    if allowed_tools is not None:
+        rc["subagent_allowed_tools"] = list(allowed_tools)
+    if skills is not None:
+        rc["subagent_skills"] = list(skills)
+    return rc
+
+
+@tool_descriptor(
+    async_execution=True,
+    tool_type="internal",
+    policy_name="SpawnSubagent",
+    ui_description="Spawn an ephemeral sub-task within the current workspace",
+    ui_icon="🔀",
+)
+async def spawn_subagent(  # pylint: disable=too-many-return-statements
     task: str,
     fork: bool = False,
     background: bool = False,
     timeout: int = 600,
+    allowed_tools: Optional[list[str]] = None,
+    skills: Optional[list[str]] = None,
+    batch: Optional[list[Dict[str, Any]]] = None,
 ) -> ToolChunk:
     """Spawn an ephemeral subagent within the CURRENT workspace.
 
-    The subagent runs as a one-shot task and cannot be resumed.
-    Results flow back as text summary; file changes (fork mode)
-    are isolated in a git branch.
+    The subagent starts a **fresh conversation context** — it does NOT
+    inherit the parent agent's dialogue history, accumulated state, or
+    in-progress tool calls.  It shares the same agent identity,
+    workspace, and (by default) the full set of available tools and
+    skills.  Use ``allowed_tools`` / ``skills`` to restrict what a
+    subagent can access.
 
-    Unlike ``chat_with_agent`` (which calls a *different* agent),
-    this tool targets the same agent identity and workspace.
+    Unlike ``chat_with_agent`` (which targets a *different* configured
+    agent), this tool creates a disposable one-shot worker under the
+    current agent's identity.
 
     Args:
-        task: Description of the sub-task to perform.
-        fork: If True, the subagent inherits parent session state.
-            If the project is a git repo, it also runs in an
-            isolated worktree. Works without coding mode (falls
-            back to workspace; no worktree if not a git repo).
-            If False (default), starts with a fresh empty session.
-        background: If True, submit as background task and return
-            immediately with a task_id. Use check_agent_task(task_id)
-            to poll status and retrieve the result.
+        task: Description of the sub-task.  This becomes the sole user
+            message in the subagent's conversation.  Always required by
+            the signature; pass an empty string when using ``batch``.
+        fork: Controls two independent features:
+            1. **Session state inheritance** — the subagent receives a
+               copy of the parent's persisted session state.
+            2. **Git worktree isolation** — if the project directory is
+               a git repository, the subagent works in a dedicated
+               worktree so its file changes cannot conflict with the
+               parent or other subagents.
+            When False (default), the subagent starts with an empty
+            session and works in the original project directory.
+        background: If True, submit as a background task and return
+            immediately with a task_id.  The subagent typically runs for
+            **minutes, not seconds** — do NOT poll immediately.  Wait at
+            least 30 seconds before the first ``check_agent_task`` call,
+            and use 30-60 second intervals between subsequent polls.
+            Prefer ``background=False`` (foreground) when only spawning
+            a single subagent — it blocks until completion, eliminating
+            the need to poll entirely.
         timeout: Foreground wait timeout in seconds (default 600).
+            Ignored when ``background=True``.
+        allowed_tools: Tool-name whitelist.  Only the listed tools are
+            available to the subagent.  ``None`` (default) inherits the
+            parent's full tool set.  An empty list denies all tools.
+        skills: Skill-name whitelist.  Only the listed SKILL.md files
+            are loaded for the subagent.  ``None`` (default) inherits
+            all skills resolved for this workspace.
+        batch: List of task specs for batch mode.  When provided,
+            ``task`` must be an empty string.  Each dict must contain a
+            ``task`` key; optional keys: ``fork``, ``allowed_tools``,
+            ``skills`` (top-level ``fork`` / ``timeout`` /
+            ``allowed_tools`` / ``skills`` are ignored in batch mode).
+            All subagents run as background tasks.  Maximum length is
+            ``MAX_SPAWN_BATCH_SIZE`` (10); concurrent dispatches are
+            capped at ``MAX_SPAWN_BATCH_CONCURRENCY`` (3).
 
     Returns:
-        Foreground: subagent result text with [SESSION: <id>].
-        Background: [TASK_ID: <id>] + [SESSION: <id>].
+        Foreground (single): subagent result text with [SESSION: <id>].
+        Background (single): [TASK_ID: <id>] + [SESSION: <id>].
         Fork foreground: also [FORK_BRANCH: <branch>] if changes.
+        Batch: per-subagent [TASK_ID: ...] + [SESSION: ...].
     """
+    try:
+        allowed_tools = _normalize_str_list(
+            allowed_tools,
+            "allowed_tools",
+        )
+        skills = _normalize_str_list(skills, "skills")
+    except ValueError as exc:
+        return _tool_text_response(f"ERROR: {exc}")
+
+    if batch is not None:
+        if task and task.strip():
+            return _tool_text_response(
+                "ERROR: 'task' and 'batch' are mutually exclusive. "
+                "Pass task='' with 'batch' for multiple subagents.",
+            )
+        return await _spawn_batch(batch)
+
     if not task or not task.strip():
         return _tool_text_response(
-            "ERROR: 'task' is required for spawn_subagent",
+            "ERROR: 'task' is required for spawn_subagent "
+            "(use task='' only with batch=...)",
         )
 
     from ...app.agent_context import get_current_agent_id
@@ -762,9 +898,15 @@ async def spawn_subagent(
             subagent_session_id=subagent_session_id,
             background=background,
             timeout=timeout,
+            allowed_tools=allowed_tools,
+            skills=skills,
         )
 
-    request_context = _build_spawn_request_context(current_agent_id)
+    request_context = _build_subagent_request_context(
+        current_agent_id,
+        allowed_tools=allowed_tools,
+        skills=skills,
+    )
     request_payload = {
         "session_id": subagent_session_id,
         "input": [
@@ -809,6 +951,130 @@ async def spawn_subagent(
             session_id=subagent_session_id,
         ),
     )
+
+
+def _chunk_text(chunk: ToolChunk) -> str:
+    """Extract plain text from a ToolChunk, if present."""
+    if not chunk.content:
+        return ""
+    block = chunk.content[0]
+    text = getattr(block, "text", None)
+    return text if isinstance(text, str) else str(block)
+
+
+async def _spawn_batch(
+    specs: list[Dict[str, Any]],
+) -> ToolChunk:
+    """Dispatch multiple subagents in parallel as background tasks."""
+    if not isinstance(specs, list) or not specs:
+        return _tool_text_response(
+            "ERROR: 'batch' must be a non-empty list",
+        )
+    if len(specs) > MAX_SPAWN_BATCH_SIZE:
+        return _tool_text_response(
+            f"ERROR: batch size {len(specs)} exceeds "
+            f"maximum of {MAX_SPAWN_BATCH_SIZE}",
+        )
+    normalized: list[Dict[str, Any]] = []
+    for i, spec in enumerate(specs):
+        if (
+            not isinstance(spec, dict)
+            or not str(
+                spec.get("task", ""),
+            ).strip()
+        ):
+            return _tool_text_response(
+                f"ERROR: batch[{i}] must be a dict with a "
+                f"non-empty 'task' field",
+            )
+        try:
+            normalized.append(
+                {
+                    **spec,
+                    "allowed_tools": _normalize_str_list(
+                        spec.get("allowed_tools"),
+                        f"batch[{i}].allowed_tools",
+                    ),
+                    "skills": _normalize_str_list(
+                        spec.get("skills"),
+                        f"batch[{i}].skills",
+                    ),
+                },
+            )
+        except ValueError as exc:
+            return _tool_text_response(f"ERROR: {exc}")
+
+    from ...app.agent_context import get_current_agent_id
+
+    current_agent_id = get_current_agent_id()
+    if not current_agent_id:
+        return _tool_text_response(
+            "ERROR: unable to resolve current agent ID",
+        )
+
+    sem = asyncio.Semaphore(MAX_SPAWN_BATCH_CONCURRENCY)
+
+    async def _dispatch_one(spec: Dict[str, Any]) -> str:
+        session_id = _generate_subagent_session_id()
+        task_text = spec["task"]
+        spec_fork = bool(spec.get("fork", False))
+        spec_timeout = spec.get("timeout", 600)
+        spec_allowed = spec.get("allowed_tools")
+        spec_skills = spec.get("skills")
+
+        async with sem:
+            if spec_fork:
+                chunk = await _spawn_forked_subagent(
+                    task=task_text,
+                    current_agent_id=current_agent_id,
+                    subagent_session_id=session_id,
+                    background=True,
+                    timeout=spec_timeout,
+                    allowed_tools=spec_allowed,
+                    skills=spec_skills,
+                )
+                return _chunk_text(chunk)
+
+            rc = _build_subagent_request_context(
+                current_agent_id,
+                allowed_tools=spec_allowed,
+                skills=spec_skills,
+            )
+            payload = {
+                "session_id": session_id,
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": task_text},
+                        ],
+                    },
+                ],
+                "request_context": rc,
+            }
+            result = await asyncio.to_thread(
+                submit_agent_chat_task,
+                None,
+                payload,
+                current_agent_id,
+                int(DEFAULT_AGENT_API_TIMEOUT),
+            )
+            return format_background_submission_text(result, session_id)
+
+    results = await asyncio.gather(
+        *[_dispatch_one(s) for s in normalized],
+        return_exceptions=True,
+    )
+
+    lines: list[str] = []
+    for i, r in enumerate(results):
+        prefix = f"[{i + 1}/{len(specs)}]"
+        if isinstance(r, Exception):
+            lines.append(f"{prefix} ERROR: {r}")
+        else:
+            lines.append(f"{prefix} {r}")
+
+    return _tool_text_response("\n\n".join(lines))
 
 
 async def _call_fork_api(
@@ -889,6 +1155,8 @@ async def _spawn_forked_subagent(
     subagent_session_id: str,
     background: bool,
     timeout: int,
+    allowed_tools: Optional[list[str]] = None,
+    skills: Optional[list[str]] = None,
 ) -> ToolChunk:
     """Fork path: call /api/fork/agent then dispatch subagent."""
     from ...app.agent_context import (
@@ -920,9 +1188,13 @@ async def _spawn_forked_subagent(
     worktree_path = fork_result.get("worktree_path", "")
     worktree_branch = fork_result.get("worktree_branch", "")
 
-    request_context = _build_spawn_request_context(current_agent_id)
-    if worktree_path:
-        request_context["fork_project_dir"] = worktree_path
+    fork_extra = {"fork_project_dir": worktree_path} if worktree_path else None
+    request_context = _build_subagent_request_context(
+        current_agent_id,
+        allowed_tools=allowed_tools,
+        skills=skills,
+        extra=fork_extra,
+    )
 
     request_payload: dict = {
         "session_id": fork_session_id,

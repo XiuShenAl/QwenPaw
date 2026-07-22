@@ -38,7 +38,7 @@ class AgentBuilder:
         agent_config: Any,
         *,
         agent_id: str | None = None,
-        request_context: dict[str, str] | None = None,
+        request_context: dict[str, Any] | None = None,
         active_modes: Iterable[str] | None = None,
         effective_skills: Iterable[str] | None = None,
         enabled_features: Iterable[str] | None = None,
@@ -72,7 +72,12 @@ class AgentBuilder:
             tools = []
 
         if extra_tools:
-            tools.extend(extra_tools)
+            tools.extend(
+                self._filter_extra_tools_for_subagent(
+                    extra_tools,
+                    request_context,
+                ),
+            )
 
         if memory_tools:
             from ..governance import PolicyGuardedTool
@@ -92,6 +97,37 @@ class AgentBuilder:
         )
 
         return Toolkit(tools=tools, skills_or_loaders=skill_dirs)
+
+    @staticmethod
+    def _tool_name(tool: Any) -> str:
+        """Best-effort tool name for whitelist filtering."""
+        name = getattr(tool, "name", None)
+        if isinstance(name, str) and name:
+            return name
+        fn = getattr(tool, "func", None) or getattr(tool, "_func", None)
+        if callable(fn):
+            return getattr(fn, "__name__", "") or ""
+        return getattr(tool, "__name__", "") or ""
+
+    @classmethod
+    def _filter_extra_tools_for_subagent(
+        cls,
+        extra_tools: Iterable[Any],
+        request_context: dict[str, Any] | None,
+    ) -> list[Any]:
+        """Apply ``subagent_allowed_tools`` to post-list_tools extras.
+
+        When the whitelist is an empty list, all extras are dropped.
+        When unset / not a list, extras pass through unchanged.
+        """
+        tools = list(extra_tools)
+        whitelist = (request_context or {}).get("subagent_allowed_tools")
+        if not isinstance(whitelist, list):
+            return tools
+        if not whitelist:
+            return []
+        allow = set(whitelist)
+        return [t for t in tools if cls._tool_name(t) in allow]
 
     @staticmethod
     def _resolve_skill_loader_dirs(
@@ -122,7 +158,7 @@ class AgentBuilder:
 
     # ----------------------------------------------------------------- build
 
-    async def build(  # pylint: disable=too-many-statements
+    async def build(  # pylint: disable=too-many-statements,too-many-branches
         self,
         ctx: Any,
     ) -> Any:
@@ -174,6 +210,11 @@ class AgentBuilder:
             )
         except Exception:
             effective_skills = []
+
+        subagent_skills = request_context.get("subagent_skills")
+        if isinstance(subagent_skills, list):
+            parent_set = set(effective_skills)
+            effective_skills = [s for s in subagent_skills if s in parent_set]
 
         # Compute active modes.
         active_modes: set[str] = set()

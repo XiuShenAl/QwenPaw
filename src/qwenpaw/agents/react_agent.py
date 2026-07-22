@@ -102,7 +102,6 @@ class QwenPawAgent(CodingModeMixin, Agent):
 
         self._governor = governor
         self._gate_pending_stop = None
-        self._gate_pending_continue = None
 
         self.memory_manager = memory_manager
 
@@ -539,6 +538,9 @@ class QwenPawAgent(CodingModeMixin, Agent):
                 stop_result.continuation_message
                 or "Continue working on the task."
             )
+            continuation_metadata = stop_result.continuation_metadata or {
+                QWENPAW_MESSAGE_TAG_KEY: (LOOP_CONTINUATION_MESSAGE_TAG),
+            }
             self.state.context.append(
                 Msg(
                     name="user",
@@ -549,14 +551,12 @@ class QwenPawAgent(CodingModeMixin, Agent):
                             text=continuation,
                         ),
                     ],
-                    metadata={
-                        QWENPAW_MESSAGE_TAG_KEY: LOOP_CONTINUATION_MESSAGE_TAG,
-                    },
+                    metadata=continuation_metadata,
                 ),
             )
             return  # outer loop continues
 
-        yield final_msg
+        yield stop_result.final_message or final_msg
 
     @staticmethod
     def _is_content_safety_error(exc: Exception) -> bool:

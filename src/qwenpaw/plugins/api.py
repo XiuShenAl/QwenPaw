@@ -2,6 +2,7 @@
 """Plugin API for plugin developers."""
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Type
 
@@ -49,6 +50,60 @@ def get_tool_config(tool_name: str) -> Optional[Dict[str, Any]]:
 # -------------------------------------------------------------------
 # Helpers for PluginApi.register_tool
 # -------------------------------------------------------------------
+
+# tool_name → owning plugin_id. Same plugin may re-register idempotently;
+# a different plugin claiming the same name fails closed.
+_TOOL_PLUGIN_OWNERS: Dict[str, str] = {}
+_TOOL_PLUGIN_OWNERS_LOCK = threading.Lock()
+
+
+def _claim_tool_ownership(tool_name: str, plugin_id: str) -> None:
+    """Record plugin ownership for *tool_name* or raise on conflict."""
+    from ..governance.tool_registry import GovernanceRegistrationConflict
+
+    with _TOOL_PLUGIN_OWNERS_LOCK:
+        owner = _TOOL_PLUGIN_OWNERS.get(tool_name)
+        if owner is not None and owner != plugin_id:
+            raise GovernanceRegistrationConflict(
+                f"Tool {tool_name!r} is already owned by plugin "
+                f"{owner!r}; plugin {plugin_id!r} cannot re-register it",
+            )
+        _TOOL_PLUGIN_OWNERS[tool_name] = plugin_id
+
+
+def release_tool_ownership_for_plugin(plugin_id: str) -> None:
+    """Drop ownership records for tools registered by *plugin_id*."""
+    with _TOOL_PLUGIN_OWNERS_LOCK:
+        stale = [
+            name
+            for name, owner in _TOOL_PLUGIN_OWNERS.items()
+            if owner == plugin_id
+        ]
+        for name in stale:
+            del _TOOL_PLUGIN_OWNERS[name]
+
+
+def _register_to_governance(
+    tool_name: str,
+    tool_type: str = "network",
+    target_param: str = "",
+) -> None:
+    """Register a plugin tool into the governance whitelist.
+
+    Fixes issue #6114: tools visible to the agent were denied at Phase 0
+    because ``register_tool`` never synced the governance registry.
+    """
+    from ..governance.tool_registry import (
+        DEFAULT_REGISTRY,
+        register_tool_governance,
+    )
+
+    register_tool_governance(
+        DEFAULT_REGISTRY,
+        python_name=tool_name,
+        tool_type=tool_type,
+        target_param=target_param,
+    )
 
 
 def _bridge_to_runtime(
@@ -618,6 +673,8 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         description: str = "",
         icon: str = "🔧",
         enabled: bool = False,
+        tool_type: str = "network",
+        target_param: str = "",
     ) -> None:
         """Register a tool function into the Agent's toolkit.
 
@@ -629,6 +686,8 @@ class PluginApi:  # pylint: disable=too-many-public-methods
           config (disabled by default so the user can opt-in)
         - Bridges to the runtime ToolRegistry so the agent can
           actually invoke the tool at runtime.
+        - Registers the tool into the governance whitelist so Phase 0
+          does not deny it as unregistered (issue #6114).
 
         The actual registration is deferred to a startup hook so it
         runs after the application and agent context are fully
@@ -643,6 +702,12 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             enabled: Whether the tool is enabled by default. The
                 recommended value is False so the user explicitly
                 enables the tool. Default: False.
+            tool_type: Governance tool type
+                (``"file"`` | ``"network"`` | ``"shell"`` | ``"internal"``).
+                Defaults to ``"network"`` to restore 1.0 pass-through
+                semantics for plugin tools while still running Phase 1
+                deep scans.
+            target_param: Optional governance target parameter name.
 
         Example:
             >>> from .tool import my_tool_func
@@ -652,12 +717,31 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             ...         tool_func=my_tool_func,
             ...         description="Does something useful",
             ...         icon="🔧",
+            ...         tool_type="network",
             ...     )
         """
 
         def _startup_register():
+            # Ownership + governance first: fail closed before exposing
+            # the tool in toolkit/UI/runtime (avoids #6114-style
+            # visible-but-denied, and cross-plugin name collisions).
             try:
-                import qwenpaw.agents.tools as tools_module
+                _claim_tool_ownership(tool_name, self.plugin_id)
+                _register_to_governance(
+                    tool_name,
+                    tool_type=tool_type,
+                    target_param=target_param,
+                )
+            except Exception as exc:
+                logger.error(
+                    f"Failed to register tool '{tool_name}' into "
+                    f"governance (not exposing tool): {exc}",
+                    exc_info=True,
+                )
+                return
+
+            try:
+                from ..agents import tools as tools_module
 
                 setattr(tools_module, tool_name, tool_func)
                 if tool_name not in tools_module.__all__:
@@ -683,7 +767,8 @@ class PluginApi:  # pylint: disable=too-many-public-methods
 
             except Exception as exc:
                 logger.error(
-                    f"Failed to register tool '{tool_name}': {exc}",
+                    f"Failed to register tool '{tool_name}' after "
+                    f"governance sync: {exc}",
                     exc_info=True,
                 )
 
