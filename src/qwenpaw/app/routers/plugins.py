@@ -448,50 +448,44 @@ async def _load_plugin_with_optional_force_reinstall(
 ):
     """Load a plugin, optionally unloading first under one lifecycle lock.
 
-    Force-reinstall must hold :meth:`PluginLoader.plugin_lifecycle` across
-    unload + load so a concurrent unload cannot delete tools that the
-    reload just registered.
+    Force-reinstall is handled inside
+    :meth:`PluginLoader.load_plugin_from_path` so this router never reads
+    ``plugin.json`` from a user-supplied path (CodeQL path-injection).
+    Unload + load still share one :meth:`PluginLoader.plugin_lifecycle`
+    critical section inside the loader.
     """
     from ...config.utils import get_plugins_dir
 
     install_dir = get_plugins_dir()
-    existing_id: Optional[str] = None
-    if force:
-        manifest_path = source_path / "plugin.json"
-        if manifest_path.exists():
-            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
-            existing_id = raw.get("id")
+    collected: dict = {"provider_ids": [], "command_names": []}
 
-    if not (force and existing_id):
-        return await loader.load_plugin_from_path(
-            source_path=source_path,
-            install_dir=install_dir,
+    def _before_force_unload(plugin_id: str) -> None:
+        logger.info(
+            "Force-reinstall: unloading '%s' before re-installing",
+            plugin_id,
+        )
+        provider_ids, command_names = _collect_plugin_runtime_ids(
+            loader.registry,
+            plugin_id,
+        )
+        collected["provider_ids"] = provider_ids
+        collected["command_names"] = command_names
+
+    def _after_force_unload(plugin_id: str) -> None:
+        _post_unload_cleanup(
+            request,
+            plugin_id,
+            collected["provider_ids"],
+            collected["command_names"],
         )
 
-    async with loader.plugin_lifecycle(existing_id):
-        if loader.get_loaded_plugin(existing_id) is not None:
-            logger.info(
-                "Force-reinstall: unloading '%s' before re-installing",
-                existing_id,
-            )
-            provider_ids, command_names = _collect_plugin_runtime_ids(
-                loader.registry,
-                existing_id,
-            )
-            await loader.unload_plugin(
-                existing_id,
-                delete_files=False,
-            )
-            _post_unload_cleanup(
-                request,
-                existing_id,
-                provider_ids,
-                command_names,
-            )
-        return await loader.load_plugin_from_path(
-            source_path=source_path,
-            install_dir=install_dir,
-        )
+    return await loader.load_plugin_from_path(
+        source_path=source_path,
+        install_dir=install_dir,
+        force=force,
+        before_force_unload=_before_force_unload if force else None,
+        after_force_unload=_after_force_unload if force else None,
+    )
 
 
 # ── Routes ───────────────────────────────────────────────────────────────

@@ -22,8 +22,25 @@ from qwenpaw.plugins.architecture import (
     PluginManifest,
     PluginRecord,
 )
-from qwenpaw.plugins.loader import PluginLoader
+from qwenpaw.plugins.loader import (
+    PluginLoader,
+    resolved_plugin_manifest_path,
+)
 from qwenpaw.plugins.registry import PluginRegistry
+
+
+def test_resolved_plugin_manifest_path_accepts_normal_dir(tmp_path: Path):
+    manifest = tmp_path / "plugin.json"
+    manifest.write_text('{"id": "demo"}', encoding="utf-8")
+    resolved = resolved_plugin_manifest_path(tmp_path)
+    assert resolved.is_file()
+    assert resolved.name == "plugin.json"
+    assert resolved.parent == tmp_path.resolve()
+
+
+def test_resolved_plugin_manifest_path_rejects_missing(tmp_path: Path):
+    with pytest.raises(FileNotFoundError):
+        resolved_plugin_manifest_path(tmp_path)
 
 
 @pytest.mark.asyncio

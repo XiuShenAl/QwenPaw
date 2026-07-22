@@ -80,6 +80,45 @@ def _install_lock_path(plugin_id: str) -> Path:
     return _plugin_runtime_dir() / "install-locks" / f"{safe_id}.lock"
 
 
+def resolved_plugin_manifest_path(source_dir: Path) -> Path:
+    """Return the resolved ``plugin.json`` path under *source_dir*.
+
+    Joins only the fixed basename ``plugin.json``, then normalizes with
+    ``realpath`` and rejects any result that escapes *source_dir*
+    (``os.path.commonpath`` guard — CodeQL path-injection sanitizer).
+
+    Raises:
+        FileNotFoundError: If the directory or manifest file is missing
+        ValueError: If the resolved path escapes *source_dir*
+    """
+    try:
+        root = os.path.realpath(str(source_dir))
+    except OSError as exc:
+        raise FileNotFoundError(
+            f"plugin.json not found in {source_dir}",
+        ) from exc
+    if not os.path.isdir(root):
+        raise FileNotFoundError(
+            f"plugin.json not found in {source_dir}",
+        )
+    full = os.path.realpath(os.path.join(root, "plugin.json"))
+    try:
+        common = os.path.commonpath([root, full])
+    except ValueError as exc:
+        raise ValueError(
+            f"plugin.json path escapes source directory ({source_dir})",
+        ) from exc
+    if common != root:
+        raise ValueError(
+            f"plugin.json path escapes source directory ({source_dir})",
+        )
+    if not os.path.isfile(full):
+        raise FileNotFoundError(
+            f"plugin.json not found in {source_dir}",
+        )
+    return Path(full)
+
+
 def _is_disabled_plugin_dir(path: Path) -> bool:
     """Return whether *path* is a hidden or explicitly disabled plugin dir.
 
@@ -963,6 +1002,10 @@ class PluginLoader:
         source_path: Path,
         config: Optional[Dict] = None,
         install_dir: Optional[Path] = None,
+        *,
+        force: bool = False,
+        before_force_unload: Optional[Any] = None,
+        after_force_unload: Optional[Any] = None,
     ) -> PluginRecord:
         """Copy plugin files, install deps, and load plugin at runtime.
 
@@ -971,30 +1014,46 @@ class PluginLoader:
         already located there.  Python dependencies listed in
         ``requirements.txt`` are installed before loading.
 
+        When *force* is true and the plugin id is already loaded, the
+        existing instance is unloaded under :meth:`plugin_lifecycle`
+        before install (optional *before_force_unload* /
+        *after_force_unload* callbacks run around that unload).
+
         Args:
             source_path: Directory that contains ``plugin.json``
             config: Optional plugin configuration dict
             install_dir: Target plugins directory.  Defaults to the
                 first directory in ``self.plugin_dirs``.
+            force: Unload a same-id loaded plugin before installing
+            before_force_unload: ``callback(plugin_id)`` before unload
+            after_force_unload: ``callback(plugin_id)`` after unload
 
         Returns:
             Loaded PluginRecord
 
         Raises:
             FileNotFoundError: If ``plugin.json`` not found
-            ValueError: If the plugin is already loaded
+            ValueError: If the plugin is already loaded (and not *force*)
             RuntimeError: If dependency installation fails
         """
         source_path = Path(source_path).resolve()
-        manifest_path = source_path / "plugin.json"
-        if not manifest_path.exists():
-            raise FileNotFoundError(
-                f"plugin.json not found in {source_path}",
-            )
-
+        manifest_path = resolved_plugin_manifest_path(source_path)
         manifest = self._load_manifest(manifest_path)
         plugin_id = manifest.id
         async with self.plugin_lifecycle(plugin_id):
+            if force and plugin_id in self._loaded_plugins:
+                if before_force_unload is not None:
+                    maybe_before = before_force_unload(plugin_id)
+                    if inspect.isawaitable(maybe_before):
+                        await maybe_before
+                await self._unload_plugin_unlocked(
+                    plugin_id,
+                    delete_files=False,
+                )
+                if after_force_unload is not None:
+                    maybe_after = after_force_unload(plugin_id)
+                    if inspect.isawaitable(maybe_after):
+                        await maybe_after
             return await self._load_plugin_from_path_unlocked(
                 source_path,
                 manifest,
@@ -1053,7 +1112,9 @@ class PluginLoader:
 
         # Re-read manifest from the installed location so that
         # source_path in the record points to the correct directory
-        installed_manifest = self._load_manifest(target_dir / "plugin.json")
+        installed_manifest = self._load_manifest(
+            resolved_plugin_manifest_path(target_dir),
+        )
         return await self.load_plugin(installed_manifest, target_dir, config)
 
     async def unload_plugin(
