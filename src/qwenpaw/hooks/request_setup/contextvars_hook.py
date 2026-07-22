@@ -113,7 +113,7 @@ class ContextVarsSetupHook(LifecycleHook):
                 coding_project_dir=coding_project_dir,
             )
         if fork_dir is not None:
-            set_current_workspace_dir(str(fork_dir))
+            set_current_workspace_dir(fork_dir)
         elif ctx.workspace_dir is not None:
             set_current_workspace_dir(ctx.workspace_dir)
         return HookResult()

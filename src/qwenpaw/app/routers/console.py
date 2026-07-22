@@ -27,7 +27,7 @@ from qwenpaw.schemas import (
     AgentRequest,
     _coerce_content_item,
 )
-from ...utils.logging import LOG_FILE_PATH
+from ...utils.logging import LOG_FILE_PATH, sanitize_log_value
 from ..agent_context import get_agent_for_request
 from ..approvals.display import approval_display_fields
 from ..chats.title_generator import generate_and_update_title
@@ -617,7 +617,7 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
                 except Exception:
                     logger.warning(
                         "mark_fork_failed on cancel failed for %s",
-                        fork_worktree_branch,
+                        sanitize_log_value(fork_worktree_branch),
                         exc_info=True,
                     )
             return
@@ -641,7 +641,7 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
                 except Exception:
                     logger.warning(
                         "mark_fork_failed on error failed for %s",
-                        fork_worktree_branch,
+                        sanitize_log_value(fork_worktree_branch),
                         exc_info=True,
                     )
             return
@@ -676,8 +676,8 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
             except Exception:
                 logger.warning(
                     "Background fork finalize failed for %s (%s)",
-                    fork_worktree_branch,
-                    fork_project_dir,
+                    sanitize_log_value(fork_worktree_branch),
+                    sanitize_log_value(fork_project_dir),
                     exc_info=True,
                 )
 
