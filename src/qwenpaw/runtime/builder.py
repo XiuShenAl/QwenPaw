@@ -553,8 +553,8 @@ class AgentBuilder:
         if not isinstance(raw_project_dir, str) or not raw_project_dir.strip():
             return agent_config
 
-        # When the path came from fork_project_dir, require the worktree
-        # boundary check (same as legacy Runner).
+        # When fork_project_dir is present, the final coding project MUST be
+        # the validated worktree — never fall through to an unchecked ACP path.
         if isinstance(fork_raw, str) and fork_raw.strip():
             existing_cm = getattr(agent_config, "coding_mode", None)
             existing_pd = (
@@ -572,13 +572,14 @@ class AgentBuilder:
                 workspace_dir=workspace_hint,
                 coding_project_dir=existing_pd,
             )
-            if validated is None and (
-                not isinstance(raw_project_dir, str)
-                or raw_project_dir.strip() == fork_raw.strip()
-            ):
+            if validated is None:
+                _logger.warning(
+                    "Rejecting fork_project_dir outside allowed worktree "
+                    "subtree: %s",
+                    fork_raw,
+                )
                 return agent_config
-            if validated is not None:
-                raw_project_dir = str(validated)
+            raw_project_dir = str(validated)
 
         project_dir = Path(raw_project_dir).expanduser().resolve()
         if not project_dir.is_dir():

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from qwenpaw.agents.fork_project import (
     begin_fork_scope,
+    bind_fork_task,
     bind_workspace_integration_project,
     finalize_fork_worktree,
     forks_merged_into_head,
@@ -64,7 +65,110 @@ def test_forks_integrated_rejects_truthy_strings() -> None:
     forks_integrated = _load_fork_guard().forks_integrated
     assert forks_integrated({"forks_integrated": "false"}) is False
     assert forks_integrated({"forks_integrated": "true"}) is False
+    # No workspace_dir → fail closed (cannot evaluate).
     assert forks_integrated({"forks_integrated": True}) is False
+
+
+def test_gate_allows_no_project_when_flag_true(tmp_path: Path) -> None:
+    """Non-git workspace with no pointer: no-fork protocol must pass."""
+    workspace = tmp_path / "agent_ws"
+    workspace.mkdir()
+    forks_integrated = _load_fork_guard().forks_integrated
+    assert resolve_integration_project_dir(workspace) is None
+    assert (
+        forks_integrated(
+            {"forks_integrated": True},
+            workspace_dir=workspace,
+        )
+        is True
+    )
+
+
+def test_register_fork_requires_workspace_dir(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = tmp_path / "code_proj"
+    _init_repo(project)
+    wt = project / ".qwenpaw" / "worktrees" / "w1"
+    branch = "fork/w1"
+    _git(project, "worktree", "add", str(wt), "-b", branch)
+    # No context and no agent-config fallback → refuse.
+    monkeypatch.setattr(
+        "qwenpaw.agents.fork_project._fallback_agent_workspace_dir",
+        lambda **_kwargs: None,
+    )
+    assert register_fork(str(wt), branch, workspace_dir=None) is False
+    # Refused → nothing in registry.
+    assert forks_merged_into_head(project) is True
+
+
+def test_register_fork_falls_back_to_agent_workspace(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "agent_ws"
+    project = tmp_path / "code_proj"
+    workspace.mkdir()
+    _init_repo(project)
+    wt = project / ".qwenpaw" / "worktrees" / "w1"
+    branch = "fork/w1"
+    _git(project, "worktree", "add", str(wt), "-b", branch)
+    monkeypatch.setattr(
+        "qwenpaw.agents.fork_project._fallback_agent_workspace_dir",
+        lambda **_kwargs: workspace.resolve(),
+    )
+    assert register_fork(str(wt), branch, workspace_dir=None) is True
+    assert resolve_integration_project_dir(workspace) == project.resolve()
+
+
+def test_bind_fork_task_does_not_create_ghost_entry(tmp_path: Path) -> None:
+    """Without register_fork, bind_fork_task must not invent registry rows."""
+    project = tmp_path / "code_proj"
+    _init_repo(project)
+    wt = project / ".qwenpaw" / "worktrees" / "w1"
+    branch = "fork/w1"
+    _git(project, "worktree", "add", str(wt), "-b", branch)
+    assert bind_fork_task(str(wt), branch, "task-ghost") is False
+    assert forks_merged_into_head(project) is True
+
+
+def test_register_fork_writes_pointer_on_agent_workspace(
+    tmp_path: Path,
+) -> None:
+    """Dual-root: register must bind agent workspace → coding project."""
+    workspace = tmp_path / "agent_ws"
+    project = tmp_path / "code_proj"
+    workspace.mkdir()
+    _init_repo(project)
+    # Workspace itself is also a git root (empty registry) — without a
+    # pointer, gates would wrongly inspect the workspace.
+    _init_repo(workspace)
+
+    scope = begin_fork_scope(workspace)
+    wt = project / ".qwenpaw" / "worktrees" / "w1"
+    branch = "fork/w1"
+    _git(project, "worktree", "add", str(wt), "-b", branch)
+    register_fork(
+        str(wt),
+        branch,
+        workspace_dir=workspace,
+        scope_id=scope,
+    )
+    assert resolve_integration_project_dir(workspace) == project.resolve()
+    (wt / "feat.txt").write_text("feat\n", encoding="utf-8")
+    assert finalize_fork_worktree(str(wt), branch, message="feat")
+
+    forks_integrated = _load_fork_guard().forks_integrated
+    # Unmerged fork on coding project must block (not workspace empty).
+    assert (
+        forks_integrated(
+            {"forks_integrated": True},
+            workspace_dir=workspace,
+        )
+        is False
+    )
+    assert forks_merged_into_head(project, scope_id=scope) is False
 
 
 def test_resolve_allowed_fork_project_dir(tmp_path: Path) -> None:

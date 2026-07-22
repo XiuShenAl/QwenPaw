@@ -60,7 +60,11 @@ class TeamPipelineGate(LoopGate):
 
             begin_fork_scope(workspace_dir)
         except ImportError:
-            pass
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "begin_fork_scope unavailable; fork merge scope disabled",
+            )
         wf = WorkflowState(workspace_dir, "team")
         loop_dir = wf.create_instance()
 
@@ -104,15 +108,6 @@ class TeamPipelineGate(LoopGate):
         )
         data = await asyncio.to_thread(wf.read_state)
 
-        st.iteration += 1
-        if st.iteration > st.max_iterations:
-            await asyncio.to_thread(wf.cleanup)
-            self.deactivate()
-            return StopHandlerResult(
-                action=StopAction.TERMINATE,
-                reason=f"Iteration limit ({st.max_iterations})",
-            )
-
         prev_phase = st.phase
         phase = data.get("current_phase", "plan")
         st.phase = phase
@@ -121,7 +116,7 @@ class TeamPipelineGate(LoopGate):
             data,
             st.workspace_dir,
         ):
-            # Preserve the rejected target phase; resume it after merge.
+            # Preserve target phase; do not burn iteration while merging.
             st.blocked_on_merge = True
             st.phase = phase
             await asyncio.to_thread(
@@ -142,6 +137,15 @@ class TeamPipelineGate(LoopGate):
                 {"merge_blocked": False},
             )
         st.blocked_on_merge = False
+
+        st.iteration += 1
+        if st.iteration > st.max_iterations:
+            await asyncio.to_thread(wf.cleanup)
+            self.deactivate()
+            return StopHandlerResult(
+                action=StopAction.TERMINATE,
+                reason=f"Iteration limit ({st.max_iterations})",
+            )
 
         if phase == "completed":
             await asyncio.to_thread(wf.cleanup)

@@ -207,7 +207,10 @@ def resolve_git_project_dir(
         if cand in seen:
             continue
         seen.add(cand)
-        if cand.is_dir() and (cand / ".git").exists():
+        # Require a real repository (.git directory). Linked worktrees use a
+        # ``.git`` *file* and must not be treated as the project root.
+        git_meta = cand / ".git"
+        if cand.is_dir() and git_meta.is_dir():
             return cand
     return None
 
@@ -227,7 +230,13 @@ def bind_integration_project_for_workspace(
 def resolve_integration_project_dir(
     workspace_dir: str | Path | None,
 ) -> Path | None:
-    """Resolve the project root gates should use for fork verification."""
+    """Resolve the project root gates should use for fork verification.
+
+    Prefer the workspace integration pointer; otherwise fall back to a
+    resolvable git project root. Returns ``None`` when neither exists
+    (e.g. non-git workspace). Callers such as ``forks_integrated`` treat
+    ``None`` as "no registry forks possible" rather than as a hard block.
+    """
     if workspace_dir is None:
         return None
     try:
@@ -240,18 +249,20 @@ def resolve_integration_project_dir(
             raw = pointer.read_text(encoding="utf-8").strip()
             if raw:
                 proj = Path(raw).expanduser().resolve()
-                if proj.is_dir():
+                if proj.is_dir() and (proj / ".git").is_dir():
                     return proj
+                # Pointer to a non-repo / missing path is not usable.
+                logger.warning(
+                    "Ignoring invalid fork integration project pointer: %s",
+                    raw,
+                )
         except OSError:
             logger.warning(
                 "Failed to read fork integration project pointer %s",
                 pointer,
                 exc_info=True,
             )
-    project = resolve_git_project_dir(ws)
-    if project is not None:
-        return project
-    return ws
+    return resolve_git_project_dir(ws)
 
 
 def _read_active_scope(workspace_dir: Path) -> str:
@@ -408,7 +419,13 @@ def _git_stdout(args: list[str], cwd: Path) -> str | None:
 
 
 def _ensure_git_identity(wt: Path) -> None:
-    """Set local user.name/email when missing so auto-commit can succeed."""
+    """Set local user.name/email when missing so auto-commit can succeed.
+
+    Disabled when ``QWENPAW_FORK_AUTO_GIT_IDENTITY=0``. Prefers existing
+    repo/global git config and does not overwrite a configured identity.
+    """
+    if os.environ.get("QWENPAW_FORK_AUTO_GIT_IDENTITY", "1") == "0":
+        return
     for key, value in (
         ("user.email", "qwenpaw-fork@localhost"),
         ("user.name", "QwenPaw Fork"),
@@ -416,13 +433,45 @@ def _ensure_git_identity(wt: Path) -> None:
         current = _git_stdout(["config", "--get", key], wt)
         if not current:
             subprocess.run(
-                ["git", "config", key, value],
+                ["git", "config", "--local", key, value],
                 cwd=str(wt),
                 capture_output=True,
                 text=True,
                 timeout=10,
                 check=False,
             )
+
+
+def _fallback_agent_workspace_dir(
+    *,
+    agent_id: str | None = None,
+) -> Path | None:
+    """Load ``workspace_dir`` from agent config when context is unset."""
+    aid = agent_id
+    if not aid:
+        try:
+            from ..app.agent_context import get_current_agent_id
+
+            aid = get_current_agent_id() or None
+        except Exception:  # noqa: BLE001
+            aid = None
+    if not aid:
+        return None
+    try:
+        from ..config.config import load_agent_config
+
+        cfg = load_agent_config(aid)
+        raw = getattr(cfg, "workspace_dir", None)
+        if not raw:
+            return None
+        return Path(raw).expanduser().resolve()
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "fallback agent workspace_dir failed for %s",
+            aid,
+            exc_info=True,
+        )
+        return None
 
 
 def register_fork(
@@ -432,14 +481,52 @@ def register_fork(
     session_id: str = "",
     workspace_dir: str | Path | None = None,
     scope_id: str | None = None,
-) -> None:
-    """Record a newly created fork for later merge verification."""
+) -> bool:
+    """Record a newly created fork for later merge verification.
+
+    Returns ``True`` only when the fork is recorded and the agent
+    workspace has an integration pointer to the coding-project registry.
+    Callers must abort spawn when this returns ``False``.
+
+    When *workspace_dir* is omitted, falls back to the current agent's
+    configured ``workspace_dir``.
+    """
     wt = Path(worktree_path).expanduser().resolve()
     if not wt.is_dir() or not branch:
-        return
+        return False
+    if workspace_dir is None:
+        workspace_dir = _fallback_agent_workspace_dir()
+    if workspace_dir is None:
+        logger.error(
+            "register_fork refused: workspace_dir is required to bind "
+            "the integration project pointer (branch=%s worktree=%s)",
+            branch,
+            wt,
+        )
+        return False
     project_dir = project_dir_from_worktree(wt)
     bind_workspace_integration_project(workspace_dir, project_dir)
-    if not scope_id and workspace_dir is not None:
+    try:
+        ws = Path(workspace_dir).expanduser().resolve()
+        pointer = ws / INTEGRATION_PROJECT_REL
+        if not pointer.is_file():
+            logger.error(
+                "register_fork refused: failed to write integration "
+                "project pointer at %s (branch=%s)",
+                pointer,
+                branch,
+            )
+            return False
+    except OSError:
+        logger.error(
+            "register_fork refused: cannot verify integration pointer "
+            "(branch=%s workspace=%s)",
+            branch,
+            workspace_dir,
+            exc_info=True,
+        )
+        return False
+    if not scope_id:
         scope_id = get_active_fork_scope(workspace_dir)
     base = _git_stdout(["rev-parse", "HEAD"], wt) or ""
     with _registry_lock(project_dir):
@@ -474,30 +561,37 @@ def register_fork(
             "created_at": time.time(),
         }
         _write_registry_unlocked(project_dir, data)
+    return True
 
 
 def bind_fork_task(
     worktree_path: str,
     branch: str,
     task_id: str,
-) -> None:
-    """Associate a background ``task_id`` with a registered fork."""
+) -> bool:
+    """Associate a background ``task_id`` with an already-registered fork.
+
+    Refuses to create ghost registry entries when ``register_fork`` did
+    not run successfully. Returns ``True`` when the binding was written.
+    """
     if not task_id or not branch:
-        return
+        return False
     wt = Path(worktree_path).expanduser().resolve()
     if not wt.is_dir():
-        return
+        return False
     project_dir = project_dir_from_worktree(wt)
     with _registry_lock(project_dir):
         data = _read_registry_unlocked(project_dir)
         forks = data.setdefault("forks", {})
-        meta = forks.get(branch) or {
-            "worktree": str(wt),
-            "branch": branch,
-            "project_dir": str(project_dir),
-            "status": _STATUS_PENDING,
-            "finalized": False,
-        }
+        meta = forks.get(branch)
+        if not isinstance(meta, dict):
+            logger.error(
+                "bind_fork_task refused: no registered fork for branch=%s "
+                "(worktree=%s); refusing to create a ghost registry entry",
+                branch,
+                wt,
+            )
+            return False
         meta["task_id"] = task_id
         meta["worktree"] = str(wt)
         forks[branch] = meta
@@ -509,6 +603,7 @@ def bind_fork_task(
                 "project_dir": str(project_dir),
             }
         _write_registry_unlocked(project_dir, data)
+    return True
 
 
 def mark_fork_failed(
@@ -711,6 +806,27 @@ def finalize_fork_worktree(
     return bool(ok)
 
 
+def finalize_fork_worktree_or_fail(
+    worktree_path: str,
+    branch: str,
+    *,
+    message: str | None = None,
+) -> bool:
+    """Finalize a fork; on failure mark it ``failed`` so gates stay blocked."""
+    ok = finalize_fork_worktree(
+        worktree_path,
+        branch,
+        message=message,
+    )
+    if not ok:
+        mark_fork_failed(
+            worktree_path,
+            branch,
+            reason="finalize_fork_worktree failed",
+        )
+    return ok
+
+
 def finalize_fork_for_task(
     task_id: str,
     *,
@@ -740,7 +856,7 @@ def finalize_fork_for_task(
         branch = str(info.get("branch") or "")
         wt = str(info.get("worktree") or "")
         if branch and wt:
-            return finalize_fork_worktree(wt, branch)
+            return finalize_fork_worktree_or_fail(wt, branch)
     return False
 
 
@@ -877,6 +993,7 @@ __all__ = [
     "update_fork_head",
     "commit_dirty_worktree",
     "finalize_fork_worktree",
+    "finalize_fork_worktree_or_fail",
     "finalize_fork_for_task",
     "forks_merged_into_head",
     "has_registered_forks",

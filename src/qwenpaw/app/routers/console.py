@@ -663,10 +663,12 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
         # Fork subagents: commit dirty worktree so branch tips are mergeable.
         if fork_project_dir and fork_worktree_branch:
             try:
-                from qwenpaw.agents.fork_project import finalize_fork_worktree
+                from qwenpaw.agents.fork_project import (
+                    finalize_fork_worktree_or_fail,
+                )
 
                 await asyncio.to_thread(
-                    finalize_fork_worktree,
+                    finalize_fork_worktree_or_fail,
                     fork_project_dir,
                     fork_worktree_branch,
                     message=f"fork worker {fork_worktree_branch}",

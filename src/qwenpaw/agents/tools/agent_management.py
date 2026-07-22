@@ -6,7 +6,6 @@ import json
 import logging
 import re
 import time
-from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 from uuid import uuid4
 
@@ -965,6 +964,7 @@ async def spawn_subagent(  # pylint: disable=too-many-return-statements
             request_payload,
             current_agent_id,
             int(DEFAULT_AGENT_API_TIMEOUT),
+            float(timeout),
         )
         return _tool_text_response(
             format_background_submission_text(
@@ -1098,6 +1098,7 @@ async def _spawn_batch(
                 payload,
                 current_agent_id,
                 int(DEFAULT_AGENT_API_TIMEOUT),
+                float(spec_timeout),
             )
             return format_background_submission_text(result, session_id)
 
@@ -1147,48 +1148,6 @@ async def _call_fork_api(
         return {"error": str(exc)}
 
 
-async def _maybe_cleanup_worktree(
-    worktree_path: str,
-    project_dir: str,
-) -> bool:
-    """Remove the worktree if it has no uncommitted changes.
-
-    Returns True if cleaned up, False if kept (has changes).
-    """
-    import subprocess as _subprocess
-
-    def _cleanup() -> bool:
-        try:
-            result = _subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=worktree_path,
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-            )
-            if result.returncode != 0 or result.stdout.strip():
-                return False
-            remove_result = _subprocess.run(
-                [
-                    "git",
-                    "worktree",
-                    "remove",
-                    "--force",
-                    worktree_path,
-                ],
-                cwd=project_dir,
-                capture_output=True,
-                timeout=30,
-                check=False,
-            )
-            return remove_result.returncode == 0
-        except Exception:  # noqa: BLE001
-            return False
-
-    return await asyncio.to_thread(_cleanup)
-
-
 async def _spawn_forked_subagent(
     task: str,
     current_agent_id: str,
@@ -1232,7 +1191,7 @@ async def _spawn_forked_subagent(
     from ..fork_project import (
         FORK_WORKER_COMMIT_PROTOCOL,
         bind_fork_task,
-        finalize_fork_worktree,
+        finalize_fork_worktree_or_fail,
         register_fork,
     )
     from ...config.context import get_current_workspace_dir
@@ -1254,12 +1213,18 @@ async def _spawn_forked_subagent(
             ACP_CODING_PROJECT_META_KEY: worktree_path,
             "fork_worktree_branch": worktree_branch,
         }
-        register_fork(
+        registered = register_fork(
             worktree_path,
             worktree_branch,
             session_id=fork_session_id,
             workspace_dir=get_current_workspace_dir(),
         )
+        if not registered:
+            return _tool_text_response(
+                "ERROR: failed to register fork for merge verification "
+                f"(branch={worktree_branch or '?'}). Aborting spawn so "
+                "the merge gate cannot be bypassed.",
+            )
     request_context = _build_subagent_request_context(
         current_agent_id,
         allowed_tools=allowed_tools,
@@ -1287,6 +1252,8 @@ async def _spawn_forked_subagent(
             request_payload,
             current_agent_id,
             int(DEFAULT_AGENT_API_TIMEOUT),
+            # Align console cancel with spawn timeout / fork watchdog.
+            float(timeout),
         )
         task_id = result.get("task_id") if isinstance(result, dict) else None
         if worktree_path and task_id:
@@ -1320,29 +1287,11 @@ async def _spawn_forked_subagent(
         timeout,
     )
 
-    # Resolve project_dir for cleanup (coding_mode or workspace)
-    from ...config.config import load_agent_config
-
-    _project_dir = ""
-    if worktree_path:
-        try:
-            _cfg = load_agent_config(current_agent_id)
-            _cm = _cfg.coding_mode
-            if _cm and _cm.enabled and _cm.project_dir:
-                _project_dir = str(
-                    Path(_cm.project_dir).resolve(),
-                )
-            else:
-                _project_dir = str(
-                    Path(_cfg.workspace_dir).resolve(),
-                )
-        except Exception:  # noqa: BLE001
-            _project_dir = ""
-
     # Only commit on a successful worker response (avoid half-baked commits).
+    finalize_ok = False
     if worktree_path and response_data:
-        await asyncio.to_thread(
-            finalize_fork_worktree,
+        finalize_ok = await asyncio.to_thread(
+            finalize_fork_worktree_or_fail,
             worktree_path,
             worktree_branch,
             message=f"fork worker {worktree_branch or fork_session_id}",
@@ -1357,13 +1306,8 @@ async def _spawn_forked_subagent(
             reason="No response from forked subagent",
         )
 
-    cleaned = False
-    if worktree_path and _project_dir and response_data:
-        cleaned = await _maybe_cleanup_worktree(
-            worktree_path,
-            _project_dir,
-        )
-
+    # Do not auto-remove the worktree on the sync path: the controller
+    # needs [FORK_BRANCH:] to merge, and cleanup would hide that signal.
     if not response_data:
         return _tool_text_response(
             "(No response received from forked subagent)",
@@ -1374,11 +1318,18 @@ async def _spawn_forked_subagent(
         session_id=fork_session_id,
     )
 
-    if not cleaned and worktree_path:
+    # Only advertise [FORK_BRANCH:] when finalize succeeded; a failed
+    # finalize is marked in the registry and must not look merge-ready.
+    if worktree_path and finalize_ok:
         result_text += (
             f"\n\n[FORK_BRANCH: {worktree_branch}]"
-            "\nThe forked worktree has changes. "
-            "Review and merge manually."
+            "\nForked worktree retained for merge; clean up after "
+            "`git merge` succeeds."
+        )
+    elif worktree_path:
+        result_text += (
+            f"\n\n[FORK_FINALIZE_FAILED: {worktree_branch}]"
+            "\nFork was marked failed; do not merge until re-run succeeds."
         )
 
     return _tool_text_response(result_text)
@@ -1392,7 +1343,10 @@ async def _watch_background_fork_finalize(
     timeout: int = 600,
 ) -> None:
     """Poll until the background task finishes or *timeout* elapses."""
-    from ..fork_project import finalize_fork_worktree, mark_fork_failed
+    from ..fork_project import (
+        finalize_fork_worktree_or_fail,
+        mark_fork_failed,
+    )
 
     # Align with worker timeout (default 600s); console hook remains primary.
     deadline = time.time() + max(30, int(timeout) + 30)
@@ -1415,7 +1369,7 @@ async def _watch_background_fork_finalize(
         result = status.get("result") or {}
         if result.get("status") == "completed":
             await asyncio.to_thread(
-                finalize_fork_worktree,
+                finalize_fork_worktree_or_fail,
                 worktree_path,
                 worktree_branch,
                 message=f"fork worker {worktree_branch}",
@@ -1434,3 +1388,10 @@ async def _watch_background_fork_finalize(
                 reason=str(reason),
             )
         return
+
+    await asyncio.to_thread(
+        mark_fork_failed,
+        worktree_path,
+        worktree_branch,
+        reason="finalize watchdog timeout",
+    )

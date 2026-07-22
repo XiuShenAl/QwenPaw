@@ -47,7 +47,11 @@ class UltraworkGate(LoopGate):
 
             begin_fork_scope(workspace_dir)
         except ImportError:
-            pass
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "begin_fork_scope unavailable; fork merge scope disabled",
+            )
         wf = WorkflowState(workspace_dir, "ultrawork")
         loop_dir = wf.create_instance()
         state = _UltraworkState(

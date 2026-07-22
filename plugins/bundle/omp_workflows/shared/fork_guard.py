@@ -11,12 +11,16 @@ def forks_integrated(
     state: dict[str, Any] | None,
     workspace_dir: Path | str | None = None,
 ) -> bool:
-    """Return True only when integration is explicitly and verifiably done.
+    """Return True when the controller flag is set and forks are merged.
 
     - ``forks_integrated`` must be the JSON/Python boolean ``True``.
-    - Verification uses the coding-project registry (via workspace pointer)
-      and the active fork *scope* started at mode activation.
-    - Import / resolution failures fail closed.
+    - When an integration project can be resolved, verification uses the
+      coding-project registry (via workspace pointer / git root) and the
+      active fork *scope* started at mode activation.
+    - When no integration project can be resolved (non-git workspace, no
+      pointer), treat as "no registry forks are possible" and allow — the
+      protocol still sets ``forks_integrated=true`` on no-fork paths.
+    - Import failures fail closed. Missing *workspace_dir* fails closed.
     - Only active (pending/finalized) forks in the current scope are checked;
       failed/superseded/merged leftovers cannot block later runs.
     """
@@ -37,7 +41,9 @@ def forks_integrated(
 
     project_dir = resolve_integration_project_dir(workspace_dir)
     if project_dir is None:
-        return False
+        # No git project / pointer → cannot register registry forks; the
+        # explicit boolean flag is enough for the no-fork protocol path.
+        return True
     scope_id = get_active_fork_scope(workspace_dir) or None
     return forks_merged_into_head(project_dir, scope_id=scope_id)
 

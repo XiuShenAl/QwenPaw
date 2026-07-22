@@ -66,7 +66,11 @@ class AutopilotGate(LoopGate):
 
             begin_fork_scope(workspace_dir)
         except ImportError:
-            pass
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "begin_fork_scope unavailable; fork merge scope disabled",
+            )
         wf = WorkflowState(workspace_dir, "autopilot")
         loop_dir = wf.create_instance()
         state = _AutopilotState(
@@ -104,15 +108,6 @@ class AutopilotGate(LoopGate):
         )
         data = await asyncio.to_thread(wf.read_state)
 
-        st.iteration += 1
-        if st.iteration > st.max_iterations:
-            await asyncio.to_thread(wf.cleanup)
-            self.deactivate()
-            return StopHandlerResult(
-                action=StopAction.TERMINATE,
-                reason=f"Total iteration limit ({st.max_iterations})",
-            )
-
         phase = data.get("phase", "expansion")
         st.phase = phase
         st.validation_round = data.get(
@@ -124,7 +119,8 @@ class AutopilotGate(LoopGate):
             data,
             st.workspace_dir,
         ):
-            # Preserve the rejected target phase; resume it after merge.
+            # Preserve target phase; do not burn iteration/stall budget
+            # while waiting on merge (same as Ultrawork).
             st.blocked_on_merge = True
             st.phase = phase
             await asyncio.to_thread(
@@ -145,6 +141,15 @@ class AutopilotGate(LoopGate):
                 {"merge_blocked": False},
             )
         st.blocked_on_merge = False
+
+        st.iteration += 1
+        if st.iteration > st.max_iterations:
+            await asyncio.to_thread(wf.cleanup)
+            self.deactivate()
+            return StopHandlerResult(
+                action=StopAction.TERMINATE,
+                reason=f"Total iteration limit ({st.max_iterations})",
+            )
 
         if phase == "completed":
             await asyncio.to_thread(wf.cleanup)
