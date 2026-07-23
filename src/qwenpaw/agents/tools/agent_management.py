@@ -786,25 +786,96 @@ def _build_spawn_request_context(current_agent_id: str) -> dict[str, Any]:
     return context
 
 
+def _coerce_json_list(value: Any, field_name: str) -> Optional[list[Any]]:
+    """Coerce a tool arg to ``list``; accept JSON-array strings from LLMs.
+
+    Returns ``None`` when *value* is ``None``.  Raises ``ValueError`` for
+    non-list values (after optional JSON decode of strings).
+    """
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise ValueError(
+                f"'{field_name}' must be a list or a JSON array string",
+            )
+        try:
+            parsed = json.loads(text)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise ValueError(
+                f"'{field_name}' must be a list or a JSON array string",
+            ) from exc
+        if not isinstance(parsed, list):
+            raise ValueError(
+                f"'{field_name}' JSON value must be an array, "
+                f"got {type(parsed).__name__}",
+            )
+        return parsed
+    raise ValueError(
+        f"'{field_name}' must be a list or a JSON array string",
+    )
+
+
 def _normalize_str_list(
     value: Any,
     field_name: str,
 ) -> Optional[list[str]]:
     """Validate an optional list[str] tool argument.
 
-    Returns ``None`` when *value* is ``None``.  Raises ``ValueError``
-    when the value is not a list of strings (prevents ``list("abc")``
-    character-splitting on mistaken string inputs).
+    Accepts a real ``list[str]`` or a JSON array string (common LLM
+    mis-serialization).  Returns ``None`` when *value* is ``None``.
+    Raises ``ValueError`` when the value is not a list of strings
+    (prevents ``list("abc")`` character-splitting on mistaken string
+    inputs that are not JSON arrays).
     """
     if value is None:
         return None
-    if not isinstance(value, list) or not all(
-        isinstance(item, str) for item in value
-    ):
+    coerced = _coerce_json_list(value, field_name)
+    assert coerced is not None
+    if not all(isinstance(item, str) for item in coerced):
         raise ValueError(
             f"'{field_name}' must be a list of strings or null",
         )
-    return list(value)
+    return list(coerced)
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    """Parse a bool tool field; reject ambiguous string truthiness.
+
+    ``bool("false")`` is ``True`` in Python — treat common string /
+    numeric forms explicitly instead.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("true", "1", "yes", "on"):
+            return True
+        if text in ("false", "0", "no", "off", ""):
+            return False
+    return bool(value)
+
+
+def _normalize_batch(
+    value: Any,
+) -> Optional[list[Dict[str, Any]]]:
+    """Normalize ``batch`` to ``list[dict]`` or ``None``.
+
+    Accepts a real list or a JSON array string.  Structural checks
+    (non-empty, per-item ``task``) remain in :func:`_spawn_batch`.
+    """
+    if value is None:
+        return None
+    coerced = _coerce_json_list(value, "batch")
+    assert coerced is not None
+    return coerced  # type: ignore[return-value]
 
 
 def _build_subagent_request_context(
@@ -836,9 +907,9 @@ async def spawn_subagent(  # pylint: disable=too-many-return-statements
     fork: bool = False,
     background: bool = False,
     timeout: int = 600,
-    allowed_tools: Optional[list[str]] = None,
-    skills: Optional[list[str]] = None,
-    batch: Optional[list[Dict[str, Any]]] = None,
+    allowed_tools: Optional[list[str] | str] = None,
+    skills: Optional[list[str] | str] = None,
+    batch: Optional[list[Dict[str, Any]] | str] = None,
 ) -> ToolChunk:
     """Spawn an ephemeral subagent within the CURRENT workspace.
 
@@ -879,15 +950,19 @@ async def spawn_subagent(  # pylint: disable=too-many-return-statements
         allowed_tools: Tool-name whitelist.  Only the listed tools are
             available to the subagent.  ``None`` (default) inherits the
             parent's full tool set.  An empty list denies all tools.
+            A JSON array string is also accepted (LLM mis-serialization).
         skills: Skill-name whitelist.  Only the listed SKILL.md files
             are loaded for the subagent.  ``None`` (default) inherits
-            all skills resolved for this workspace.
+            all skills resolved for this workspace.  A JSON array
+            string is also accepted.
         batch: List of task specs for batch mode.  When provided,
             ``task`` must be an empty string.  Each dict must contain a
             ``task`` key; optional keys: ``fork``, ``allowed_tools``,
             ``skills`` (top-level ``fork`` / ``timeout`` /
             ``allowed_tools`` / ``skills`` are ignored in batch mode).
-            All subagents run as background tasks.  Maximum length is
+            A JSON array string is also accepted so schema validation
+            does not reject common LLM stringification.  All subagents
+            run as background tasks.  Maximum length is
             ``MAX_SPAWN_BATCH_SIZE`` (10); concurrent dispatches are
             capped at ``MAX_SPAWN_BATCH_CONCURRENCY`` (3).
 
@@ -903,6 +978,7 @@ async def spawn_subagent(  # pylint: disable=too-many-return-statements
             "allowed_tools",
         )
         skills = _normalize_str_list(skills, "skills")
+        batch = _normalize_batch(batch)
     except ValueError as exc:
         return _tool_text_response(f"ERROR: {exc}")
 
@@ -1057,7 +1133,7 @@ async def _spawn_batch(
     async def _dispatch_one(spec: Dict[str, Any]) -> str:
         session_id = _generate_subagent_session_id()
         task_text = spec["task"]
-        spec_fork = bool(spec.get("fork", False))
+        spec_fork = _coerce_bool(spec.get("fork"), default=False)
         spec_timeout = spec.get("timeout", 600)
         spec_allowed = spec.get("allowed_tools")
         spec_skills = spec.get("skills")

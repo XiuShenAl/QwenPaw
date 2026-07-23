@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
+# pylint: disable=protected-access
 """Tests for agent discovery and inter-agent chat helpers."""
 
 from __future__ import annotations
 
+import json
+
 import httpx
+from agentscope.tool import FunctionTool
 from agentscope.tool import Toolkit
 
-from agentscope.tool import FunctionTool
 from qwenpaw.agents.tools import agent_management
 
 
@@ -442,3 +445,200 @@ async def test_spawn_subagent_inherits_root_channel_context(monkeypatch):
     assert context["channel_meta"] == {"group_openid": "g1"}
     assert context["_spawn_subagent"] is True
     assert "done" in response.content[0].text
+
+
+def test_normalize_str_list_accepts_json_array_string():
+    assert agent_management._normalize_str_list(
+        '["read_file", "write_file"]',
+        "allowed_tools",
+    ) == ["read_file", "write_file"]
+    assert agent_management._normalize_str_list(None, "skills") is None
+    assert agent_management._normalize_str_list([], "skills") == []
+
+
+def test_normalize_str_list_rejects_plain_string():
+    try:
+        agent_management._normalize_str_list("read_file", "allowed_tools")
+    except ValueError as exc:
+        assert "allowed_tools" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for non-JSON string")
+
+
+def test_normalize_batch_accepts_json_array_string():
+    raw = json.dumps(
+        [
+            {"task": "do A", "fork": False},
+            {"task": "do B", "fork": True},
+        ],
+    )
+    out = agent_management._normalize_batch(raw)
+    assert isinstance(out, list)
+    assert len(out) == 2
+    assert out[0]["task"] == "do A"
+    assert out[1]["fork"] is True
+
+
+def test_coerce_bool_string_false_is_false():
+    assert agent_management._coerce_bool("false") is False
+    assert agent_management._coerce_bool("true") is True
+    assert agent_management._coerce_bool(False) is False
+    assert agent_management._coerce_bool(None, default=True) is True
+    # Python bool("false") is True — must not use that.
+    assert bool("false") is True
+
+
+def test_spawn_subagent_schema_accepts_batch_string():
+    """Tool JSON schema must allow string so AgentScope validation passes."""
+    import jsonschema
+
+    tool = FunctionTool(agent_management.spawn_subagent)
+    schema = tool.input_schema
+    # Stringified batch (the live LLM failure mode) must validate.
+    jsonschema.validate(
+        {
+            "task": "",
+            "batch": (
+                '[{"task": "Create A", "fork": false},'
+                ' {"task": "Create B"}]'
+            ),
+        },
+        schema,
+    )
+    # Native list still validates.
+    jsonschema.validate(
+        {
+            "task": "",
+            "batch": [{"task": "Create A"}, {"task": "Create B"}],
+        },
+        schema,
+    )
+
+
+async def test_spawn_subagent_batch_json_string_dispatches(monkeypatch):
+    submitted: list[dict] = []
+
+    def fake_submit(
+        _base,
+        payload,
+        agent_id,
+        _timeout,
+        task_timeout=None,  # pylint: disable=unused-argument
+    ):
+        submitted.append({"agent_id": agent_id, "payload": payload})
+        return {"task_id": f"t-{len(submitted)}"}
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    from qwenpaw.app import agent_context
+
+    monkeypatch.setattr(
+        agent_management,
+        "submit_agent_chat_task",
+        fake_submit,
+    )
+    monkeypatch.setattr(agent_management.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(agent_context, "get_current_agent_id", lambda: "bot-a")
+    monkeypatch.setattr(
+        agent_context,
+        "get_current_approval_route",
+        lambda: None,
+    )
+    monkeypatch.setattr(agent_context, "get_current_session_id", lambda: "s1")
+    monkeypatch.setattr(agent_context, "get_current_user_id", lambda: "u1")
+    monkeypatch.setattr(
+        agent_context,
+        "get_current_channel",
+        lambda: "console",
+    )
+    monkeypatch.setattr(
+        agent_context,
+        "get_current_root_session_id",
+        lambda: "s1",
+    )
+
+    batch_json = json.dumps(
+        [
+            {"task": "create file a", "fork": False},
+            {"task": "create file b", "fork": "false"},
+        ],
+    )
+    response = await agent_management.spawn_subagent(
+        task="",
+        batch=batch_json,
+    )
+    text = response.content[0].text
+    assert "[1/2]" in text
+    assert "[2/2]" in text
+    assert len(submitted) == 2
+    assert submitted[0]["agent_id"] == "bot-a"
+    # fork="false" must not take the fork path (no fork_project_dir).
+    for item in submitted:
+        rc = item["payload"]["request_context"]
+        assert "fork_project_dir" not in rc
+
+
+async def test_spawn_subagent_batch_list_still_works(monkeypatch):
+    submitted: list[dict] = []
+
+    def fake_submit(
+        _base,
+        payload,
+        _agent_id,
+        _timeout,
+        task_timeout=None,  # pylint: disable=unused-argument
+    ):
+        submitted.append(payload)
+        return {"task_id": f"t-{len(submitted)}"}
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    from qwenpaw.app import agent_context
+
+    monkeypatch.setattr(
+        agent_management,
+        "submit_agent_chat_task",
+        fake_submit,
+    )
+    monkeypatch.setattr(agent_management.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(agent_context, "get_current_agent_id", lambda: "bot-a")
+    monkeypatch.setattr(
+        agent_context,
+        "get_current_approval_route",
+        lambda: None,
+    )
+    monkeypatch.setattr(agent_context, "get_current_session_id", lambda: "s1")
+    monkeypatch.setattr(agent_context, "get_current_user_id", lambda: "u1")
+    monkeypatch.setattr(
+        agent_context,
+        "get_current_channel",
+        lambda: "console",
+    )
+    monkeypatch.setattr(
+        agent_context,
+        "get_current_root_session_id",
+        lambda: "s1",
+    )
+
+    response = await agent_management.spawn_subagent(
+        task="",
+        batch=[
+            {"task": "one", "allowed_tools": '["read_file"]'},
+            {"task": "two"},
+        ],
+    )
+    assert "[1/2]" in response.content[0].text
+    assert len(submitted) == 2
+    rc0 = submitted[0]["request_context"]
+    assert rc0.get("subagent_allowed_tools") == ["read_file"]
+
+
+async def test_spawn_subagent_batch_invalid_string_returns_error():
+    response = await agent_management.spawn_subagent(
+        task="",
+        batch="not-json-array",
+    )
+    assert "ERROR" in response.content[0].text
+    assert "batch" in response.content[0].text.lower()
