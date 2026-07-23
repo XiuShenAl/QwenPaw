@@ -775,8 +775,9 @@ def mark_fork_failed(
     so a watchdog waits for an in-flight finalize and cannot overwrite a
     successful ``finalized`` result. Also refuses ``merged`` / ``superseded``.
 
-    A leftover ``finalizing`` row is crash-recovered first: clean worktree
-    becomes ``finalized`` (not failed); dirty/unreadable may then fail.
+    A leftover ``finalizing`` row is crash-recovered first: only a clean
+    worktree whose ``HEAD != base`` (commit evidence) becomes ``finalized``.
+    Clean ``HEAD == base`` / dirty / unreadable stay on the fail path.
     """
     # pylint: disable=too-many-return-statements
     if not worktree_path or not branch:
@@ -817,12 +818,15 @@ def mark_fork_failed(
             expected_scope=expected_scope,
             outcome=outcome,
             head=head,
+            # Failure path: require commit evidence (HEAD != base).
+            allow_clean_no_changes=False,
+            fail_reason=reason,
         )
         if recovered is True:
-            # Clean committed worktree healed to finalized.
+            # Clean worktree with a real commit healed to finalized.
             return
         if recovered is False:
-            # Unreadable already marked failed, or row no longer finalizing.
+            # Already failed / no-commit-evidence / row no longer finalizing.
             return
         # Dirty leftover — caller asked to fail; record failed now.
         with _registry_lock(project_dir):
@@ -1029,12 +1033,20 @@ def _apply_crash_recovery(
     expected_scope: str,
     outcome: str,
     head: str,
+    allow_clean_no_changes: bool = True,
+    fail_reason: str = "",
 ) -> bool | None:
     """Write crash-recovery result under registry lock.
 
     Returns ``True``/``False`` when finished, or ``None`` to re-run commit
     for a dirty worktree.
+
+    When *allow_clean_no_changes* is False (failure callers such as
+    ``mark_fork_failed``), a clean worktree with ``HEAD == base`` is treated
+    as "no successful commit evidence" and marked ``failed`` instead of
+    ``finalized``/``no_changes``.
     """
+    # pylint: disable=too-many-return-statements
     with _registry_lock(project_dir):
         status, meta = _fork_status_unlocked(project_dir, branch)
         if status in (_STATUS_FINALIZED, _STATUS_MERGED):
@@ -1047,10 +1059,19 @@ def _apply_crash_recovery(
             _mark_fork_failed_unlocked(
                 project_dir,
                 branch,
-                reason="git unreadable after crashed finalize",
+                reason=fail_reason or "git unreadable after crashed finalize",
             )
             return False
         if outcome == "clean":
+            base = str(meta.get("base") or "")
+            if not allow_clean_no_changes and (not head or head == base):
+                _mark_fork_failed_unlocked(
+                    project_dir,
+                    branch,
+                    reason=fail_reason
+                    or "no commit evidence after crashed finalize",
+                )
+                return False
             return _write_finalized_unlocked(
                 project_dir,
                 branch,

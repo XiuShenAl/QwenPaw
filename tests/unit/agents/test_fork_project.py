@@ -449,8 +449,10 @@ def test_recover_crashed_finalizing_dirty_worktree(tmp_path: Path) -> None:
     assert after["forks"][branch]["no_changes"] is False
 
 
-def test_mark_fork_failed_heals_clean_finalizing(tmp_path: Path) -> None:
-    """Watchdog must not fail a recoverable clean finalizing crash leftover."""
+def test_mark_fork_failed_heals_clean_finalizing_with_commit(
+    tmp_path: Path,
+) -> None:
+    """Failure path still heals when HEAD moved (commit evidence exists)."""
     project = tmp_path / "repo"
     _init_repo(project)
     scope = begin_fork_scope(project)
@@ -476,6 +478,36 @@ def test_mark_fork_failed_heals_clean_finalizing(tmp_path: Path) -> None:
     after = json.loads(registry.read_text(encoding="utf-8"))
     assert after["forks"][branch]["status"] == "finalized"
     assert after["forks"][branch]["finalized"] is True
+    assert after["forks"][branch]["no_changes"] is False
+
+
+def test_mark_fork_failed_rejects_clean_no_commit_finalizing(
+    tmp_path: Path,
+) -> None:
+    """Clean HEAD==base finalizing must not become finalized/no_changes."""
+    project = tmp_path / "repo"
+    _init_repo(project)
+    scope = begin_fork_scope(project)
+    wt = project / ".qwenpaw" / "worktrees" / "w1"
+    branch = "fork/w1"
+    _git(project, "worktree", "add", str(wt), "-b", branch)
+    register_fork(
+        str(wt),
+        branch,
+        workspace_dir=project,
+        scope_id=scope,
+    )
+    registry = project / REGISTRY_REL
+    data = json.loads(registry.read_text(encoding="utf-8"))
+    # Crash right after writing finalizing, before any git work.
+    data["forks"][branch]["status"] = "finalizing"
+    registry.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    mark_fork_failed(str(wt), branch, reason="worker crashed")
+    after = json.loads(registry.read_text(encoding="utf-8"))
+    assert after["forks"][branch]["status"] == "failed"
+    assert after["forks"][branch].get("finalized") is not True
+    assert after["forks"][branch].get("fail_reason") == "worker crashed"
 
 
 def test_forks_merged_rechecks_registry_after_git(
