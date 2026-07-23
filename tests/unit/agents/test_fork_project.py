@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import errno
 import importlib.util
 import json
 import subprocess
+import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -444,6 +447,219 @@ def test_recover_crashed_finalizing_dirty_worktree(tmp_path: Path) -> None:
     after = json.loads(registry.read_text(encoding="utf-8"))
     assert after["forks"][branch]["status"] == "finalized"
     assert after["forks"][branch]["no_changes"] is False
+
+
+def test_mark_fork_failed_heals_clean_finalizing(tmp_path: Path) -> None:
+    """Watchdog must not fail a recoverable clean finalizing crash leftover."""
+    project = tmp_path / "repo"
+    _init_repo(project)
+    scope = begin_fork_scope(project)
+    wt = project / ".qwenpaw" / "worktrees" / "w1"
+    branch = "fork/w1"
+    _git(project, "worktree", "add", str(wt), "-b", branch)
+    register_fork(
+        str(wt),
+        branch,
+        workspace_dir=project,
+        scope_id=scope,
+    )
+    (wt / "feat.txt").write_text("feat\n", encoding="utf-8")
+    assert finalize_fork_worktree(str(wt), branch, message="feat") is True
+    registry = project / REGISTRY_REL
+    data = json.loads(registry.read_text(encoding="utf-8"))
+    # Simulate crash after commit succeeded but before registry write.
+    data["forks"][branch]["status"] = "finalizing"
+    data["forks"][branch]["finalized"] = False
+    registry.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    mark_fork_failed(str(wt), branch, reason="watchdog timeout")
+    after = json.loads(registry.read_text(encoding="utf-8"))
+    assert after["forks"][branch]["status"] == "finalized"
+    assert after["forks"][branch]["finalized"] is True
+
+
+def test_forks_merged_rechecks_registry_after_git(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A fork registered during merge checks must keep the gate closed."""
+    # pylint: disable=protected-access
+    from qwenpaw.agents import fork_project as fp
+
+    project = tmp_path / "repo"
+    _init_repo(project)
+    scope = begin_fork_scope(project)
+    wt1 = project / ".qwenpaw" / "worktrees" / "w1"
+    branch1 = "fork/w1"
+    _git(project, "worktree", "add", str(wt1), "-b", branch1)
+    register_fork(
+        str(wt1),
+        branch1,
+        workspace_dir=project,
+        scope_id=scope,
+    )
+    assert finalize_fork_worktree(str(wt1), branch1) is True
+    _git(project, "merge", "--no-ff", branch1, "-m", "integrate w1")
+
+    wt2 = project / ".qwenpaw" / "worktrees" / "w2"
+    branch2 = "fork/w2"
+    inserted = {"done": False}
+    real_is_ancestor = fp._is_ancestor
+
+    def _insert_fork_during_check(project_dir: Path, tip: str) -> bool:
+        if not inserted["done"]:
+            inserted["done"] = True
+            _git(project, "worktree", "add", str(wt2), "-b", branch2)
+            assert register_fork(
+                str(wt2),
+                branch2,
+                workspace_dir=project,
+                scope_id=scope,
+            )
+        return real_is_ancestor(project_dir, tip)
+
+    monkeypatch.setattr(fp, "_is_ancestor", _insert_fork_during_check)
+    assert (
+        forks_merged_into_head(project, scope_id=scope) is False
+    ), "new pending fork during check must fail-closed"
+
+
+def test_recovery_git_runs_outside_registry_lock(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Crash-recovery Git must not hold the project registry lock."""
+    # pylint: disable=protected-access
+    from qwenpaw.agents import fork_project as fp
+
+    project = tmp_path / "repo"
+    _init_repo(project)
+    scope = begin_fork_scope(project)
+    wt = project / ".qwenpaw" / "worktrees" / "w1"
+    branch = "fork/w1"
+    _git(project, "worktree", "add", str(wt), "-b", branch)
+    register_fork(
+        str(wt),
+        branch,
+        workspace_dir=project,
+        scope_id=scope,
+    )
+    registry = project / REGISTRY_REL
+    data = json.loads(registry.read_text(encoding="utf-8"))
+    data["forks"][branch]["status"] = "finalizing"
+    registry.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    holding = {"registry": False}
+    real_registry = fp._registry_lock
+    real_inspect = fp._inspect_worktree_recovery
+
+    @contextmanager
+    def _tracking_registry(project_dir: Path):
+        holding["registry"] = True
+        with real_registry(project_dir):
+            yield
+        holding["registry"] = False
+
+    def _inspect_outside_registry(worktree: Path):
+        assert holding["registry"] is False
+        return real_inspect(worktree)
+
+    monkeypatch.setattr(fp, "_registry_lock", _tracking_registry)
+    monkeypatch.setattr(
+        fp,
+        "_inspect_worktree_recovery",
+        _inspect_outside_registry,
+    )
+    assert finalize_fork_worktree(str(wt), branch) is True
+
+
+def test_finalize_lock_released_after_subprocess_crash(
+    tmp_path: Path,
+) -> None:
+    """OS must release the finalize lock when the holding process dies."""
+    # pylint: disable=protected-access
+    from qwenpaw.agents.fork_project import (
+        _exclusive_file_lock,
+        _fork_finalize_lock_path,
+    )
+
+    project = tmp_path / "repo"
+    project.mkdir()
+    branch = "fork/crash"
+    lock_path = _fork_finalize_lock_path(project.resolve(), branch)
+    ready = tmp_path / "ready"
+    child = (
+        "import time\n"
+        "from pathlib import Path\n"
+        "from qwenpaw.agents.fork_project import _exclusive_file_lock\n"
+        f"lock_path = Path({str(lock_path)!r})\n"
+        f"ready = Path({str(ready)!r})\n"
+        "with _exclusive_file_lock(lock_path, blocking=True) as ok:\n"
+        "    assert ok\n"
+        "    ready.write_text('1', encoding='utf-8')\n"
+        "    time.sleep(120)\n"
+    )
+    with subprocess.Popen(  # noqa: S603
+        [sys.executable, "-c", child],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    ) as proc:
+        try:
+            deadline = time.time() + 10
+            while not ready.is_file() and time.time() < deadline:
+                if proc.poll() is not None:
+                    err = proc.stderr.read() if proc.stderr else ""
+                    raise AssertionError(
+                        f"lock holder exited early: "
+                        f"{proc.returncode} {err}",
+                    )
+                time.sleep(0.05)
+            assert ready.is_file(), "child did not acquire finalize lock"
+            with _exclusive_file_lock(lock_path, blocking=False) as held:
+                assert held is False
+            proc.kill()
+            proc.wait(timeout=5)
+            started = time.monotonic()
+            with _exclusive_file_lock(lock_path, blocking=True) as held:
+                assert held is True
+            assert time.monotonic() - started < 5.0
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+
+
+def test_windows_blocking_lock_retries_past_ten(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Windows blocking acquire must poll beyond msvcrt.LK_LOCK's ~10 tries."""
+    # pylint: disable=protected-access
+    from qwenpaw.agents import fork_project as fp
+
+    monkeypatch.setattr(fp.os, "name", "nt")
+    monkeypatch.setattr(fp, "_WINDOWS_LOCK_POLL_S", 0)
+    attempts = {"n": 0}
+
+    class _FakeMsvcrt:
+        LK_NBLCK = 1
+        LK_LOCK = 2
+        LK_UNLCK = 3
+
+        def locking(self, _fd: int, mode: int, _nbytes: int) -> None:
+            if mode == self.LK_UNLCK:
+                return
+            attempts["n"] += 1
+            # Exceed the historical LK_LOCK ~10-retry ceiling.
+            if attempts["n"] <= 12:
+                raise OSError(errno.EDEADLK, "lock conflict")
+
+    monkeypatch.setitem(sys.modules, "msvcrt", _FakeMsvcrt())
+    lock_path = tmp_path / "win.lock"
+    with fp._exclusive_file_lock(lock_path, blocking=True) as acquired:
+        assert acquired is True
+    assert attempts["n"] == 13
 
 
 def test_finalize_idempotent_and_mark_failed_skips_finalized(

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import logging
@@ -15,6 +16,18 @@ from pathlib import Path
 from typing import Any, Iterator
 
 logger = logging.getLogger(__name__)
+
+# Windows msvcrt.LK_LOCK only retries ~10s then raises. Use LK_NBLCK + poll
+# so blocking acquire can wait for a long finalize (git add/commit).
+_WINDOWS_LOCK_POLL_S = 0.05
+_WINDOWS_LOCK_CONFLICT_ERRNOS = frozenset(
+    {
+        errno.EDEADLK,
+        errno.EACCES,
+        errno.EAGAIN,
+        getattr(errno, "EWOULDBLOCK", errno.EAGAIN),
+    },
+)
 
 WORKTREE_REL = Path(".qwenpaw") / "worktrees"
 REGISTRY_REL = Path(".qwenpaw") / "fork_registry.json"
@@ -101,7 +114,13 @@ def project_dir_from_worktree(worktree_path: Path) -> Path:
 
 
 def _lock_file_acquire(lock_file: Any, *, blocking: bool) -> bool:
-    """Acquire an exclusive lock on an open file; return success."""
+    """Acquire an exclusive lock on an open file; return success.
+
+    On Windows, ``msvcrt.LK_LOCK`` only retries for ~10 seconds then raises
+    ``OSError`` — too short for a slow ``git commit``. Blocking mode instead
+    polls with ``LK_NBLCK`` until the lock is acquired (or a non-conflict
+    I/O error occurs). Callers already run this off the event loop.
+    """
     if os.name == "nt":
         import msvcrt
 
@@ -109,15 +128,18 @@ def _lock_file_acquire(lock_file: Any, *, blocking: bool) -> bool:
         if lock_file.read(1) == "":
             lock_file.write("0")
             lock_file.flush()
-        lock_file.seek(0)
-        flag = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
-        try:
-            msvcrt.locking(lock_file.fileno(), flag, 1)
-            return True
-        except OSError:
-            if blocking:
+        while True:
+            lock_file.seek(0)
+            try:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                return True
+            except OSError as exc:
+                if not blocking:
+                    return False
+                if exc.errno in _WINDOWS_LOCK_CONFLICT_ERRNOS:
+                    time.sleep(_WINDOWS_LOCK_POLL_S)
+                    continue
                 raise
-            return False
 
     import fcntl
 
@@ -752,7 +774,11 @@ def mark_fork_failed(
     Blocks on the same per-branch finalize lock as ``finalize_fork_worktree``
     so a watchdog waits for an in-flight finalize and cannot overwrite a
     successful ``finalized`` result. Also refuses ``merged`` / ``superseded``.
+
+    A leftover ``finalizing`` row is crash-recovered first: clean worktree
+    becomes ``finalized`` (not failed); dirty/unreadable may then fail.
     """
+    # pylint: disable=too-many-return-statements
     if not worktree_path or not branch:
         return
     try:
@@ -763,11 +789,47 @@ def mark_fork_failed(
     with _fork_finalize_lock(project_dir, branch, blocking=True) as acquired:
         if not acquired:
             return
+        expected_scope = ""
+        with _registry_lock(project_dir):
+            status, meta = _fork_status_unlocked(project_dir, branch)
+            if status in (
+                _STATUS_SUPERSEDED,
+                _STATUS_MERGED,
+                _STATUS_FINALIZED,
+            ):
+                return
+            if status == _STATUS_FINALIZING and meta is not None:
+                expected_scope = str(meta.get("scope_id") or "")
+            else:
+                _mark_fork_failed_unlocked(
+                    project_dir,
+                    branch,
+                    reason=reason,
+                )
+                return
+
+        # Crash recovery under per-branch lock; Git outside registry lock.
+        outcome, head = _inspect_worktree_recovery(wt)
+        recovered = _apply_crash_recovery(
+            project_dir,
+            branch,
+            wt,
+            expected_scope=expected_scope,
+            outcome=outcome,
+            head=head,
+        )
+        if recovered is True:
+            # Clean committed worktree healed to finalized.
+            return
+        if recovered is False:
+            # Unreadable already marked failed, or row no longer finalizing.
+            return
+        # Dirty leftover — caller asked to fail; record failed now.
         with _registry_lock(project_dir):
             _mark_fork_failed_unlocked(
                 project_dir,
                 branch,
-                reason=reason,
+                reason=reason or "dirty worktree after crashed finalize",
             )
 
 
@@ -914,28 +976,119 @@ def _write_finalized_unlocked(
     return True
 
 
-def _recover_crashed_finalizing_unlocked(
-    project_dir: Path,
-    branch: str,
-    wt: Path,
-) -> bool | None:
-    """Heal a leftover ``finalizing`` row after the previous owner crashed.
+def _inspect_worktree_recovery(wt: Path) -> tuple[str, str]:
+    """Inspect worktree for crash recovery (no registry lock held).
 
-    Returns:
-      - ``True`` / ``False`` when recovery fully decided the outcome
-      - ``None`` when the worktree is dirty and caller should re-run git
+    Returns ``(outcome, head)`` where *outcome* is one of:
+    ``unreadable``, ``dirty``, ``clean``.
     """
     porcelain = _git_stdout(["status", "--porcelain"], wt)
     if porcelain is None:
-        _mark_fork_failed_unlocked(
-            project_dir,
-            branch,
-            reason="git unreadable after crashed finalize",
-        )
-        return False
+        return "unreadable", ""
     if porcelain:
-        return None
+        return "dirty", ""
     head = _git_stdout(["rev-parse", "HEAD"], wt) or ""
+    return "clean", head
+
+
+def _begin_finalize_unlocked(
+    project_dir: Path,
+    branch: str,
+    wt: Path,
+) -> tuple[str, str]:
+    """Prepare finalize under registry lock.
+
+    Returns ``(action, expected_scope)`` where *action* is one of:
+    ``done`` (already finalized), ``skip``, ``recover``, ``run``.
+    """
+    status, meta = _fork_status_unlocked(project_dir, branch)
+    if status in (_STATUS_FINALIZED, _STATUS_MERGED):
+        return "done", ""
+    if meta is None or status not in (_STATUS_PENDING, _STATUS_FINALIZING):
+        return "skip", ""
+    expected_scope = str(meta.get("scope_id") or "")
+    if status == _STATUS_FINALIZING:
+        return "recover", expected_scope
+    data = _read_registry_unlocked(project_dir)
+    forks = data.setdefault("forks", {})
+    row = forks.get(branch)
+    if not isinstance(row, dict):
+        return "skip", expected_scope
+    row["status"] = _STATUS_FINALIZING
+    row["worktree"] = str(wt)
+    forks[branch] = row
+    _write_registry_unlocked(project_dir, data)
+    return "run", expected_scope
+
+
+def _apply_crash_recovery(
+    project_dir: Path,
+    branch: str,
+    wt: Path,
+    *,
+    expected_scope: str,
+    outcome: str,
+    head: str,
+) -> bool | None:
+    """Write crash-recovery result under registry lock.
+
+    Returns ``True``/``False`` when finished, or ``None`` to re-run commit
+    for a dirty worktree.
+    """
+    with _registry_lock(project_dir):
+        status, meta = _fork_status_unlocked(project_dir, branch)
+        if status in (_STATUS_FINALIZED, _STATUS_MERGED):
+            return True
+        if meta is None or status != _STATUS_FINALIZING:
+            return False
+        if str(meta.get("scope_id") or "") != expected_scope:
+            return False
+        if outcome == "unreadable":
+            _mark_fork_failed_unlocked(
+                project_dir,
+                branch,
+                reason="git unreadable after crashed finalize",
+            )
+            return False
+        if outcome == "clean":
+            return _write_finalized_unlocked(
+                project_dir,
+                branch,
+                wt,
+                head=head,
+            )
+        return None
+
+
+def _finish_finalize_unlocked(
+    project_dir: Path,
+    branch: str,
+    wt: Path,
+    *,
+    expected_scope: str,
+    ok: bool,
+    head: str,
+) -> bool:
+    """Persist finalize result under registry lock."""
+    status, meta = _fork_status_unlocked(project_dir, branch)
+    if status in (_STATUS_FINALIZED, _STATUS_MERGED):
+        return True
+    if meta is None or status not in (
+        _STATUS_PENDING,
+        _STATUS_FINALIZING,
+    ):
+        return False
+    if str(meta.get("scope_id") or "") != expected_scope:
+        return False
+    if not ok:
+        data = _read_registry_unlocked(project_dir)
+        forks = data.setdefault("forks", {})
+        row = forks.get(branch)
+        if isinstance(row, dict):
+            row["status"] = _STATUS_PENDING
+            forks[branch] = row
+            _write_registry_unlocked(project_dir, data)
+        return False
     return _write_finalized_unlocked(
         project_dir,
         branch,
@@ -959,8 +1112,10 @@ def finalize_fork_worktree(
     registry updates and ``git status``/``add``/``commit``. A second caller
     blocks, then returns success if the fork is already finalized. After a
     crash, a leftover ``finalizing`` row is healed from the worktree state.
+    Recovery Git runs under the per-branch lock but **outside** the project
+    registry lock so other forks are not stalled.
     """
-    # pylint: disable=too-many-return-statements,too-many-branches
+    # pylint: disable=too-many-return-statements
     if not worktree_path or not branch:
         return False
     wt = Path(worktree_path).expanduser().resolve()
@@ -973,35 +1128,32 @@ def finalize_fork_worktree(
             return False
 
         with _registry_lock(project_dir):
-            status, meta = _fork_status_unlocked(project_dir, branch)
-            if status in (_STATUS_FINALIZED, _STATUS_MERGED):
-                return True
-            if meta is None or status not in (
-                _STATUS_PENDING,
-                _STATUS_FINALIZING,
-            ):
-                logger.info(
-                    "Skipping finalize for unknown/inactive fork %s",
-                    branch,
-                )
-                return False
-            if status == _STATUS_FINALIZING:
-                recovered = _recover_crashed_finalizing_unlocked(
-                    project_dir,
-                    branch,
-                    wt,
-                )
-                if recovered is not None:
-                    return recovered
-            data = _read_registry_unlocked(project_dir)
-            forks = data.setdefault("forks", {})
-            row = forks.get(branch)
-            if not isinstance(row, dict):
-                return False
-            row["status"] = _STATUS_FINALIZING
-            row["worktree"] = str(wt)
-            forks[branch] = row
-            _write_registry_unlocked(project_dir, data)
+            action, expected_scope = _begin_finalize_unlocked(
+                project_dir,
+                branch,
+                wt,
+            )
+        if action == "done":
+            return True
+        if action == "skip":
+            logger.info(
+                "Skipping finalize for unknown/inactive fork %s",
+                branch,
+            )
+            return False
+        if action == "recover":
+            # Git I/O under per-branch lock only — do not hold registry lock.
+            outcome, recovered_head = _inspect_worktree_recovery(wt)
+            recovered = _apply_crash_recovery(
+                project_dir,
+                branch,
+                wt,
+                expected_scope=expected_scope,
+                outcome=outcome,
+                head=recovered_head,
+            )
+            if recovered is not None:
+                return recovered
 
         ok = commit_dirty_worktree(
             str(wt),
@@ -1009,28 +1161,12 @@ def finalize_fork_worktree(
         )
         head = _git_stdout(["rev-parse", "HEAD"], wt) or ""
         with _registry_lock(project_dir):
-            status, meta = _fork_status_unlocked(project_dir, branch)
-            if status in (_STATUS_FINALIZED, _STATUS_MERGED):
-                return True
-            if meta is None or status not in (
-                _STATUS_PENDING,
-                _STATUS_FINALIZING,
-            ):
-                return False
-            if not ok:
-                # Leave pending so finalize_or_fail / retry can decide.
-                data = _read_registry_unlocked(project_dir)
-                forks = data.setdefault("forks", {})
-                row = forks.get(branch)
-                if isinstance(row, dict):
-                    row["status"] = _STATUS_PENDING
-                    forks[branch] = row
-                    _write_registry_unlocked(project_dir, data)
-                return False
-            return _write_finalized_unlocked(
+            return _finish_finalize_unlocked(
                 project_dir,
                 branch,
                 wt,
+                expected_scope=expected_scope,
+                ok=ok,
                 head=head,
             )
 
@@ -1115,6 +1251,30 @@ def _is_ancestor(project_dir: Path, tip: str) -> bool:
     return check.returncode == 0
 
 
+def _collect_scope_active_forks(
+    forks: dict[str, Any],
+    scope_id: str | None,
+) -> tuple[bool, list[tuple[str, dict[str, Any]]]]:
+    """Return ``(has_failed, active)`` for forks in *scope_id*.
+
+    ``has_failed`` is True when any in-scope entry is ``failed`` or a
+    non-dict meta is present (fail closed).
+    """
+    active: list[tuple[str, dict[str, Any]]] = []
+    for branch, meta in forks.items():
+        if not isinstance(meta, dict):
+            return True, []
+        if scope_id and str(meta.get("scope_id") or "") != scope_id:
+            continue
+        status = str(meta.get("status") or _STATUS_PENDING)
+        if status == _STATUS_FAILED:
+            return True, []
+        if status not in _ACTIVE_STATUSES:
+            continue
+        active.append((branch, dict(meta)))
+    return False, active
+
+
 def forks_merged_into_head(
     project_dir: Path | str | None,
     *,
@@ -1128,6 +1288,9 @@ def forks_merged_into_head(
     - Each ``pending``/``finalized`` fork must be finalized with tip in HEAD.
     - ``tip == base`` is allowed only when ``no_changes`` was set at finalize.
     - Empty active **and** no failed in scope → True (no forks, or all merged).
+
+    Re-validates the registry under lock after Git checks so a concurrent
+    ``register_fork`` cannot fail-open the merge gate.
     """
     # pylint: disable=too-many-return-statements,too-many-branches
     if project_dir is None:
@@ -1136,22 +1299,13 @@ def forks_merged_into_head(
     with _registry_lock(root):
         data = _read_registry_unlocked(root)
         forks = dict(data.get("forks") or {})
-
-    active: list[tuple[str, dict[str, Any]]] = []
-    for branch, meta in forks.items():
-        if not isinstance(meta, dict):
+        has_failed, active = _collect_scope_active_forks(forks, scope_id)
+        if has_failed:
             return False
-        if scope_id and str(meta.get("scope_id") or "") != scope_id:
-            continue
-        status = str(meta.get("status") or _STATUS_PENDING)
-        if status == _STATUS_FAILED:
-            return False
-        if status not in _ACTIVE_STATUSES:
-            continue
-        active.append((branch, meta))
-
-    if not active:
-        return True
+        # Empty active under lock — no TOCTOU window before returning True.
+        if not active:
+            return True
+        verified_branches = {branch for branch, _meta in active}
 
     newly_merged: list[str] = []
     for branch, meta in active:
@@ -1181,10 +1335,31 @@ def forks_merged_into_head(
     with _registry_lock(root):
         data = _read_registry_unlocked(root)
         forks = data.setdefault("forks", {})
+        has_failed, active_now = _collect_scope_active_forks(forks, scope_id)
+        if has_failed:
+            return False
+        active_now_branches = {branch for branch, _meta in active_now}
+        # A fork registered during Git checks must keep the gate closed.
+        if active_now_branches - verified_branches:
+            return False
         for branch in newly_merged:
             meta = forks.get(branch)
-            if isinstance(meta, dict):
-                meta["status"] = _STATUS_MERGED
+            if not isinstance(meta, dict):
+                return False
+            if scope_id and str(meta.get("scope_id") or "") != scope_id:
+                return False
+            status = str(meta.get("status") or _STATUS_PENDING)
+            if status == _STATUS_FAILED:
+                return False
+            if status == _STATUS_MERGED:
+                continue
+            if (
+                status != _STATUS_FINALIZED
+                or meta.get("finalized") is not True
+            ):
+                return False
+            meta["status"] = _STATUS_MERGED
+            forks[branch] = meta
         # Keep failed entries so a mixed success/fail scope stays blocked.
         _prune_statuses_unlocked(data, {_STATUS_MERGED, _STATUS_SUPERSEDED})
         _write_registry_unlocked(root, data)
