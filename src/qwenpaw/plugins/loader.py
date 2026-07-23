@@ -1355,9 +1355,13 @@ class PluginLoader:
                 manifest_candidates.append(old_name)
 
             # Multi-tool format: meta.tools[].name
-            for tool in meta.get("tools", []):
-                if isinstance(tool, dict) and tool.get("name"):
-                    manifest_candidates.append(tool["name"])
+            # Tolerate malformed meta.tools (null / non-list) — same as
+            # routers.plugins._tool_names_from_meta.
+            raw_tools = meta.get("tools")
+            for tool in raw_tools if isinstance(raw_tools, list) else ():
+                name = tool.get("name") if isinstance(tool, dict) else None
+                if isinstance(name, str) and name.strip():
+                    manifest_candidates.append(name.strip())
 
             with _TOOL_PLUGIN_OWNERS_LOCK:
                 tool_names = [

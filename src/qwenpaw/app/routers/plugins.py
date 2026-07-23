@@ -218,14 +218,31 @@ async def _post_load_setup(  # pylint: disable=too-many-branches
 
 
 def _tool_names_from_meta(meta: dict) -> list[str]:
-    """Extract tool names from plugin manifest ``meta`` (legacy + multi)."""
+    """Extract tool names from plugin manifest ``meta`` (legacy + multi).
+
+    Malformed ``meta.tools`` (``null``, non-list, non-dict entries) must
+    never raise — callers run this after the plugin is already loaded.
+    """
     tool_names: list[str] = []
-    old_name = meta.get("tool_name")
-    if old_name and isinstance(old_name, str):
-        tool_names.append(old_name)
-    for tool in meta.get("tools", []):
-        if isinstance(tool, dict) and tool.get("name"):
-            tool_names.append(tool["name"])
+    seen: set[str] = set()
+
+    def _add(name: object) -> None:
+        if not isinstance(name, str):
+            return
+        stripped = name.strip()
+        if not stripped or stripped in seen:
+            return
+        seen.add(stripped)
+        tool_names.append(stripped)
+
+    _add(meta.get("tool_name"))
+    raw_tools = meta.get("tools")
+    if not isinstance(raw_tools, list):
+        raw_tools = []
+    for tool in raw_tools:
+        if not isinstance(tool, dict):
+            continue
+        _add(tool.get("name"))
     return tool_names
 
 

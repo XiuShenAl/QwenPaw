@@ -45,6 +45,29 @@ def test_tool_names_from_meta_supports_legacy_and_multi():
     ) == ["a", "b"]
 
 
+def test_tool_names_from_meta_tolerates_malformed_tools():
+    """``meta.tools`` must never raise — install runs this post-load."""
+    for bad_tools in (None, "not-a-list", {"name": "x"}):
+        names = _tool_names_from_meta({"tools": bad_tools})
+        assert isinstance(names, list)
+        assert not names
+    assert _tool_names_from_meta(
+        {
+            "tool_name": " legacy ",
+            "tools": [
+                {"name": "a"},
+                None,
+                "skip",
+                {"name": 123},
+                {"name": "  a  "},
+                {"name": "b"},
+                {"name": ""},
+                {"name": "   "},
+            ],
+        },
+    ) == ["legacy", "a", "b"]
+
+
 def test_force_reinstall_removed_tools_are_old_minus_new():
     """Only tools dropped by the new manifest should be cleaned up."""
     old_tools = set(
