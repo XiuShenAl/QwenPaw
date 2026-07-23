@@ -1059,9 +1059,17 @@ def test_finalize_lock_released_after_subprocess_crash(
                 assert held is False
             proc.kill()
             proc.wait(timeout=5)
+            # Windows may keep the file handle briefly after kill; poll until
+            # the OS lock is observable as free, then take it.
             started = time.monotonic()
-            with _exclusive_file_lock(lock_path, blocking=True) as held:
-                assert held is True
+            acquired = False
+            while time.monotonic() - started < 5.0:
+                with _exclusive_file_lock(lock_path, blocking=False) as held:
+                    if held:
+                        acquired = True
+                        break
+                time.sleep(0.05)
+            assert acquired is True
             assert time.monotonic() - started < 5.0
         finally:
             if proc.poll() is None:

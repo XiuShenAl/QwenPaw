@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import subprocess
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -28,6 +29,14 @@ _WINDOWS_LOCK_CONFLICT_ERRNOS = frozenset(
         getattr(errno, "EWOULDBLOCK", errno.EAGAIN),
     },
 )
+# ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION on Windows.
+_WINDOWS_LOCK_CONFLICT_WINERRORS = frozenset({32, 33})
+
+# msvcrt byte-locks are process-wide and do not serialize threads inside the
+# same process. Pair each lock path with a threading.Lock so console-hook /
+# watchdog / finalize paths in one interpreter still exclude each other.
+_THREAD_LOCKS_GUARD = threading.Lock()
+_THREAD_LOCKS: dict[str, threading.Lock] = {}
 
 WORKTREE_REL = Path(".qwenpaw") / "worktrees"
 REGISTRY_REL = Path(".qwenpaw") / "fork_registry.json"
@@ -113,6 +122,31 @@ def project_dir_from_worktree(worktree_path: Path) -> Path:
     return worktree_path.expanduser().resolve().parent.parent.parent
 
 
+def _thread_lock_for(lock_path: Path) -> threading.Lock:
+    """Return a process-local mutex for *lock_path*."""
+    try:
+        key = str(lock_path.expanduser().resolve())
+    except OSError:
+        key = str(lock_path)
+    with _THREAD_LOCKS_GUARD:
+        lock = _THREAD_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _THREAD_LOCKS[key] = lock
+        return lock
+
+
+def _windows_lock_conflict(exc: BaseException) -> bool:
+    """Return True when *exc* means another holder owns the lock region."""
+    if isinstance(exc, PermissionError):
+        return True
+    err = getattr(exc, "errno", None)
+    if err in _WINDOWS_LOCK_CONFLICT_ERRNOS:
+        return True
+    winerr = getattr(exc, "winerror", None)
+    return winerr in _WINDOWS_LOCK_CONFLICT_WINERRORS
+
+
 def _lock_file_acquire(lock_file: Any, *, blocking: bool) -> bool:
     """Acquire an exclusive lock on an open file; return success.
 
@@ -124,19 +158,27 @@ def _lock_file_acquire(lock_file: Any, *, blocking: bool) -> bool:
     if os.name == "nt":
         import msvcrt
 
-        lock_file.seek(0)
-        if lock_file.read(1) == "":
-            lock_file.write("0")
-            lock_file.flush()
-        while True:
+        # Ensure a lockable byte exists. Writing into a region another process
+        # already locked raises PermissionError — treat that as contended.
+        try:
             lock_file.seek(0)
+            if lock_file.read(1) == "":
+                lock_file.write("0")
+                lock_file.flush()
+        except OSError as exc:
+            if not _windows_lock_conflict(exc):
+                raise
+            if not blocking:
+                return False
+        while True:
             try:
+                lock_file.seek(0)
                 msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
                 return True
             except OSError as exc:
                 if not blocking:
                     return False
-                if exc.errno in _WINDOWS_LOCK_CONFLICT_ERRNOS:
+                if _windows_lock_conflict(exc):
                     time.sleep(_WINDOWS_LOCK_POLL_S)
                     continue
                 raise
@@ -169,22 +211,55 @@ def _lock_file_release(lock_file: Any) -> None:
         pass
 
 
+def _open_lock_file(lock_path: Path, *, blocking: bool) -> Any | None:
+    """Open *lock_path* for locking; return None when non-blocking and busy."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        try:
+            return lock_path.open("a+", encoding="utf-8")
+        except OSError as exc:
+            if not (os.name == "nt" and _windows_lock_conflict(exc)):
+                raise
+            if not blocking:
+                return None
+            time.sleep(_WINDOWS_LOCK_POLL_S)
+
+
 @contextmanager
 def _exclusive_file_lock(
     lock_path: Path,
     *,
     blocking: bool = True,
 ) -> Iterator[bool]:
-    """Acquire an exclusive file lock; yields whether the lock was acquired."""
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as lock_file:
-        acquired = False
-        try:
-            acquired = _lock_file_acquire(lock_file, blocking=blocking)
-            yield acquired
-        finally:
-            if acquired:
-                _lock_file_release(lock_file)
+    """Acquire an exclusive file lock; yields whether the lock was acquired.
+
+    Combines a process-local ``threading.Lock`` (needed on Windows, where
+    ``msvcrt.locking`` does not exclude sibling threads) with an OS file
+    lock for cross-process exclusion.
+    """
+    thread_lock = _thread_lock_for(lock_path)
+    got_thread = thread_lock.acquire(blocking=blocking)
+    if not got_thread:
+        yield False
+        return
+    lock_file = None
+    acquired = False
+    try:
+        lock_file = _open_lock_file(lock_path, blocking=blocking)
+        if lock_file is None:
+            yield False
+            return
+        acquired = _lock_file_acquire(lock_file, blocking=blocking)
+        yield acquired
+    finally:
+        if acquired and lock_file is not None:
+            _lock_file_release(lock_file)
+        if lock_file is not None:
+            try:
+                lock_file.close()
+            except OSError:
+                pass
+        thread_lock.release()
 
 
 @contextmanager
