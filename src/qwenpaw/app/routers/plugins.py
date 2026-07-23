@@ -136,9 +136,12 @@ async def _post_load_setup(  # pylint: disable=too-many-branches
 ) -> None:
     """Perform post-load integration for a newly loaded plugin.
 
-    Registers newly created providers / control-commands and executes
-    startup hooks.  Schedules a reload for every configured agent so
-    tool changes take effect immediately.
+    Registers newly created providers / control-commands, executes
+    startup hooks, and syncs tool entries into agent configs.
+
+    Does **not** schedule agent reloads — callers must do that after any
+    follow-up config cleanup (e.g. removing obsolete tools on
+    force-reinstall) so reload never races stale tool entries.
 
     Args:
         request: Current FastAPI request (for app.state access)
@@ -213,8 +216,17 @@ async def _post_load_setup(  # pylint: disable=too-many-branches
     # (config file I/O — keep off the event loop).
     await asyncio.to_thread(_sync_plugin_tools_to_agents, loader, plugin_id)
 
-    # Schedule a background reload for every configured agent
-    _schedule_all_agents_reload(request)
+
+def _tool_names_from_meta(meta: dict) -> list[str]:
+    """Extract tool names from plugin manifest ``meta`` (legacy + multi)."""
+    tool_names: list[str] = []
+    old_name = meta.get("tool_name")
+    if old_name and isinstance(old_name, str):
+        tool_names.append(old_name)
+    for tool in meta.get("tools", []):
+        if isinstance(tool, dict) and tool.get("name"):
+            tool_names.append(tool["name"])
+    return tool_names
 
 
 def _sync_plugin_tools_to_agents(loader, plugin_id: str) -> None:
@@ -231,17 +243,7 @@ def _sync_plugin_tools_to_agents(loader, plugin_id: str) -> None:
     if record is None:
         return
 
-    meta: dict = record.manifest.meta or {}
-    tool_names: list[str] = []
-
-    old_name = meta.get("tool_name")
-    if old_name and isinstance(old_name, str):
-        tool_names.append(old_name)
-
-    for tool in meta.get("tools", []):
-        if isinstance(tool, dict) and tool.get("name"):
-            tool_names.append(tool["name"])
-
+    tool_names = _tool_names_from_meta(record.manifest.meta or {})
     if not tool_names:
         return
 
@@ -282,23 +284,11 @@ def _sync_plugin_tools_to_agents(loader, plugin_id: str) -> None:
         logger.warning(f"Tool sync skipped: {exc}")
 
 
-def _remove_plugin_tools_from_agents(plugin_id: str, meta: dict) -> None:
-    """Remove plugin tool entries from all agents.
-
-    Args:
-        plugin_id: Plugin being uninstalled (for logging)
-        meta: Plugin manifest ``meta`` section
-    """
-    tool_names: list[str] = []
-
-    old_name = meta.get("tool_name")
-    if old_name and isinstance(old_name, str):
-        tool_names.append(old_name)
-
-    for tool in meta.get("tools", []):
-        if isinstance(tool, dict) and tool.get("name"):
-            tool_names.append(tool["name"])
-
+def _remove_named_tools_from_agents(
+    plugin_id: str,
+    tool_names: list[str],
+) -> None:
+    """Remove the given tool names from all agents' builtin_tools config."""
     if not tool_names:
         return
 
@@ -330,7 +320,20 @@ def _remove_plugin_tools_from_agents(plugin_id: str, meta: dict) -> None:
         )
 
 
-def _schedule_all_agents_reload(request: Request) -> None:
+def _remove_plugin_tools_from_agents(plugin_id: str, meta: dict) -> None:
+    """Remove plugin tool entries from all agents.
+
+    Args:
+        plugin_id: Plugin being uninstalled (for logging)
+        meta: Plugin manifest ``meta`` section
+    """
+    _remove_named_tools_from_agents(
+        plugin_id,
+        _tool_names_from_meta(meta),
+    )
+
+
+async def _schedule_all_agents_reload(request: Request) -> None:
     """Schedule a reload for every configured agent.
 
     Args:
@@ -339,7 +342,7 @@ def _schedule_all_agents_reload(request: Request) -> None:
     try:
         from ...config.utils import load_config
 
-        config = load_config()
+        config = await asyncio.to_thread(load_config)
         if not config.agents or not config.agents.profiles:
             return
         for agent_id in config.agents.profiles:
@@ -457,11 +460,18 @@ async def _load_plugin_with_optional_force_reinstall(
     The full install transaction — unload (if force), load, and
     :func:`_post_load_setup` — runs under one
     :meth:`PluginLoader.plugin_lifecycle` critical section.
+
+    On force-reinstall, tools present in the old manifest but absent from
+    the new one are removed from agent configs (``old - new`` only).
     """
     from ...config.utils import get_plugins_dir
 
     install_dir = get_plugins_dir()
-    collected: dict = {"provider_ids": [], "command_names": []}
+    collected: dict = {
+        "provider_ids": [],
+        "command_names": [],
+        "old_tools": set(),
+    }
 
     def _before_force_unload(plugin_id: str) -> None:
         logger.info(
@@ -474,6 +484,12 @@ async def _load_plugin_with_optional_force_reinstall(
         )
         collected["provider_ids"] = provider_ids
         collected["command_names"] = command_names
+        # Snapshot under the lifecycle lock (caller holds it).
+        old_record = loader.get_loaded_plugin(plugin_id)
+        if old_record is not None:
+            collected["old_tools"] = set(
+                _tool_names_from_meta(old_record.manifest.meta or {}),
+            )
 
     def _after_force_unload(plugin_id: str) -> None:
         _post_unload_cleanup(
@@ -484,7 +500,12 @@ async def _load_plugin_with_optional_force_reinstall(
         )
 
     async def _after_load(record) -> None:
-        await _post_load_setup(request, record.manifest.id)
+        await _finish_plugin_install_after_load(
+            request,
+            record,
+            force=force,
+            old_tools=collected["old_tools"],
+        )
 
     return await loader.load_plugin_from_path(
         source_path=source_path,
@@ -494,6 +515,35 @@ async def _load_plugin_with_optional_force_reinstall(
         after_force_unload=_after_force_unload if force else None,
         after_load=_after_load,
     )
+
+
+async def _finish_plugin_install_after_load(
+    request: Request,
+    record,
+    *,
+    force: bool,
+    old_tools: set,
+) -> None:
+    """Post-load setup with force-reinstall tool cleanup before reload.
+
+    Guaranteed order:
+    1. sync new tools / providers / hooks (``_post_load_setup``)
+    2. remove obsolete tools (``old_tools - new_tools``) when *force*
+    3. schedule agent reload
+    """
+    await _post_load_setup(request, record.manifest.id)
+    if force:
+        new_tools = set(
+            _tool_names_from_meta(record.manifest.meta or {}),
+        )
+        removed_tools = sorted(old_tools - new_tools)
+        if removed_tools:
+            await asyncio.to_thread(
+                _remove_named_tools_from_agents,
+                record.manifest.id,
+                removed_tools,
+            )
+    await _schedule_all_agents_reload(request)
 
 
 def _extract_plugin_zip_bytes(content: bytes, temp_dir: Path) -> Path:
@@ -622,7 +672,7 @@ async def install_plugin(
                 temp_dir,
             )
         else:
-            source_path = Path(source).resolve()
+            source_path = await asyncio.to_thread(Path(source).resolve)
             if not await asyncio.to_thread(source_path.exists):
                 raise HTTPException(
                     status_code=400,
@@ -757,19 +807,16 @@ async def uninstall_plugin(plugin_id: str, request: Request):
             detail="Plugin loader is not ready yet.",
         )
 
-    record = loader.get_loaded_plugin(plugin_id)
-    if record is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Plugin '{plugin_id}' is not loaded.",
-        )
-
-    meta: dict = record.manifest.meta or {}
-
-    # Full uninstall transaction under one lifecycle lock so post-unload
-    # cleanup cannot race a concurrent install/reinstall of the same id.
+    # Full uninstall transaction under one lifecycle lock so record/meta
+    # capture, unload, and agent-config cleanup cannot race a concurrent
+    # reinstall of the same id (stale meta must not delete the wrong tools).
     try:
         async with loader.plugin_lifecycle(plugin_id):
+            record = loader.get_loaded_plugin(plugin_id)
+            if record is None:
+                raise KeyError(f"Plugin '{plugin_id}' is not loaded.")
+            meta: dict = record.manifest.meta or {}
+
             provider_ids, command_names = _collect_plugin_runtime_ids(
                 loader.registry,
                 plugin_id,
@@ -786,7 +833,7 @@ async def uninstall_plugin(plugin_id: str, request: Request):
                 plugin_id,
                 meta,
             )
-            _schedule_all_agents_reload(request)
+            await _schedule_all_agents_reload(request)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:

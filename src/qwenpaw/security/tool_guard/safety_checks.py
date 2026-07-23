@@ -34,6 +34,11 @@ _PATH_END = r"(?=[\s|;|&)\"'`]|\\[\"']|$)"
 #   auto-deny hard-rejects normal absolute-path cleanups on macOS/Linux.
 #   YAML rules can still flag those for approval.
 # - Critical system trees (``/etc``, ``/usr``, …) stay blocked in full.
+# - macOS firmlink prefix ``/System/Volumes/Data/...`` is *not* matched by
+#   the ``/system`` regex (negative lookahead).  Those spellings are
+#   classified via resolve + :func:`_logical_posix_parts` so workspace /
+#   temp cleanups under the firmlink are not default auto-denied, while
+#   ``/System``, ``/System/Library``, and firmlink home roots stay blocked.
 # - Temp trees stay allowed on *both* the regex and resolve paths:
 #   ``/tmp``, ``/var/tmp``, ``/var/folders``, ``/private/tmp``,
 #   ``/private/var/tmp``, ``/private/var/folders``.  Other ``/var/...`` /
@@ -98,9 +103,17 @@ _RM_CATASTROPHIC_TARGET = (
     + _HOME_STAR_GLOB
     + r"?/?"
     + _PATH_END
-    # Critical system trees (full subtree).
+    # Critical system trees (full subtree).  ``system`` is separate so the
+    # macOS firmlink prefix ``/System/Volumes/Data/...`` can fall through
+    # to resolve + _logical_posix_parts (same policy as /Users, /tmp, …).
     + r"|/(?:root|boot|dev|applications|etc|usr|bin|sbin|lib|"
-    r"opt|system|windows|library|proc|sys)" + r"(?:/|" + _PATH_END + r")"
+    r"opt|windows|library|proc|sys)"
+    + r"(?:/|"
+    + _PATH_END
+    + r")"
+    + r"|/system(?!/volumes/data(?:/|\b))(?:/|"
+    + _PATH_END
+    + r")"
     # Emulated Windows drive wipes (raw match so bash -c "rm -rf /mnt/c"
     # still hits; depth-capped like resolve path).
     + r"|/mnt/[A-Za-z]"

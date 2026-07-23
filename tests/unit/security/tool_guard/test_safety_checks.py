@@ -302,6 +302,56 @@ class TestIsCommandDestructive:  # pylint: disable=too-many-public-methods
         assert is_command_catastrophic("rm -rf /private/etc") is True
         assert is_command_catastrophic("rm -rf /var/lib") is True
 
+    def test_macos_firmlink_data_volume_not_false_system_wipe(self) -> None:
+        """``/System/Volumes/Data/...`` must use logical-path policy.
+
+        Regex must not hard-match the firmlink prefix as a ``/System``
+        wipe; resolve + ``_logical_posix_parts`` then applies the same
+        home / temp rules as the short ``/Users`` / ``/tmp`` forms.
+        """
+        # Workspace / temp under the firmlink stay allowed.
+        assert (
+            is_command_catastrophic(
+                "rm -rf /System/Volumes/Data/Users/alice/proj/build",
+            )
+            is False
+        )
+        assert (
+            is_command_catastrophic(
+                "rm -rf /System/Volumes/Data/home/alice/project/dist",
+            )
+            is False
+        )
+        assert (
+            is_command_catastrophic("rm -rf /System/Volumes/Data/tmp/foo")
+            is False
+        )
+        assert (
+            is_command_catastrophic(
+                "rm -rf /System/Volumes/Data/private/tmp/foo",
+            )
+            is False
+        )
+        # Real /System wipes and firmlink home roots stay catastrophic.
+        assert is_command_catastrophic("rm -rf /System") is True
+        assert is_command_catastrophic("rm -rf /System/Library") is True
+        assert (
+            is_command_catastrophic("rm -rf /System/Volumes/Data/Users")
+            is True
+        )
+        assert (
+            is_command_catastrophic(
+                "rm -rf /System/Volumes/Data/Users/alice",
+            )
+            is True
+        )
+        assert (
+            is_command_catastrophic(
+                "rm -rf /System/Volumes/Data/Users/alice/*",
+            )
+            is True
+        )
+
     def test_mount_runtime_roots_not_full_subtree(self) -> None:
         """WSL/USB/runtime workspace paths must not be default auto-deny."""
         assert is_command_catastrophic("rm -rf /mnt") is True

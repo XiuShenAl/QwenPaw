@@ -80,6 +80,16 @@ def _install_lock_path(plugin_id: str) -> Path:
     return _plugin_runtime_dir() / "install-locks" / f"{safe_id}.lock"
 
 
+def _norm_realpath(path: Any) -> str:
+    """``realpath`` + ``normcase`` for cross-platform path identity.
+
+    Windows filesystems are typically case-insensitive; without
+    ``normcase``, hot-reload cleanup can miss modules / ``sys.path``
+    entries that differ only by drive/directory letter case.
+    """
+    return os.path.normcase(os.path.realpath(str(path)))
+
+
 def resolved_plugin_manifest_path(source_dir: Path) -> Path:
     """Return the resolved ``plugin.json`` path under *source_dir*.
 
@@ -606,20 +616,22 @@ class PluginLoader:
         # 3. sys.modules — by __file__ path (catches bare imports that
         #    bypassed the plugin_<id> namespace, e.g. ``import utils``
         #    after the plugin inserted its dir into sys.path).
-        source_resolved = os.path.realpath(str(source_path)) + os.sep
+        source_resolved = _norm_realpath(source_path)
+        if not source_resolved.endswith(os.sep):
+            source_resolved = source_resolved + os.sep
         stale_by_file = [
             k
             for k, mod in list(sys.modules.items())
             if (mod_file := getattr(mod, "__file__", None)) is not None
-            and os.path.realpath(mod_file).startswith(source_resolved)
+            and _norm_realpath(mod_file).startswith(source_resolved)
         ]
         for k in stale_by_file:
             sys.modules.pop(k, None)
 
         # 4. sys.path — remove the plugin directory if it was added
-        plugin_dir_real = os.path.realpath(str(source_path))
+        plugin_dir_real = _norm_realpath(source_path)
         sys.path[:] = [
-            p for p in sys.path if os.path.realpath(p) != plugin_dir_real
+            p for p in sys.path if _norm_realpath(p) != plugin_dir_real
         ]
 
     async def load_plugin(
@@ -1069,7 +1081,7 @@ class PluginLoader:
             ValueError: If the plugin is already loaded (and not *force*)
             RuntimeError: If dependency installation fails
         """
-        source_path = Path(source_path).resolve()
+        source_path = await asyncio.to_thread(Path(source_path).resolve)
         _manifest_path, manifest = await asyncio.to_thread(
             self._read_source_manifest,
             source_path,
@@ -1118,19 +1130,28 @@ class PluginLoader:
                 "Uninstall it first before reinstalling.",
             )
 
-        # Determine target directory
+        # Determine target directory (resolve off the event loop).
         if install_dir is None:
             if not self.plugin_dirs:
                 raise RuntimeError("No plugin directories configured")
-            install_dir = self.plugin_dirs[0]
-        install_dir = Path(install_dir).resolve()
-        target_dir = (install_dir / plugin_id).resolve()
+            install_base: Path = self.plugin_dirs[0]
+        else:
+            install_base = Path(install_dir)
+
+        def _resolve_install_paths() -> Tuple[Path, Path]:
+            resolved_install = install_base.resolve()
+            resolved_target = (resolved_install / plugin_id).resolve()
+            return resolved_install, resolved_target
+
+        resolved_install_dir, target_dir = await asyncio.to_thread(
+            _resolve_install_paths,
+        )
 
         # Guard against path-traversal in plugin_id (e.g. "../../etc")
-        if not target_dir.is_relative_to(install_dir):
+        if not target_dir.is_relative_to(resolved_install_dir):
             raise ValueError(
                 f"Plugin id '{plugin_id}' resolves outside the plugin "
-                f"directory ({install_dir}). Refusing to install.",
+                f"directory ({resolved_install_dir}). Refusing to install.",
             )
 
         # Copy files when source is not already the target (off the loop).
@@ -1255,25 +1276,26 @@ class PluginLoader:
         # modules as top-level entries in ``sys.modules`` — the prefix
         # cleanup above misses them.  Sweep any module whose ``__file__``
         # lives inside the plugin directory so a reinstall always gets
-        # fresh code.
-        source_resolved = str(record.source_path.resolve()) + os.sep
+        # fresh code.  Use normcase so Windows drive/dir letter case
+        # differences do not leave stale modules behind.
+        source_resolved = _norm_realpath(record.source_path)
+        if not source_resolved.endswith(os.sep):
+            source_resolved = source_resolved + os.sep
         stale_by_file = [
             k
             for k, mod in list(sys.modules.items())
             if (mod_file := getattr(mod, "__file__", None)) is not None
-            and os.path.realpath(mod_file).startswith(source_resolved)
+            and _norm_realpath(mod_file).startswith(source_resolved)
         ]
         for k in stale_by_file:
             sys.modules.pop(k, None)
 
         # Remove the plugin directory from sys.path (plugins add it at
         # import time for sibling imports; leaving it leaks into later
-        # imports and prevents clean hot-reload).  Compare by realpath
-        # so symlinks or non-resolved spellings of the same directory
-        # are also caught.
-        plugin_dir_real = os.path.realpath(record.source_path)
+        # imports and prevents clean hot-reload).
+        plugin_dir_real = _norm_realpath(record.source_path)
         sys.path[:] = [
-            p for p in sys.path if os.path.realpath(p) != plugin_dir_real
+            p for p in sys.path if _norm_realpath(p) != plugin_dir_real
         ]
 
         # Remove tools from agents.tools + runtime registries while
