@@ -19,6 +19,7 @@ from qwenpaw.agents.fork_project import (
     begin_fork_scope,
     bind_fork_task,
     bind_workspace_integration_project,
+    finalize_fork_for_task,
     finalize_fork_worktree,
     finalize_fork_worktree_or_fail,
     forks_merged_into_head,
@@ -27,6 +28,7 @@ from qwenpaw.agents.fork_project import (
     resolve_allowed_fork_project_dir,
     resolve_git_project_dir,
     resolve_integration_project_dir,
+    update_fork_head,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -188,7 +190,12 @@ def test_register_fork_writes_pointer_on_agent_workspace(
     )
     assert resolve_integration_project_dir(workspace) == project.resolve()
     (wt / "feat.txt").write_text("feat\n", encoding="utf-8")
-    assert finalize_fork_worktree(str(wt), branch, message="feat")
+    assert finalize_fork_worktree(
+        str(wt),
+        branch,
+        message="feat",
+        expected_scope=scope,
+    )
 
     forks_integrated = _load_fork_guard().forks_integrated
     # Unmerged fork on coding project must block (not workspace empty).
@@ -244,7 +251,12 @@ def test_failed_fork_blocks_current_scope_not_next(
         workspace_dir=workspace,
         scope_id=scope1,
     )
-    mark_fork_failed(str(wt), branch, reason="cancelled")
+    mark_fork_failed(
+        str(wt),
+        branch,
+        reason="cancelled",
+        expected_scope=scope1,
+    )
 
     forks_integrated = _load_fork_guard().forks_integrated
     # Failed forks must not yield an empty-active pass in the same scope.
@@ -305,7 +317,15 @@ def test_finalize_does_not_resurrect_pruned_fork(
 
     # New scope supersedes + prunes the old pending entry.
     begin_fork_scope(project)
-    assert finalize_fork_worktree(str(wt), branch, message="late") is False
+    assert (
+        finalize_fork_worktree(
+            str(wt),
+            branch,
+            message="late",
+            expected_scope=scope1,
+        )
+        is False
+    )
     # No ghost finalized entry without scope should appear.
     assert forks_merged_into_head(project) is True
 
@@ -373,12 +393,22 @@ def test_mark_fork_failed_waits_for_finalize_lock(
 
     def _run_finalize() -> None:
         results.append(
-            finalize_fork_worktree(str(wt), branch, message="feat"),
+            finalize_fork_worktree(
+                str(wt),
+                branch,
+                message="feat",
+                expected_scope=scope,
+            ),
         )
 
     def _watchdog() -> None:
         assert hold.wait(timeout=5)
-        mark_fork_failed(str(wt), branch, reason="watchdog timeout")
+        mark_fork_failed(
+            str(wt),
+            branch,
+            reason="watchdog timeout",
+            expected_scope=scope,
+        )
         failed_done.set()
 
     t_fin = threading.Thread(target=_run_finalize)
@@ -417,7 +447,9 @@ def test_recover_crashed_finalizing_clean_worktree(tmp_path: Path) -> None:
     data["forks"][branch]["status"] = "finalizing"
     registry.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
-    assert finalize_fork_worktree(str(wt), branch) is True
+    assert (
+        finalize_fork_worktree(str(wt), branch, expected_scope=scope) is True
+    )
     after = json.loads(registry.read_text(encoding="utf-8"))
     assert after["forks"][branch]["status"] == "finalized"
     assert after["forks"][branch]["no_changes"] is True
@@ -443,7 +475,15 @@ def test_recover_crashed_finalizing_dirty_worktree(tmp_path: Path) -> None:
     registry.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     (wt / "feat.txt").write_text("feat\n", encoding="utf-8")
 
-    assert finalize_fork_worktree(str(wt), branch, message="feat") is True
+    assert (
+        finalize_fork_worktree(
+            str(wt),
+            branch,
+            message="feat",
+            expected_scope=scope,
+        )
+        is True
+    )
     after = json.loads(registry.read_text(encoding="utf-8"))
     assert after["forks"][branch]["status"] == "finalized"
     assert after["forks"][branch]["no_changes"] is False
@@ -466,7 +506,15 @@ def test_mark_fork_failed_heals_clean_finalizing_with_commit(
         scope_id=scope,
     )
     (wt / "feat.txt").write_text("feat\n", encoding="utf-8")
-    assert finalize_fork_worktree(str(wt), branch, message="feat") is True
+    assert (
+        finalize_fork_worktree(
+            str(wt),
+            branch,
+            message="feat",
+            expected_scope=scope,
+        )
+        is True
+    )
     registry = project / REGISTRY_REL
     data = json.loads(registry.read_text(encoding="utf-8"))
     # Simulate crash after commit succeeded but before registry write.
@@ -474,7 +522,12 @@ def test_mark_fork_failed_heals_clean_finalizing_with_commit(
     data["forks"][branch]["finalized"] = False
     registry.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
-    mark_fork_failed(str(wt), branch, reason="watchdog timeout")
+    mark_fork_failed(
+        str(wt),
+        branch,
+        reason="watchdog timeout",
+        expected_scope=scope,
+    )
     after = json.loads(registry.read_text(encoding="utf-8"))
     assert after["forks"][branch]["status"] == "finalized"
     assert after["forks"][branch]["finalized"] is True
@@ -503,11 +556,361 @@ def test_mark_fork_failed_rejects_clean_no_commit_finalizing(
     data["forks"][branch]["status"] = "finalizing"
     registry.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
-    mark_fork_failed(str(wt), branch, reason="worker crashed")
+    mark_fork_failed(
+        str(wt),
+        branch,
+        reason="worker crashed",
+        expected_scope=scope,
+    )
     after = json.loads(registry.read_text(encoding="utf-8"))
     assert after["forks"][branch]["status"] == "failed"
     assert after["forks"][branch].get("finalized") is not True
     assert after["forks"][branch].get("fail_reason") == "worker crashed"
+
+
+def test_update_fork_head_requires_matching_scope(tmp_path: Path) -> None:
+    """Stale head updates must not rewrite a newer scope's registry row."""
+    project = tmp_path / "repo"
+    _init_repo(project)
+    scope1 = begin_fork_scope(project)
+    wt = project / ".qwenpaw" / "worktrees" / "w1"
+    branch = "fork/w1"
+    _git(project, "worktree", "add", str(wt), "-b", branch)
+    register_fork(
+        str(wt),
+        branch,
+        workspace_dir=project,
+        scope_id=scope1,
+    )
+    registry = project / REGISTRY_REL
+    before = json.loads(registry.read_text(encoding="utf-8"))
+    old_head = before["forks"][branch]["head"]
+
+    # Without expected_scope, scoped rows are not rewritten.
+    assert update_fork_head(str(wt), branch) == old_head
+    mid = json.loads(registry.read_text(encoding="utf-8"))
+    assert mid["forks"][branch]["head"] == old_head
+
+    # Matching scope may refresh head (still base here — no new commit).
+    assert update_fork_head(str(wt), branch, expected_scope=scope1) == old_head
+
+    # New scope reuses the branch; stale scope1 must not rewrite it.
+    scope2 = begin_fork_scope(project)
+    assert register_fork(
+        str(wt),
+        branch,
+        workspace_dir=project,
+        scope_id=scope2,
+    )
+    (wt / "feat.txt").write_text("feat\n", encoding="utf-8")
+    _git(wt, "add", "feat.txt")
+    _git(wt, "commit", "-m", "feat")
+    new_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(wt),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    assert update_fork_head(str(wt), branch, expected_scope=scope1) == new_head
+    after = json.loads(registry.read_text(encoding="utf-8"))
+    assert after["forks"][branch]["scope_id"] == scope2
+    # Stale update must leave the new scope row untouched.
+    assert after["forks"][branch]["head"] != new_head
+
+    assert update_fork_head(str(wt), branch, expected_scope=scope2) == new_head
+    after2 = json.loads(registry.read_text(encoding="utf-8"))
+    assert after2["forks"][branch]["head"] == new_head
+
+
+def test_bind_fork_task_requires_matching_scope(tmp_path: Path) -> None:
+    """Stale bind must not attach a task_id to a newer scope's fork row."""
+    project = tmp_path / "repo"
+    _init_repo(project)
+    scope1 = begin_fork_scope(project)
+    wt = project / ".qwenpaw" / "worktrees" / "w1"
+    branch = "fork/w1"
+    _git(project, "worktree", "add", str(wt), "-b", branch)
+    assert register_fork(
+        str(wt),
+        branch,
+        workspace_dir=project,
+        scope_id=scope1,
+    )
+    # Scoped row without expected_scope is fail-closed.
+    assert bind_fork_task(str(wt), branch, "task-old") is False
+
+    scope2 = begin_fork_scope(project)
+    assert register_fork(
+        str(wt),
+        branch,
+        workspace_dir=project,
+        scope_id=scope2,
+    )
+    # Stale scope must not bind onto the new row.
+    assert (
+        bind_fork_task(
+            str(wt),
+            branch,
+            "task-old",
+            expected_scope=scope1,
+        )
+        is False
+    )
+    assert (
+        bind_fork_task(
+            str(wt),
+            branch,
+            "task-new",
+            expected_scope=scope2,
+        )
+        is True
+    )
+    registry = project / REGISTRY_REL
+    after = json.loads(registry.read_text(encoding="utf-8"))
+    assert after["forks"][branch]["task_id"] == "task-new"
+    assert after["forks"][branch]["scope_id"] == scope2
+    assert after["by_task"]["task-new"]["scope_id"] == scope2
+    assert "task-old" not in after.get("by_task", {})
+
+
+def test_finalize_fork_for_task_ignores_stale_scope(tmp_path: Path) -> None:
+    """Stale by_task must not finalize a newer scope reusing the branch."""
+    project = tmp_path / "repo"
+    _init_repo(project)
+    scope1 = begin_fork_scope(project)
+    wt = project / ".qwenpaw" / "worktrees" / "w1"
+    branch = "fork/w1"
+    _git(project, "worktree", "add", str(wt), "-b", branch)
+    assert register_fork(
+        str(wt),
+        branch,
+        workspace_dir=project,
+        scope_id=scope1,
+    )
+    assert bind_fork_task(
+        str(wt),
+        branch,
+        "task-old",
+        expected_scope=scope1,
+    )
+
+    scope2 = begin_fork_scope(project)
+    assert register_fork(
+        str(wt),
+        branch,
+        workspace_dir=project,
+        scope_id=scope2,
+    )
+    registry = project / REGISTRY_REL
+    # register_fork clears by_task for the reused branch.
+    cleared = json.loads(registry.read_text(encoding="utf-8"))
+    assert "task-old" not in cleared.get("by_task", {})
+    assert finalize_fork_for_task("task-old", project_dir=project) is False
+
+    # Even a manually resurrected stale binding must not finalize scope2.
+    cleared["by_task"] = {
+        "task-old": {
+            "branch": branch,
+            "worktree": str(wt.resolve()),
+            "project_dir": str(project.resolve()),
+            "scope_id": scope1,
+        },
+    }
+    registry.write_text(
+        json.dumps(cleared, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (wt / "feat.txt").write_text("feat\n", encoding="utf-8")
+    assert finalize_fork_for_task("task-old", project_dir=project) is False
+    after = json.loads(registry.read_text(encoding="utf-8"))
+    assert after["forks"][branch]["scope_id"] == scope2
+    assert after["forks"][branch]["status"] == "pending"
+
+    assert bind_fork_task(
+        str(wt),
+        branch,
+        "task-new",
+        expected_scope=scope2,
+    )
+    assert finalize_fork_for_task("task-new", project_dir=project) is True
+    after2 = json.loads(registry.read_text(encoding="utf-8"))
+    assert after2["forks"][branch]["status"] == "finalized"
+    assert after2["forks"][branch]["scope_id"] == scope2
+
+
+def test_mark_fork_failed_pending_ignores_new_scope(tmp_path: Path) -> None:
+    """Stale pending-fail must not poison a newer scope reusing the branch."""
+    project = tmp_path / "repo"
+    _init_repo(project)
+    scope1 = begin_fork_scope(project)
+    wt = project / ".qwenpaw" / "worktrees" / "w1"
+    branch = "fork/w1"
+    _git(project, "worktree", "add", str(wt), "-b", branch)
+    assert register_fork(
+        str(wt),
+        branch,
+        workspace_dir=project,
+        scope_id=scope1,
+    )
+    # Without expected_scope, scoped pending rows are not failed.
+    mark_fork_failed(str(wt), branch, reason="stale no scope")
+    registry = project / REGISTRY_REL
+    mid = json.loads(registry.read_text(encoding="utf-8"))
+    assert mid["forks"][branch]["status"] == "pending"
+
+    scope2 = begin_fork_scope(project)
+    assert register_fork(
+        str(wt),
+        branch,
+        workspace_dir=project,
+        scope_id=scope2,
+    )
+    mark_fork_failed(
+        str(wt),
+        branch,
+        reason="old worker failed",
+        expected_scope=scope1,
+    )
+    after = json.loads(registry.read_text(encoding="utf-8"))
+    row = after["forks"][branch]
+    assert row["scope_id"] == scope2
+    assert row["status"] == "pending"
+    assert row.get("fail_reason") != "old worker failed"
+
+    # Matching scope still marks failed.
+    mark_fork_failed(
+        str(wt),
+        branch,
+        reason="current failed",
+        expected_scope=scope2,
+    )
+    after2 = json.loads(registry.read_text(encoding="utf-8"))
+    assert after2["forks"][branch]["status"] == "failed"
+    assert after2["forks"][branch]["fail_reason"] == "current failed"
+
+
+def test_finalize_requires_matching_scope(tmp_path: Path) -> None:
+    """Scoped finalize must not claim without scope or across scopes."""
+    project = tmp_path / "repo"
+    _init_repo(project)
+    scope1 = begin_fork_scope(project)
+    wt = project / ".qwenpaw" / "worktrees" / "w1"
+    branch = "fork/w1"
+    _git(project, "worktree", "add", str(wt), "-b", branch)
+    assert register_fork(
+        str(wt),
+        branch,
+        workspace_dir=project,
+        scope_id=scope1,
+    )
+    registry = project / REGISTRY_REL
+
+    # Omit expected_scope → fail closed; row stays pending.
+    assert finalize_fork_worktree(str(wt), branch, message="x") is False
+    assert (
+        finalize_fork_worktree_or_fail(str(wt), branch, message="x") is False
+    )
+    mid = json.loads(registry.read_text(encoding="utf-8"))
+    assert mid["forks"][branch]["status"] == "pending"
+    assert mid["forks"][branch].get("fail_reason") is None
+
+    scope2 = begin_fork_scope(project)
+    assert register_fork(
+        str(wt),
+        branch,
+        workspace_dir=project,
+        scope_id=scope2,
+    )
+    (wt / "feat.txt").write_text("feat\n", encoding="utf-8")
+    # Stale scope1 must not finalize the newer row.
+    assert (
+        finalize_fork_worktree_or_fail(
+            str(wt),
+            branch,
+            message="stale",
+            expected_scope=scope1,
+        )
+        is False
+    )
+    after = json.loads(registry.read_text(encoding="utf-8"))
+    assert after["forks"][branch]["scope_id"] == scope2
+    assert after["forks"][branch]["status"] == "pending"
+
+    assert (
+        finalize_fork_worktree_or_fail(
+            str(wt),
+            branch,
+            message="current",
+            expected_scope=scope2,
+        )
+        is True
+    )
+    after2 = json.loads(registry.read_text(encoding="utf-8"))
+    assert after2["forks"][branch]["status"] == "finalized"
+    assert after2["forks"][branch]["scope_id"] == scope2
+
+
+def test_mark_fork_failed_dirty_recovery_ignores_new_scope(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Stale dirty-fail must not poison a newer scope reusing the branch."""
+    # pylint: disable=protected-access
+    from qwenpaw.agents import fork_project as fp
+
+    project = tmp_path / "repo"
+    _init_repo(project)
+    scope1 = begin_fork_scope(project)
+    wt = project / ".qwenpaw" / "worktrees" / "w1"
+    branch = "fork/w1"
+    _git(project, "worktree", "add", str(wt), "-b", branch)
+    register_fork(
+        str(wt),
+        branch,
+        workspace_dir=project,
+        scope_id=scope1,
+    )
+    registry = project / REGISTRY_REL
+    data = json.loads(registry.read_text(encoding="utf-8"))
+    data["forks"][branch]["status"] = "finalizing"
+    registry.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    (wt / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+
+    real_apply = fp._apply_crash_recovery
+    new_scope = {"id": ""}
+
+    def _apply_then_register_new_scope(*args, **kwargs):
+        result = real_apply(*args, **kwargs)
+        assert result is None
+        # Interleave a new workflow that reuses the same branch name.
+        new_scope["id"] = begin_fork_scope(project)
+        assert register_fork(
+            str(wt),
+            branch,
+            workspace_dir=project,
+            scope_id=new_scope["id"],
+        )
+        return result
+
+    monkeypatch.setattr(
+        fp,
+        "_apply_crash_recovery",
+        _apply_then_register_new_scope,
+    )
+    mark_fork_failed(
+        str(wt),
+        branch,
+        reason="old worker failed",
+        expected_scope=scope1,
+    )
+
+    after = json.loads(registry.read_text(encoding="utf-8"))
+    row = after["forks"][branch]
+    assert row["scope_id"] == new_scope["id"]
+    assert row["status"] != "failed"
+    assert row.get("fail_reason") != "old worker failed"
 
 
 def test_forks_merged_rechecks_registry_after_git(
@@ -530,7 +933,9 @@ def test_forks_merged_rechecks_registry_after_git(
         workspace_dir=project,
         scope_id=scope,
     )
-    assert finalize_fork_worktree(str(wt1), branch1) is True
+    assert (
+        finalize_fork_worktree(str(wt1), branch1, expected_scope=scope) is True
+    )
     _git(project, "merge", "--no-ff", branch1, "-m", "integrate w1")
 
     wt2 = project / ".qwenpaw" / "worktrees" / "w2"
@@ -602,7 +1007,9 @@ def test_recovery_git_runs_outside_registry_lock(
         "_inspect_worktree_recovery",
         _inspect_outside_registry,
     )
-    assert finalize_fork_worktree(str(wt), branch) is True
+    assert (
+        finalize_fork_worktree(str(wt), branch, expected_scope=scope) is True
+    )
 
 
 def test_finalize_lock_released_after_subprocess_crash(
@@ -710,10 +1117,30 @@ def test_finalize_idempotent_and_mark_failed_skips_finalized(
         scope_id=scope,
     )
     (wt / "feat.txt").write_text("feat\n", encoding="utf-8")
-    assert finalize_fork_worktree(str(wt), branch, message="feat") is True
+    assert (
+        finalize_fork_worktree(
+            str(wt),
+            branch,
+            message="feat",
+            expected_scope=scope,
+        )
+        is True
+    )
     # Second finalize path (console hook / watcher / check_agent_task).
-    assert finalize_fork_worktree_or_fail(str(wt), branch) is True
-    mark_fork_failed(str(wt), branch, reason="losing race")
+    assert (
+        finalize_fork_worktree_or_fail(
+            str(wt),
+            branch,
+            expected_scope=scope,
+        )
+        is True
+    )
+    mark_fork_failed(
+        str(wt),
+        branch,
+        reason="losing race",
+        expected_scope=scope,
+    )
     assert forks_merged_into_head(project, scope_id=scope) is False
     _git(project, "merge", "--no-ff", branch, "-m", "integrate")
     assert forks_merged_into_head(project, scope_id=scope) is True
@@ -734,7 +1161,12 @@ def test_fork_registry_with_space_in_project_path(tmp_path: Path) -> None:
         scope_id=scope,
     )
     (wt / "feat.txt").write_text("feat\n", encoding="utf-8")
-    assert finalize_fork_worktree(str(wt), branch, message="feat")
+    assert finalize_fork_worktree(
+        str(wt),
+        branch,
+        message="feat",
+        expected_scope=scope,
+    )
     _git(project, "merge", "--no-ff", branch, "-m", "integrate")
     assert forks_merged_into_head(project, scope_id=scope) is True
 
@@ -762,6 +1194,7 @@ def test_concurrent_finalize_is_serialized(tmp_path: Path) -> None:
                 str(wt),
                 branch,
                 message="feat",
+                expected_scope=scope,
             ),
         )
 
@@ -798,7 +1231,15 @@ def test_gate_uses_integration_project_not_workspace(
     assert resolve_integration_project_dir(workspace) == project.resolve()
 
     (wt / "feat.txt").write_text("feat\n", encoding="utf-8")
-    assert finalize_fork_worktree(str(wt), branch, message="feat") is True
+    assert (
+        finalize_fork_worktree(
+            str(wt),
+            branch,
+            message="feat",
+            expected_scope=scope,
+        )
+        is True
+    )
 
     forks_integrated = _load_fork_guard().forks_integrated
     assert (
@@ -839,7 +1280,9 @@ def test_unfinalized_tip_equals_base_does_not_pass(tmp_path: Path) -> None:
     assert forks_merged_into_head(project, scope_id=scope) is False
 
     # Explicit empty finalize (no_changes) is allowed.
-    assert finalize_fork_worktree(str(wt), branch) is True
+    assert (
+        finalize_fork_worktree(str(wt), branch, expected_scope=scope) is True
+    )
     assert forks_merged_into_head(project, scope_id=scope) is True
 
 
@@ -859,7 +1302,12 @@ def test_commit_and_merge_verification(tmp_path: Path) -> None:
         scope_id=scope,
     )
     (wt / "feat.txt").write_text("feat\n", encoding="utf-8")
-    assert finalize_fork_worktree(str(wt), branch, message="worker feat")
+    assert finalize_fork_worktree(
+        str(wt),
+        branch,
+        message="worker feat",
+        expected_scope=scope,
+    )
 
     forks_integrated = _load_fork_guard().forks_integrated
     assert (

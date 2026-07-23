@@ -689,20 +689,49 @@ def register_fork(
             "no_changes": False,
             "created_at": time.time(),
         }
+        # Drop stale by_task bindings for this branch so an old task_id cannot
+        # finalize/fail a newer scope that reused the same branch name.
+        by_task = data.get("by_task") or {}
+        if isinstance(by_task, dict):
+            data["by_task"] = {
+                tid: info
+                for tid, info in by_task.items()
+                if not (
+                    isinstance(info, dict)
+                    and str(info.get("branch") or "") == branch
+                )
+            }
         _write_registry_unlocked(project_dir, data)
     return True
+
+
+def _worktree_matches_meta(meta: dict[str, Any], wt: Path) -> bool:
+    """Return True when *meta* has no worktree or it resolves to *wt*."""
+    registered_wt = meta.get("worktree")
+    if not isinstance(registered_wt, str) or not registered_wt:
+        return True
+    try:
+        return Path(registered_wt).expanduser().resolve() == wt
+    except OSError:
+        return False
 
 
 def bind_fork_task(
     worktree_path: str,
     branch: str,
     task_id: str,
+    *,
+    expected_scope: str | None = None,
 ) -> bool:
     """Associate a background ``task_id`` with an already-registered fork.
 
     Refuses to create ghost registry entries when ``register_fork`` did
-    not run successfully. Returns ``True`` when the binding was written.
+    not run successfully. Scoped rows require a matching *expected_scope*
+    and the registered worktree must match *worktree_path* so a stale
+    spawn cannot rebind a newer workflow's branch. Returns ``True`` when
+    the binding was written.
     """
+    # pylint: disable=too-many-return-statements
     if not task_id or not branch:
         return False
     wt = Path(worktree_path).expanduser().resolve()
@@ -721,6 +750,18 @@ def bind_fork_task(
                 wt,
             )
             return False
+        status = str(meta.get("status") or _STATUS_PENDING)
+        if status not in (_STATUS_PENDING, _STATUS_FINALIZING):
+            return False
+        if not _worktree_matches_meta(meta, wt):
+            return False
+        row_scope = str(meta.get("scope_id") or "")
+        if expected_scope is not None:
+            if row_scope != expected_scope:
+                return False
+        elif row_scope:
+            # Fail closed: scoped forks must be bound with an explicit scope.
+            return False
         meta["task_id"] = task_id
         meta["worktree"] = str(wt)
         forks[branch] = meta
@@ -730,6 +771,7 @@ def bind_fork_task(
                 "branch": branch,
                 "worktree": str(wt),
                 "project_dir": str(project_dir),
+                "scope_id": row_scope,
             }
         _write_registry_unlocked(project_dir, data)
     return True
@@ -740,8 +782,14 @@ def _mark_fork_failed_unlocked(
     branch: str,
     *,
     reason: str = "",
+    expected_scope: str | None = None,
 ) -> None:
-    """Mark failed under an already-held finalize + registry lock."""
+    """Mark failed under an already-held finalize + registry lock.
+
+    When *expected_scope* is set, require the row to still be ``pending`` or
+    ``finalizing`` for that exact scope so a newer workflow that reused the
+    branch cannot be poisoned by a stale worker.
+    """
     data = _read_registry_unlocked(project_dir)
     forks = data.setdefault("forks", {})
     meta = forks.get(branch)
@@ -749,7 +797,12 @@ def _mark_fork_failed_unlocked(
         # Do not resurrect pruned entries as failed ghosts.
         return
     status = str(meta.get("status") or _STATUS_PENDING)
-    if status in (
+    if expected_scope is not None:
+        if status not in (_STATUS_PENDING, _STATUS_FINALIZING):
+            return
+        if str(meta.get("scope_id") or "") != expected_scope:
+            return
+    elif status in (
         _STATUS_SUPERSEDED,
         _STATUS_MERGED,
         _STATUS_FINALIZED,
@@ -768,6 +821,7 @@ def mark_fork_failed(
     branch: str,
     *,
     reason: str = "",
+    expected_scope: str | None = None,
 ) -> None:
     """Mark a fork as failed (kept until the next ``begin_fork_scope``).
 
@@ -775,9 +829,12 @@ def mark_fork_failed(
     so a watchdog waits for an in-flight finalize and cannot overwrite a
     successful ``finalized`` result. Also refuses ``merged`` / ``superseded``.
 
-    A leftover ``finalizing`` row is crash-recovered first: only a clean
-    worktree whose ``HEAD != base`` (commit evidence) becomes ``finalized``.
-    Clean ``HEAD == base`` / dirty / unreadable stay on the fail path.
+    Scoped registry rows require a matching *expected_scope* (pending and
+    finalizing) so a stale worker cannot poison a newer scope that reused
+    the branch. A leftover ``finalizing`` row is crash-recovered first:
+    only a clean worktree whose ``HEAD != base`` (commit evidence) becomes
+    ``finalized``. Clean ``HEAD == base`` / dirty / unreadable stay on the
+    fail path.
     """
     # pylint: disable=too-many-return-statements
     if not worktree_path or not branch:
@@ -790,7 +847,7 @@ def mark_fork_failed(
     with _fork_finalize_lock(project_dir, branch, blocking=True) as acquired:
         if not acquired:
             return
-        expected_scope = ""
+        recovery_scope = ""
         with _registry_lock(project_dir):
             status, meta = _fork_status_unlocked(project_dir, branch)
             if status in (
@@ -799,13 +856,26 @@ def mark_fork_failed(
                 _STATUS_FINALIZED,
             ):
                 return
-            if status == _STATUS_FINALIZING and meta is not None:
-                expected_scope = str(meta.get("scope_id") or "")
+            if meta is None:
+                return
+            if not _worktree_matches_meta(meta, wt):
+                return
+            row_scope = str(meta.get("scope_id") or "")
+            if expected_scope is not None and row_scope != expected_scope:
+                return
+            # Scoped rows always need explicit caller identity (pending and
+            # finalizing). Adopting the live row_scope would let a stale
+            # worker operate on a newer scope that reused the branch.
+            if row_scope and expected_scope is None:
+                return
+            if status == _STATUS_FINALIZING:
+                recovery_scope = expected_scope or ""
             else:
                 _mark_fork_failed_unlocked(
                     project_dir,
                     branch,
                     reason=reason,
+                    expected_scope=expected_scope,
                 )
                 return
 
@@ -815,7 +885,7 @@ def mark_fork_failed(
             project_dir,
             branch,
             wt,
-            expected_scope=expected_scope,
+            expected_scope=recovery_scope,
             outcome=outcome,
             head=head,
             # Failure path: require commit evidence (HEAD != base).
@@ -829,11 +899,14 @@ def mark_fork_failed(
             # Already failed / no-commit-evidence / row no longer finalizing.
             return
         # Dirty leftover — caller asked to fail; record failed now.
+        # Re-check scope under the registry lock so a newer workflow that
+        # reused this branch is not marked failed by a stale worker.
         with _registry_lock(project_dir):
             _mark_fork_failed_unlocked(
                 project_dir,
                 branch,
                 reason=reason or "dirty worktree after crashed finalize",
+                expected_scope=recovery_scope,
             )
 
 
@@ -857,12 +930,29 @@ def mark_fork_failed_for_task(
             return
         branch = str(info.get("branch") or "")
         wt = str(info.get("worktree") or "")
+        scope_id = str(info.get("scope_id") or "")
     if branch and wt:
-        mark_fork_failed(wt, branch, reason=reason)
+        mark_fork_failed(
+            wt,
+            branch,
+            reason=reason,
+            expected_scope=scope_id or None,
+        )
 
 
-def update_fork_head(worktree_path: str, branch: str) -> str | None:
-    """Refresh registry head SHA for *branch*; return the new HEAD."""
+def update_fork_head(
+    worktree_path: str,
+    branch: str,
+    *,
+    expected_scope: str | None = None,
+) -> str | None:
+    """Refresh registry head SHA for *branch*; return the new HEAD.
+
+    Scoped registry rows require a matching *expected_scope* so a stale
+    worker cannot rewrite ``head`` after a newer workflow reuses the branch.
+    Also refuses to write when the registered worktree path differs.
+    """
+    # pylint: disable=too-many-return-statements
     wt = Path(worktree_path).expanduser().resolve()
     if not wt.is_dir() or not branch:
         return None
@@ -878,6 +968,15 @@ def update_fork_head(worktree_path: str, branch: str) -> str | None:
             return head
         status = str(meta.get("status") or _STATUS_PENDING)
         if status not in _ACTIVE_STATUSES:
+            return head
+        row_scope = str(meta.get("scope_id") or "")
+        if expected_scope is not None:
+            if row_scope != expected_scope:
+                return head
+        elif row_scope:
+            # Fail closed: scoped forks must be updated with an explicit scope.
+            return head
+        if not _worktree_matches_meta(meta, wt):
             return head
         meta["head"] = head
         meta["worktree"] = str(wt)
@@ -999,30 +1098,45 @@ def _begin_finalize_unlocked(
     project_dir: Path,
     branch: str,
     wt: Path,
+    *,
+    expected_scope: str | None = None,
 ) -> tuple[str, str]:
     """Prepare finalize under registry lock.
 
-    Returns ``(action, expected_scope)`` where *action* is one of:
+    Returns ``(action, row_scope)`` where *action* is one of:
     ``done`` (already finalized), ``skip``, ``recover``, ``run``.
+
+    Scoped rows require a matching *expected_scope* (fail closed when omitted)
+    so a stale worker cannot claim a newer scope that reused the branch.
     """
+    # pylint: disable=too-many-return-statements
     status, meta = _fork_status_unlocked(project_dir, branch)
-    if status in (_STATUS_FINALIZED, _STATUS_MERGED):
-        return "done", ""
-    if meta is None or status not in (_STATUS_PENDING, _STATUS_FINALIZING):
+    if meta is None:
         return "skip", ""
-    expected_scope = str(meta.get("scope_id") or "")
+    row_scope = str(meta.get("scope_id") or "")
+    if expected_scope is not None:
+        if row_scope != expected_scope:
+            return "skip", ""
+    elif row_scope:
+        return "skip", ""
+    if not _worktree_matches_meta(meta, wt):
+        return "skip", ""
+    if status in (_STATUS_FINALIZED, _STATUS_MERGED):
+        return "done", row_scope
+    if status not in (_STATUS_PENDING, _STATUS_FINALIZING):
+        return "skip", ""
     if status == _STATUS_FINALIZING:
-        return "recover", expected_scope
+        return "recover", row_scope
     data = _read_registry_unlocked(project_dir)
     forks = data.setdefault("forks", {})
     row = forks.get(branch)
     if not isinstance(row, dict):
-        return "skip", expected_scope
+        return "skip", row_scope
     row["status"] = _STATUS_FINALIZING
     row["worktree"] = str(wt)
     forks[branch] = row
     _write_registry_unlocked(project_dir, data)
-    return "run", expected_scope
+    return "run", row_scope
 
 
 def _apply_crash_recovery(
@@ -1050,6 +1164,11 @@ def _apply_crash_recovery(
     with _registry_lock(project_dir):
         status, meta = _fork_status_unlocked(project_dir, branch)
         if status in (_STATUS_FINALIZED, _STATUS_MERGED):
+            if meta is None:
+                return False
+            row_scope = str(meta.get("scope_id") or "")
+            if expected_scope and row_scope != expected_scope:
+                return False
             return True
         if meta is None or status != _STATUS_FINALIZING:
             return False
@@ -1060,6 +1179,7 @@ def _apply_crash_recovery(
                 project_dir,
                 branch,
                 reason=fail_reason or "git unreadable after crashed finalize",
+                expected_scope=expected_scope,
             )
             return False
         if outcome == "clean":
@@ -1070,6 +1190,7 @@ def _apply_crash_recovery(
                     branch,
                     reason=fail_reason
                     or "no commit evidence after crashed finalize",
+                    expected_scope=expected_scope,
                 )
                 return False
             return _write_finalized_unlocked(
@@ -1091,8 +1212,14 @@ def _finish_finalize_unlocked(
     head: str,
 ) -> bool:
     """Persist finalize result under registry lock."""
+    # pylint: disable=too-many-return-statements
     status, meta = _fork_status_unlocked(project_dir, branch)
     if status in (_STATUS_FINALIZED, _STATUS_MERGED):
+        if meta is None:
+            return False
+        row_scope = str(meta.get("scope_id") or "")
+        if expected_scope and row_scope != expected_scope:
+            return False
         return True
     if meta is None or status not in (
         _STATUS_PENDING,
@@ -1123,11 +1250,16 @@ def finalize_fork_worktree(
     branch: str,
     *,
     message: str | None = None,
+    expected_scope: str | None = None,
 ) -> bool:
     """Commit dirty changes (if any) and mark the fork finalized.
 
     Refuses to recreate registry entries that were pruned or superseded —
     late background completion after a new scope must not resurrect ghosts.
+
+    Scoped registry rows require a matching *expected_scope* (fail closed
+    when omitted) so a stale task cannot claim a newer scope that reused
+    the branch.
 
     Concurrent callers serialize on a per-branch OS lock held across
     registry updates and ``git status``/``add``/``commit``. A second caller
@@ -1149,10 +1281,11 @@ def finalize_fork_worktree(
             return False
 
         with _registry_lock(project_dir):
-            action, expected_scope = _begin_finalize_unlocked(
+            action, row_scope = _begin_finalize_unlocked(
                 project_dir,
                 branch,
                 wt,
+                expected_scope=expected_scope,
             )
         if action == "done":
             return True
@@ -1169,7 +1302,7 @@ def finalize_fork_worktree(
                 project_dir,
                 branch,
                 wt,
-                expected_scope=expected_scope,
+                expected_scope=row_scope,
                 outcome=outcome,
                 head=recovered_head,
             )
@@ -1186,7 +1319,7 @@ def finalize_fork_worktree(
                 project_dir,
                 branch,
                 wt,
-                expected_scope=expected_scope,
+                expected_scope=row_scope,
                 ok=ok,
                 head=head,
             )
@@ -1197,17 +1330,23 @@ def finalize_fork_worktree_or_fail(
     branch: str,
     *,
     message: str | None = None,
+    expected_scope: str | None = None,
 ) -> bool:
     """Finalize a fork; on failure mark it ``failed`` so gates stay blocked.
 
     Idempotent when another path already finalized successfully. Uses the
     same per-branch lock as finalize, so a peer cannot be marked failed
     until its in-flight finalize finishes.
+
+    *expected_scope* is required for scoped registry rows; it is never
+    inferred from the live row (that would let a stale caller mark/fail a
+    newer scope that reused the branch).
     """
     ok = finalize_fork_worktree(
         worktree_path,
         branch,
         message=message,
+        expected_scope=expected_scope,
     )
     if ok:
         return True
@@ -1215,16 +1354,23 @@ def finalize_fork_worktree_or_fail(
         worktree_path,
         branch,
         reason="finalize_fork_worktree failed",
+        expected_scope=expected_scope,
     )
-    # Peer may have finalized while we failed; treat that as success.
+    # Peer may have finalized while we failed; treat that as success only
+    # when the finalized row still belongs to our scope.
     try:
         wt = Path(worktree_path).expanduser().resolve()
         project_dir = project_dir_from_worktree(wt)
     except OSError:
         return False
     with _registry_lock(project_dir):
-        status, _meta = _fork_status_unlocked(project_dir, branch)
-    return status in (_STATUS_FINALIZED, _STATUS_MERGED)
+        status, meta = _fork_status_unlocked(project_dir, branch)
+    if status not in (_STATUS_FINALIZED, _STATUS_MERGED):
+        return False
+    if expected_scope is not None and isinstance(meta, dict):
+        if str(meta.get("scope_id") or "") != expected_scope:
+            return False
+    return True
 
 
 def finalize_fork_for_task(
@@ -1233,7 +1379,12 @@ def finalize_fork_for_task(
     project_dir: str | Path | None = None,
     workspace_dir: str | Path | None = None,
 ) -> bool:
-    """Finalize the fork bound to a background *task_id*, if any."""
+    """Finalize the fork bound to a background *task_id*, if any.
+
+    Requires the ``by_task`` binding's ``scope_id`` to still match the
+    registry row so a stale task cannot finalize a newer scope that reused
+    the branch.
+    """
     if not task_id:
         return False
     roots: list[Path] = []
@@ -1251,12 +1402,31 @@ def finalize_fork_for_task(
             data = _read_registry_unlocked(root)
             by_task = data.get("by_task") or {}
             info = by_task.get(task_id) if isinstance(by_task, dict) else None
-        if not isinstance(info, dict):
-            continue
-        branch = str(info.get("branch") or "")
-        wt = str(info.get("worktree") or "")
-        if branch and wt:
-            return finalize_fork_worktree_or_fail(wt, branch)
+            if not isinstance(info, dict):
+                continue
+            branch = str(info.get("branch") or "")
+            wt = str(info.get("worktree") or "")
+            task_scope = str(info.get("scope_id") or "")
+            if not branch or not wt:
+                continue
+            _status, meta = _fork_status_unlocked(root, branch)
+            if not isinstance(meta, dict):
+                continue
+            row_scope = str(meta.get("scope_id") or "")
+            # Fail closed: scoped rows need a scoped by_task binding.
+            if row_scope and task_scope != row_scope:
+                continue
+            try:
+                wt_path = Path(wt).expanduser().resolve()
+            except OSError:
+                continue
+            if not _worktree_matches_meta(meta, wt_path):
+                continue
+        return finalize_fork_worktree_or_fail(
+            wt,
+            branch,
+            expected_scope=task_scope or None,
+        )
     return False
 
 

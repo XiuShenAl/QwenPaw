@@ -1192,6 +1192,7 @@ async def _spawn_forked_subagent(
         FORK_WORKER_COMMIT_PROTOCOL,
         bind_fork_task,
         finalize_fork_worktree_or_fail,
+        get_active_fork_scope,
         register_fork,
     )
     from ...config.context import get_current_workspace_dir
@@ -1202,23 +1203,20 @@ async def _spawn_forked_subagent(
         worker_task = f"{FORK_WORKER_COMMIT_PROTOCOL}\n\n{task}"
 
     fork_extra: dict[str, Any] | None = None
+    fork_scope_id = ""
     if worktree_path:
         # ``fork_project_dir`` is the spawn-level key; also set the ACP
         # coding-project meta key so AgentBuilder / ContextVars rebind
         # tools/cwd to the worktree.
         from ..acp.meta import ACP_CODING_PROJECT_META_KEY
 
-        fork_extra = {
-            "fork_project_dir": worktree_path,
-            ACP_CODING_PROJECT_META_KEY: worktree_path,
-            "fork_worktree_branch": worktree_branch,
-        }
+        workspace_dir = get_current_workspace_dir()
         registered = await asyncio.to_thread(
             register_fork,
             worktree_path,
             worktree_branch,
             session_id=fork_session_id,
-            workspace_dir=get_current_workspace_dir(),
+            workspace_dir=workspace_dir,
         )
         if not registered:
             return _tool_text_response(
@@ -1226,6 +1224,13 @@ async def _spawn_forked_subagent(
                 f"(branch={worktree_branch or '?'}). Aborting spawn so "
                 "the merge gate cannot be bypassed.",
             )
+        fork_scope_id = get_active_fork_scope(workspace_dir)
+        fork_extra = {
+            "fork_project_dir": worktree_path,
+            ACP_CODING_PROJECT_META_KEY: worktree_path,
+            "fork_worktree_branch": worktree_branch,
+            "fork_scope_id": fork_scope_id,
+        }
     request_context = _build_subagent_request_context(
         current_agent_id,
         allowed_tools=allowed_tools,
@@ -1263,6 +1268,7 @@ async def _spawn_forked_subagent(
                 worktree_path,
                 worktree_branch,
                 str(task_id),
+                expected_scope=fork_scope_id or None,
             )
             # Poller fallback if the console completion hook is unavailable.
             # finalize_fork_worktree is claim/idempotent so overlapping
@@ -1273,6 +1279,7 @@ async def _spawn_forked_subagent(
                     worktree_path,
                     worktree_branch,
                     timeout=timeout,
+                    expected_scope=fork_scope_id or None,
                 ),
             )
         submission_text = format_background_submission_text(
@@ -1303,6 +1310,7 @@ async def _spawn_forked_subagent(
             worktree_path,
             worktree_branch,
             message=f"fork worker {worktree_branch or fork_session_id}",
+            expected_scope=fork_scope_id or None,
         )
     elif worktree_path:
         from ..fork_project import mark_fork_failed
@@ -1312,6 +1320,7 @@ async def _spawn_forked_subagent(
             worktree_path,
             worktree_branch,
             reason="No response from forked subagent",
+            expected_scope=fork_scope_id or None,
         )
 
     # Do not auto-remove the worktree on the sync path: the controller
@@ -1349,6 +1358,7 @@ async def _watch_background_fork_finalize(
     worktree_branch: str,
     *,
     timeout: int = 600,
+    expected_scope: str | None = None,
 ) -> None:
     """Poll until the background task finishes or *timeout* elapses."""
     from ..fork_project import (
@@ -1381,6 +1391,7 @@ async def _watch_background_fork_finalize(
                 worktree_path,
                 worktree_branch,
                 message=f"fork worker {worktree_branch}",
+                expected_scope=expected_scope,
             )
         else:
             err = result.get("error") or {}
@@ -1394,6 +1405,7 @@ async def _watch_background_fork_finalize(
                 worktree_path,
                 worktree_branch,
                 reason=str(reason),
+                expected_scope=expected_scope,
             )
         return
 
@@ -1402,4 +1414,5 @@ async def _watch_background_fork_finalize(
         worktree_path,
         worktree_branch,
         reason="finalize watchdog timeout",
+        expected_scope=expected_scope,
     )

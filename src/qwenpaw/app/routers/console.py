@@ -566,6 +566,7 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
     task_timeout: Optional[float] = None
     fork_project_dir = ""
     fork_worktree_branch = ""
+    fork_scope_id = ""
     if isinstance(request_data, dict):
         task_timeout = request_data.get("timeout")
         rc = request_data.get("request_context")
@@ -574,6 +575,7 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
             fork_worktree_branch = str(
                 rc.get("fork_worktree_branch") or "",
             )
+            fork_scope_id = str(rc.get("fork_scope_id") or "")
     elif hasattr(request_data, "timeout"):
         task_timeout = getattr(request_data, "timeout", None)
         rc = getattr(request_data, "request_context", None)
@@ -582,6 +584,7 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
             fork_worktree_branch = str(
                 rc.get("fork_worktree_branch") or "",
             )
+            fork_scope_id = str(rc.get("fork_scope_id") or "")
 
     bg = _BackgroundTask(
         status="running",
@@ -613,6 +616,7 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
                         fork_project_dir,
                         fork_worktree_branch,
                         reason="Task cancelled",
+                        expected_scope=fork_scope_id or None,
                     )
                 except Exception:
                     logger.warning(
@@ -637,6 +641,7 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
                         fork_project_dir,
                         fork_worktree_branch,
                         reason=str(exc),
+                        expected_scope=fork_scope_id or None,
                     )
                 except Exception:
                     logger.warning(
@@ -672,6 +677,7 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
                     fork_project_dir,
                     fork_worktree_branch,
                     message=f"fork worker {fork_worktree_branch}",
+                    expected_scope=fork_scope_id or None,
                 )
             except Exception:
                 logger.warning(
