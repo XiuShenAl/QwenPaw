@@ -10,7 +10,7 @@ import os
 import posixpath
 import re
 import shlex
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath
 from typing import Literal
 
 DestructiveKind = Literal["catastrophic", "system_power"]
@@ -347,15 +347,21 @@ _VOLUMES_TOP_LEVEL = "volumes"
 _MOUNT_RUNTIME_TOP_LEVEL = frozenset({"mnt", "media", "run", "srv"})
 
 
-def _logical_posix_parts(resolved: Path) -> tuple[str, ...]:
-    """Strip macOS ``/System/Volumes/Data`` firmlink from POSIX parts.
+def _coerce_posix_root_parts(parts: tuple[str, ...]) -> tuple[str, ...]:
+    """Normalize host Path roots so POSIX absolute paths compare as ``/``.
 
-    On macOS, ``Path('/home/...').resolve()`` often lands under
-    ``/System/Volumes/Data/home/...``.  Classification must see the
-    logical ``/home/...`` path, otherwise every ``/home`` workspace wipe
-    is mis-labeled as a ``/System`` wipe.
+    On Windows, ``Path('/etc')`` / ``PureWindowsPath('/etc')`` yield
+    ``('\\\\', 'etc')`` rather than ``('/', 'etc')``.  Without coercion,
+    resolve fallbacks miss catastrophic POSIX targets in CI on Windows.
     """
-    parts = resolved.parts
+    if parts and parts[0] in {"/", "\\"}:
+        return ("/", *parts[1:])
+    return parts
+
+
+def _logical_posix_parts_from(parts: tuple[str, ...]) -> tuple[str, ...]:
+    """Strip macOS ``/System/Volumes/Data`` firmlink from POSIX parts."""
+    parts = _coerce_posix_root_parts(parts)
     if (
         len(parts) >= 5
         and parts[0] == "/"
@@ -365,6 +371,17 @@ def _logical_posix_parts(resolved: Path) -> tuple[str, ...]:
     ):
         return ("/", *parts[4:])
     return parts
+
+
+def _logical_posix_parts(resolved: Path | PurePath) -> tuple[str, ...]:
+    """Strip macOS ``/System/Volumes/Data`` firmlink from POSIX parts.
+
+    On macOS, ``Path('/home/...').resolve()`` often lands under
+    ``/System/Volumes/Data/home/...``.  Classification must see the
+    logical ``/home/...`` path, otherwise every ``/home`` workspace wipe
+    is mis-labeled as a ``/System`` wipe.
+    """
+    return _logical_posix_parts_from(resolved.parts)
 
 
 def _is_safe_temp_tree(parts: tuple[str, ...]) -> bool:
@@ -391,10 +408,10 @@ def _is_safe_temp_tree(parts: tuple[str, ...]) -> bool:
     return False
 
 
-def _is_resolved_path_catastrophic(resolved: Path) -> bool:
+def _is_resolved_path_catastrophic(resolved: Path | PurePath) -> bool:
     """Return True when a fully resolved path is a catastrophic wipe target."""
     # pylint: disable=too-many-return-statements
-    raw_parts = resolved.parts
+    raw_parts = _coerce_posix_root_parts(resolved.parts)
     if not raw_parts:
         return False
 
@@ -402,7 +419,7 @@ def _is_resolved_path_catastrophic(resolved: Path) -> bool:
     if (resolved.anchor and len(raw_parts) == 1) or raw_parts == ("/",):
         return True
 
-    parts = _logical_posix_parts(resolved)
+    parts = _logical_posix_parts_from(resolved.parts)
     if _is_safe_temp_tree(parts):
         return False
 
@@ -430,6 +447,16 @@ def _is_resolved_path_catastrophic(resolved: Path) -> bool:
     if top in _MOUNT_RUNTIME_TOP_LEVEL:
         return len(parts) == 2
     return top in _CATASTROPHIC_TOP_LEVEL
+
+
+def _is_posix_abs_token_catastrophic(token: str) -> bool:
+    """Classify a ``/…`` token with PurePosixPath (host-OS independent).
+
+    Host ``Path('/etc')`` on Windows uses a ``\\\\`` root and may resolve to
+    ``C:\\etc``, which is *not* a Windows-drive wipe.  Policy for shell
+    commands that spell POSIX absolute targets must follow POSIX parts.
+    """
+    return _is_resolved_path_catastrophic(PurePosixPath(token))
 
 
 def _windows_drive_parts_are_catastrophic(parts: tuple[str, ...]) -> bool:
@@ -707,9 +734,9 @@ def _is_glob_parent_catastrophic(parent: str, *, base: Path) -> bool:
         resolved_parent,
     ):
         return True
-    # Literal emulated-Windows path that may not exist on this host.
+    # Literal POSIX / emulated-Windows path (host-independent parts).
     if parent.startswith("/"):
-        return _is_resolved_path_catastrophic(Path(parent))
+        return _is_posix_abs_token_catastrophic(parent)
     return False
 
 
@@ -737,9 +764,11 @@ def _token_is_catastrophic_after_normalize(
     resolved = _resolve_path_token(normalized, base)
     if resolved is not None and _is_resolved_path_catastrophic(resolved):
         return True
-    # Emulated-Windows / POSIX absolute paths on hosts without those mounts.
+    # POSIX absolute / emulated-Windows paths: classify via PurePosixPath
+    # so Windows hosts do not miss ``/etc`` / ``/mnt/c/Windows`` when
+    # ``Path.resolve()`` rewrites them onto the current drive.
     if normalized.startswith("/"):
-        return _is_resolved_path_catastrophic(Path(normalized))
+        return _is_posix_abs_token_catastrophic(normalized)
     return False
 
 

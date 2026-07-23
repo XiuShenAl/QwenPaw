@@ -2,9 +2,13 @@
 """Tests for shared safety check primitives."""
 from __future__ import annotations
 
+from pathlib import PureWindowsPath
+
 import pytest
 
 from qwenpaw.security.tool_guard.safety_checks import (
+    _is_posix_abs_token_catastrophic,
+    _is_resolved_path_catastrophic,
     classify_destructive_command,
     is_command_catastrophic,
     is_command_destructive,
@@ -349,6 +353,80 @@ class TestIsCommandDestructive:  # pylint: disable=too-many-public-methods
             is_command_catastrophic(
                 "rm -rf /System/Volumes/Data/Users/alice/*",
             )
+            is True
+        )
+
+    def test_posix_abs_classification_host_independent_on_windows_parts(
+        self,
+    ) -> None:
+        """Windows Path roots use ``\\\\`` — must still classify POSIX policy.
+
+        CI failure mode: ``Path('/etc').parts == ('\\\\', 'etc')`` and
+        ``Path.resolve('/etc')`` → ``C:\\\\etc``, which is not a Windows
+        drive wipe.  Absolute ``/…`` tokens must use PurePosix policy.
+        """
+        assert _is_posix_abs_token_catastrophic("/etc") is True
+        assert _is_posix_abs_token_catastrophic("/tmp/foo") is False
+        assert (
+            _is_posix_abs_token_catastrophic("/System/Volumes/Data/Users")
+            is True
+        )
+        assert (
+            _is_posix_abs_token_catastrophic(
+                "/System/Volumes/Data/Users/alice/proj/build",
+            )
+            is False
+        )
+        assert _is_posix_abs_token_catastrophic("/mnt/c/Windows") is True
+        assert (
+            _is_posix_abs_token_catastrophic("/mnt/c/Users/me/project/build")
+            is False
+        )
+        # Simulate host Path parts as seen on windows-latest runners.
+        assert _is_resolved_path_catastrophic(PureWindowsPath("/etc")) is True
+        assert (
+            _is_resolved_path_catastrophic(
+                PureWindowsPath("/System/Volumes/Data/Users"),
+            )
+            is True
+        )
+        assert (
+            _is_resolved_path_catastrophic(
+                PureWindowsPath("/mnt/c/Windows"),
+            )
+            is True
+        )
+
+    def test_posix_abs_fallback_when_host_resolve_rewrites_drive(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Host resolve remapping ``/etc`` to ``C:/etc`` must still deny."""
+        import qwenpaw.security.tool_guard.safety_checks as sc
+
+        monkeypatch.setattr(
+            sc,
+            "_resolve_path_token",
+            lambda token, base: PureWindowsPath("C:/etc"),
+        )
+        assert is_command_catastrophic("rm -rf /tmp/../etc") is True
+        assert is_command_catastrophic("rm -rf /etc") is True
+        # Workspace under firmlink still allowed via PurePosix policy.
+        monkeypatch.setattr(
+            sc,
+            "_resolve_path_token",
+            lambda token, base: PureWindowsPath(
+                "C:/System/Volumes/Data/Users/alice/proj/build",
+            ),
+        )
+        assert (
+            is_command_catastrophic(
+                "rm -rf /System/Volumes/Data/Users/alice/proj/build",
+            )
+            is False
+        )
+        assert (
+            is_command_catastrophic("rm -rf /System/Volumes/Data/Users")
             is True
         )
 
