@@ -4,6 +4,7 @@
 import asyncio
 import json
 import logging
+import math
 import re
 import time
 from typing import Any, Callable, Dict, Optional
@@ -842,11 +843,17 @@ def _normalize_str_list(
     return list(coerced)
 
 
-def _coerce_bool(value: Any, default: bool = False) -> bool:
-    """Parse a bool tool field; reject ambiguous string truthiness.
+def _coerce_bool(
+    value: Any,
+    default: bool = False,
+    *,
+    field_name: str = "value",
+) -> bool:
+    """Parse a bool tool field; reject ambiguous truthiness.
 
-    ``bool("false")`` is ``True`` in Python — treat common string /
-    numeric forms explicitly instead.
+    ``bool("false")`` / ``bool("null")`` are ``True`` in Python — only
+    accept explicit bool / ``0|1`` / known true/false strings.  Anything
+    else raises ``ValueError`` (no ``bool(value)`` fallthrough).
     """
     if value is None:
         return default
@@ -858,9 +865,59 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
         text = value.strip().lower()
         if text in ("true", "1", "yes", "on"):
             return True
-        if text in ("false", "0", "no", "off", ""):
+        if text in ("false", "0", "no", "off"):
             return False
-    return bool(value)
+    raise ValueError(
+        f"'{field_name}' must be a boolean "
+        f"(or 0/1 / true/false / yes/no / on/off)",
+    )
+
+
+def _coerce_timeout(
+    value: Any,
+    default: int = 600,
+    *,
+    field_name: str = "timeout",
+) -> int:
+    """Parse a timeout tool field to ``int`` seconds.
+
+    Accepts ``int`` / ``float`` / numeric strings (LLM mis-serialization).
+    Rejects bools and non-numeric values with ``ValueError``.
+    """
+    if value is None:
+        return default
+    # bool is an int subclass — do not treat True/False as 1/0 seconds.
+    if isinstance(value, bool):
+        raise ValueError(
+            f"'{field_name}' must be a number (seconds)",
+        )
+    if isinstance(value, (int, float)):
+        as_float = float(value)
+        if not math.isfinite(as_float):
+            raise ValueError(
+                f"'{field_name}' must be a finite number (seconds)",
+            )
+        return int(as_float)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise ValueError(
+                f"'{field_name}' must be a number (seconds)",
+            )
+        try:
+            as_float = float(text)
+        except ValueError as exc:
+            raise ValueError(
+                f"'{field_name}' must be a number (seconds)",
+            ) from exc
+        if not math.isfinite(as_float):
+            raise ValueError(
+                f"'{field_name}' must be a finite number (seconds)",
+            )
+        return int(as_float)
+    raise ValueError(
+        f"'{field_name}' must be a number (seconds)",
+    )
 
 
 def _normalize_batch(
@@ -904,9 +961,9 @@ def _build_subagent_request_context(
 )
 async def spawn_subagent(  # pylint: disable=too-many-return-statements
     task: str,
-    fork: bool = False,
-    background: bool = False,
-    timeout: int = 600,
+    fork: bool | str = False,
+    background: bool | str = False,
+    timeout: int | float | str = 600,
     allowed_tools: Optional[list[str] | str] = None,
     skills: Optional[list[str] | str] = None,
     batch: Optional[list[Dict[str, Any]] | str] = None,
@@ -937,6 +994,8 @@ async def spawn_subagent(  # pylint: disable=too-many-return-statements
                parent or other subagents.
             When False (default), the subagent starts with an empty
             session and works in the original project directory.
+            A JSON/string boolean (e.g. ``"false"``) is also accepted
+            for LLM mis-serialization; ambiguous values return ERROR.
         background: If True, submit as a background task and return
             immediately with a task_id.  The subagent typically runs for
             **minutes, not seconds** — do NOT poll immediately.  Wait at
@@ -944,22 +1003,28 @@ async def spawn_subagent(  # pylint: disable=too-many-return-statements
             and use 30-60 second intervals between subsequent polls.
             Prefer ``background=False`` (foreground) when only spawning
             a single subagent — it blocks until completion, eliminating
-            the need to poll entirely.
+            the need to poll entirely.  String booleans are accepted
+            like ``fork``; ambiguous values return ERROR.
         timeout: Foreground wait timeout in seconds (default 600).
-            Ignored when ``background=True``.
+            Ignored when ``background=True``.  Numeric strings (e.g.
+            ``"600"``) are accepted for LLM mis-serialization; invalid
+            values return ERROR.  Ignored entirely in batch mode.
         allowed_tools: Tool-name whitelist.  Only the listed tools are
             available to the subagent.  ``None`` (default) inherits the
             parent's full tool set.  An empty list denies all tools.
             A JSON array string is also accepted (LLM mis-serialization).
+            Ignored in batch mode (use per-item ``allowed_tools``).
         skills: Skill-name whitelist.  Only the listed SKILL.md files
             are loaded for the subagent.  ``None`` (default) inherits
             all skills resolved for this workspace.  A JSON array
-            string is also accepted.
+            string is also accepted.  Ignored in batch mode (use
+            per-item ``skills``).
         batch: List of task specs for batch mode.  When provided,
             ``task`` must be an empty string.  Each dict must contain a
-            ``task`` key; optional keys: ``fork``, ``allowed_tools``,
-            ``skills`` (top-level ``fork`` / ``timeout`` /
-            ``allowed_tools`` / ``skills`` are ignored in batch mode).
+            ``task`` key; optional keys: ``fork``, ``timeout``,
+            ``allowed_tools``, ``skills`` (top-level ``fork`` /
+            ``timeout`` / ``allowed_tools`` / ``skills`` /
+            ``background`` are ignored in batch mode).
             A JSON array string is also accepted so schema validation
             does not reject common LLM stringification.  All subagents
             run as background tasks.  Maximum length is
@@ -973,11 +1038,6 @@ async def spawn_subagent(  # pylint: disable=too-many-return-statements
         Batch: per-subagent [TASK_ID: ...] + [SESSION: ...].
     """
     try:
-        allowed_tools = _normalize_str_list(
-            allowed_tools,
-            "allowed_tools",
-        )
-        skills = _normalize_str_list(skills, "skills")
         batch = _normalize_batch(batch)
     except ValueError as exc:
         return _tool_text_response(f"ERROR: {exc}")
@@ -988,6 +1048,9 @@ async def spawn_subagent(  # pylint: disable=too-many-return-statements
                 "ERROR: 'task' and 'batch' are mutually exclusive. "
                 "Pass task='' with 'batch' for multiple subagents.",
             )
+        # Top-level fork/background/timeout/allowed_tools/skills are
+        # ignored in batch mode — do not normalize/coerce them here or
+        # LLM placeholder strings would block dispatch.
         return await _spawn_batch(batch)
 
     if not task or not task.strip():
@@ -995,6 +1058,22 @@ async def spawn_subagent(  # pylint: disable=too-many-return-statements
             "ERROR: 'task' is required for spawn_subagent "
             "(use task='' only with batch=...)",
         )
+
+    try:
+        allowed_tools = _normalize_str_list(
+            allowed_tools,
+            "allowed_tools",
+        )
+        skills = _normalize_str_list(skills, "skills")
+        fork = _coerce_bool(fork, default=False, field_name="fork")
+        background = _coerce_bool(
+            background,
+            default=False,
+            field_name="background",
+        )
+        timeout = _coerce_timeout(timeout, default=600, field_name="timeout")
+    except ValueError as exc:
+        return _tool_text_response(f"ERROR: {exc}")
 
     from ...app.agent_context import get_current_agent_id
 
@@ -1115,6 +1194,18 @@ async def _spawn_batch(
                         spec.get("skills"),
                         f"batch[{i}].skills",
                     ),
+                    # Validate fork/timeout before any dispatch so a bad
+                    # value cannot partially spawn siblings (gather).
+                    "fork": _coerce_bool(
+                        spec.get("fork"),
+                        default=False,
+                        field_name=f"batch[{i}].fork",
+                    ),
+                    "timeout": _coerce_timeout(
+                        spec.get("timeout"),
+                        default=600,
+                        field_name=f"batch[{i}].timeout",
+                    ),
                 },
             )
         except ValueError as exc:
@@ -1133,8 +1224,8 @@ async def _spawn_batch(
     async def _dispatch_one(spec: Dict[str, Any]) -> str:
         session_id = _generate_subagent_session_id()
         task_text = spec["task"]
-        spec_fork = _coerce_bool(spec.get("fork"), default=False)
-        spec_timeout = spec.get("timeout", 600)
+        spec_fork = bool(spec["fork"])
+        spec_timeout = int(spec["timeout"])
         spec_allowed = spec.get("allowed_tools")
         spec_skills = spec.get("skills")
 

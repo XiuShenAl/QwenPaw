@@ -484,8 +484,20 @@ def test_coerce_bool_string_false_is_false():
     assert agent_management._coerce_bool("true") is True
     assert agent_management._coerce_bool(False) is False
     assert agent_management._coerce_bool(None, default=True) is True
+    assert agent_management._coerce_bool(0) is False
+    assert agent_management._coerce_bool(1) is True
     # Python bool("false") is True — must not use that.
     assert bool("false") is True
+
+
+def test_coerce_bool_rejects_ambiguous_values():
+    for bad in ("null", "None", "nope", "fals", "maybe", "", "2", 2, 0.5):
+        try:
+            agent_management._coerce_bool(bad, field_name="fork")
+        except ValueError as exc:
+            assert "fork" in str(exc)
+        else:
+            raise AssertionError(f"expected ValueError for {bad!r}")
 
 
 def test_spawn_subagent_schema_accepts_batch_string():
@@ -510,6 +522,28 @@ def test_spawn_subagent_schema_accepts_batch_string():
         {
             "task": "",
             "batch": [{"task": "Create A"}, {"task": "Create B"}],
+        },
+        schema,
+    )
+    # Top-level fork/background string forms (LLM mis-serialization).
+    jsonschema.validate(
+        {"task": "do work", "fork": "false", "background": "true"},
+        schema,
+    )
+    jsonschema.validate(
+        {"task": "do work", "fork": False, "background": True},
+        schema,
+    )
+    # Top-level timeout string (LLM mis-serialization).
+    jsonschema.validate(
+        {"task": "do work", "timeout": "600"},
+        schema,
+    )
+    jsonschema.validate(
+        {
+            "task": "",
+            "batch": [{"task": "ok"}],
+            "timeout": "600",
         },
         schema,
     )
@@ -642,3 +676,327 @@ async def test_spawn_subagent_batch_invalid_string_returns_error():
     )
     assert "ERROR" in response.content[0].text
     assert "batch" in response.content[0].text.lower()
+
+
+async def test_spawn_subagent_batch_ignores_top_level_ignored_fields(
+    monkeypatch,
+):
+    """Batch mode ignores invalid top-level fork/tools/skills/timeout."""
+    submitted: list[dict] = []
+
+    def fake_submit(
+        _base,
+        payload,
+        _agent_id,
+        _timeout,
+        task_timeout=None,  # pylint: disable=unused-argument
+    ):
+        submitted.append(payload)
+        return {"task_id": f"t-{len(submitted)}"}
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    from qwenpaw.app import agent_context
+
+    monkeypatch.setattr(
+        agent_management,
+        "submit_agent_chat_task",
+        fake_submit,
+    )
+    monkeypatch.setattr(agent_management.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(agent_context, "get_current_agent_id", lambda: "bot-a")
+    monkeypatch.setattr(
+        agent_context,
+        "get_current_approval_route",
+        lambda: None,
+    )
+    monkeypatch.setattr(agent_context, "get_current_session_id", lambda: "s1")
+    monkeypatch.setattr(agent_context, "get_current_user_id", lambda: "u1")
+    monkeypatch.setattr(
+        agent_context,
+        "get_current_channel",
+        lambda: "console",
+    )
+    monkeypatch.setattr(
+        agent_context,
+        "get_current_root_session_id",
+        lambda: "s1",
+    )
+
+    response = await agent_management.spawn_subagent(
+        task="",
+        batch=[{"task": "ok"}],
+        fork="null",
+        background="maybe",
+        allowed_tools="null",
+        skills="null",
+        timeout="600",
+    )
+    text = response.content[0].text
+    assert "ERROR" not in text
+    assert "[1/1]" in text
+    assert len(submitted) == 1
+
+    # Plain non-JSON string for tools must also be ignored at top level.
+    submitted.clear()
+    response2 = await agent_management.spawn_subagent(
+        task="",
+        batch=[{"task": "ok2"}],
+        allowed_tools="read_file",
+        skills="read_file",
+    )
+    assert "ERROR" not in response2.content[0].text
+    assert len(submitted) == 1
+
+
+async def test_spawn_subagent_batch_ambiguous_fork_errors_before_dispatch(
+    monkeypatch,
+):
+    """Illegal batch fork must ERROR with zero submits / fork spawns."""
+    submitted: list[dict] = []
+    forked: list[str] = []
+
+    def fake_submit(
+        _base,
+        payload,
+        _agent_id,
+        _timeout,
+        task_timeout=None,  # pylint: disable=unused-argument
+    ):
+        submitted.append(payload)
+        return {"task_id": f"t-{len(submitted)}"}
+
+    async def fake_forked(**kwargs):
+        forked.append(kwargs.get("task", ""))
+        return agent_management._tool_text_response("forked")
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    from qwenpaw.app import agent_context
+
+    monkeypatch.setattr(
+        agent_management,
+        "submit_agent_chat_task",
+        fake_submit,
+    )
+    monkeypatch.setattr(
+        agent_management,
+        "_spawn_forked_subagent",
+        fake_forked,
+    )
+    monkeypatch.setattr(agent_management.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(agent_context, "get_current_agent_id", lambda: "bot-a")
+    monkeypatch.setattr(
+        agent_context,
+        "get_current_approval_route",
+        lambda: None,
+    )
+    monkeypatch.setattr(agent_context, "get_current_session_id", lambda: "s1")
+    monkeypatch.setattr(agent_context, "get_current_user_id", lambda: "u1")
+    monkeypatch.setattr(
+        agent_context,
+        "get_current_channel",
+        lambda: "console",
+    )
+    monkeypatch.setattr(
+        agent_context,
+        "get_current_root_session_id",
+        lambda: "s1",
+    )
+
+    response = await agent_management.spawn_subagent(
+        task="",
+        batch=[{"task": "t", "fork": "null"}],
+    )
+    text = response.content[0].text
+    assert text.startswith("ERROR:")
+    assert "fork" in text.lower()
+    assert not submitted
+    assert not forked
+
+    # Mixed batch: one good item must not partially dispatch.
+    response2 = await agent_management.spawn_subagent(
+        task="",
+        batch=[
+            {"task": "ok-task", "fork": False},
+            {"task": "bad-task", "fork": "null"},
+        ],
+    )
+    text2 = response2.content[0].text
+    assert text2.startswith("ERROR:")
+    assert "batch[1].fork" in text2
+    assert not submitted
+    assert not forked
+
+
+async def test_spawn_subagent_top_level_string_bools(monkeypatch):
+    """Top-level fork/background strings: schema-safe + no false fork."""
+    collected: list[dict] = []
+    forked: list[str] = []
+
+    def fake_collect(_base, payload, _agent_id, _timeout):
+        collected.append(payload)
+        return {
+            "output": [
+                {"content": [{"type": "text", "text": "done"}]},
+            ],
+        }
+
+    async def fake_forked(**kwargs):
+        forked.append(kwargs.get("task", ""))
+        return agent_management._tool_text_response("forked")
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    from qwenpaw.app import agent_context
+
+    monkeypatch.setattr(
+        agent_management,
+        "collect_final_agent_chat_response",
+        fake_collect,
+    )
+    monkeypatch.setattr(
+        agent_management,
+        "_spawn_forked_subagent",
+        fake_forked,
+    )
+    monkeypatch.setattr(agent_management.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(agent_context, "get_current_agent_id", lambda: "bot-a")
+    monkeypatch.setattr(
+        agent_context,
+        "get_current_approval_route",
+        lambda: None,
+    )
+    monkeypatch.setattr(agent_context, "get_current_session_id", lambda: "s1")
+    monkeypatch.setattr(agent_context, "get_current_user_id", lambda: "u1")
+    monkeypatch.setattr(
+        agent_context,
+        "get_current_channel",
+        lambda: "console",
+    )
+    monkeypatch.setattr(
+        agent_context,
+        "get_current_root_session_id",
+        lambda: "s1",
+    )
+
+    # fork="false" must NOT take the fork path.
+    response = await agent_management.spawn_subagent(
+        task="do work",
+        fork="false",
+        background="false",
+    )
+    assert "ERROR" not in response.content[0].text
+    assert "done" in response.content[0].text
+    assert not forked
+    assert len(collected) == 1
+    assert "fork_project_dir" not in collected[0]["request_context"]
+
+    collected.clear()
+    bad = await agent_management.spawn_subagent(
+        task="do work",
+        fork="null",
+    )
+    assert bad.content[0].text.startswith("ERROR:")
+    assert "fork" in bad.content[0].text.lower()
+    assert not collected
+    assert not forked
+
+    bad_bg = await agent_management.spawn_subagent(
+        task="do work",
+        background="maybe",
+    )
+    assert bad_bg.content[0].text.startswith("ERROR:")
+    assert "background" in bad_bg.content[0].text.lower()
+    assert not collected
+
+    # String timeout is accepted on the single-spawn path.
+    collected.clear()
+    ok_timeout = await agent_management.spawn_subagent(
+        task="do work",
+        timeout="600",
+    )
+    assert "ERROR" not in ok_timeout.content[0].text
+    assert len(collected) == 1
+
+    collected.clear()
+    bad_timeout = await agent_management.spawn_subagent(
+        task="do work",
+        timeout="abc",
+    )
+    assert bad_timeout.content[0].text.startswith("ERROR:")
+    assert "timeout" in bad_timeout.content[0].text.lower()
+    assert not collected
+
+
+async def test_spawn_subagent_batch_item_timeout_errors_before_dispatch(
+    monkeypatch,
+):
+    """Illegal batch item timeout must ERROR with zero submits."""
+    submitted: list[dict] = []
+    forked: list[str] = []
+
+    def fake_submit(
+        _base,
+        payload,
+        _agent_id,
+        _timeout,
+        task_timeout=None,  # pylint: disable=unused-argument
+    ):
+        submitted.append(payload)
+        return {"task_id": f"t-{len(submitted)}"}
+
+    async def fake_forked(**kwargs):
+        forked.append(kwargs.get("task", ""))
+        return agent_management._tool_text_response("forked")
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    from qwenpaw.app import agent_context
+
+    monkeypatch.setattr(
+        agent_management,
+        "submit_agent_chat_task",
+        fake_submit,
+    )
+    monkeypatch.setattr(
+        agent_management,
+        "_spawn_forked_subagent",
+        fake_forked,
+    )
+    monkeypatch.setattr(agent_management.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(agent_context, "get_current_agent_id", lambda: "bot-a")
+    monkeypatch.setattr(
+        agent_context,
+        "get_current_approval_route",
+        lambda: None,
+    )
+    monkeypatch.setattr(agent_context, "get_current_session_id", lambda: "s1")
+    monkeypatch.setattr(agent_context, "get_current_user_id", lambda: "u1")
+    monkeypatch.setattr(
+        agent_context,
+        "get_current_channel",
+        lambda: "console",
+    )
+    monkeypatch.setattr(
+        agent_context,
+        "get_current_root_session_id",
+        lambda: "s1",
+    )
+
+    response = await agent_management.spawn_subagent(
+        task="",
+        batch=[
+            {"task": "a"},
+            {"task": "b", "timeout": "abc"},
+        ],
+    )
+    text = response.content[0].text
+    assert text.startswith("ERROR:")
+    assert "batch[1].timeout" in text
+    assert not submitted
+    assert not forked
