@@ -500,6 +500,33 @@ def test_coerce_bool_rejects_ambiguous_values():
             raise AssertionError(f"expected ValueError for {bad!r}")
 
 
+def test_coerce_timeout_accepts_numeric_and_rejects_non_positive():
+    assert agent_management._coerce_timeout("600") == 600
+    assert agent_management._coerce_timeout(30.9) == 30
+    assert agent_management._coerce_timeout(1) == 1
+    # Truncation of (0, 1) must not silently become timeout=0.
+    for bad in (
+        0,
+        -1,
+        "0",
+        "-1",
+        0.5,
+        0.9,
+        "0.5",
+        "1e-9",
+        "abc",
+        True,
+        False,
+        "",
+    ):
+        try:
+            agent_management._coerce_timeout(bad, field_name="timeout")
+        except ValueError as exc:
+            assert "timeout" in str(exc)
+        else:
+            raise AssertionError(f"expected ValueError for {bad!r}")
+
+
 def test_spawn_subagent_schema_accepts_batch_string():
     """Tool JSON schema must allow string so AgentScope validation passes."""
     import jsonschema
@@ -532,6 +559,11 @@ def test_spawn_subagent_schema_accepts_batch_string():
     )
     jsonschema.validate(
         {"task": "do work", "fork": False, "background": True},
+        schema,
+    )
+    # Integer 0/1 aligns with _coerce_bool (common LLM numeric bools).
+    jsonschema.validate(
+        {"task": "do work", "fork": 0, "background": 1},
         schema,
     )
     # Top-level timeout string (LLM mis-serialization).
@@ -998,5 +1030,26 @@ async def test_spawn_subagent_batch_item_timeout_errors_before_dispatch(
     text = response.content[0].text
     assert text.startswith("ERROR:")
     assert "batch[1].timeout" in text
+    assert not submitted
+    assert not forked
+
+    # Sub-second values truncate to 0 and must not dispatch.
+    response2 = await agent_management.spawn_subagent(
+        task="",
+        batch=[{"task": "a", "timeout": 0.5}],
+    )
+    text2 = response2.content[0].text
+    assert text2.startswith("ERROR:")
+    assert "timeout" in text2.lower()
+    assert not submitted
+    assert not forked
+
+    response3 = await agent_management.spawn_subagent(
+        task="",
+        batch=json.dumps([{"task": "a", "timeout": "0.5"}]),
+    )
+    text3 = response3.content[0].text
+    assert text3.startswith("ERROR:")
+    assert "timeout" in text3.lower()
     assert not submitted
     assert not forked

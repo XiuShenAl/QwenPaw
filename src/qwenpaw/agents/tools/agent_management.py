@@ -882,42 +882,44 @@ def _coerce_timeout(
     """Parse a timeout tool field to ``int`` seconds.
 
     Accepts ``int`` / ``float`` / numeric strings (LLM mis-serialization).
-    Rejects bools and non-numeric values with ``ValueError``.
+    Rejects bools, non-numeric values, and non-positive timeouts.
     """
     if value is None:
         return default
     # bool is an int subclass — do not treat True/False as 1/0 seconds.
     if isinstance(value, bool):
         raise ValueError(
-            f"'{field_name}' must be a number (seconds)",
+            f"'{field_name}' must be a positive number (seconds)",
         )
     if isinstance(value, (int, float)):
         as_float = float(value)
-        if not math.isfinite(as_float):
-            raise ValueError(
-                f"'{field_name}' must be a finite number (seconds)",
-            )
-        return int(as_float)
-    if isinstance(value, str):
+    elif isinstance(value, str):
         text = value.strip()
         if not text:
             raise ValueError(
-                f"'{field_name}' must be a number (seconds)",
+                f"'{field_name}' must be a positive number (seconds)",
             )
         try:
             as_float = float(text)
         except ValueError as exc:
             raise ValueError(
-                f"'{field_name}' must be a number (seconds)",
+                f"'{field_name}' must be a positive number (seconds)",
             ) from exc
-        if not math.isfinite(as_float):
-            raise ValueError(
-                f"'{field_name}' must be a finite number (seconds)",
-            )
-        return int(as_float)
-    raise ValueError(
-        f"'{field_name}' must be a number (seconds)",
-    )
+    else:
+        raise ValueError(
+            f"'{field_name}' must be a positive number (seconds)",
+        )
+    if not math.isfinite(as_float):
+        raise ValueError(
+            f"'{field_name}' must be a positive number (seconds)",
+        )
+    # Truncation can turn (0, 1) into 0 — reject after int(), not before.
+    as_int = int(as_float)
+    if as_int <= 0:
+        raise ValueError(
+            f"'{field_name}' must be a positive number (seconds)",
+        )
+    return as_int
 
 
 def _normalize_batch(
@@ -961,8 +963,8 @@ def _build_subagent_request_context(
 )
 async def spawn_subagent(  # pylint: disable=too-many-return-statements
     task: str,
-    fork: bool | str = False,
-    background: bool | str = False,
+    fork: bool | str | int = False,
+    background: bool | str | int = False,
     timeout: int | float | str = 600,
     allowed_tools: Optional[list[str] | str] = None,
     skills: Optional[list[str] | str] = None,
