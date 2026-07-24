@@ -304,6 +304,26 @@ class TestAlwaysAuthPluginMutations:
         assert is_always_auth_api("GET", "/api/plugins/foo/status") is False
         assert is_always_auth_api("POST", "/api/agents") is False
 
+    def test_is_always_auth_api_normalizes_slashes(self):
+        """Trailing / duplicate slashes must not evade always-auth."""
+        assert is_always_auth_api("POST", "/api/plugins/install/") is True
+        assert is_always_auth_api("POST", "/api/plugins//upload") is True
+        assert is_always_auth_api("DELETE", "/api/plugins/foo/") is True
+        assert (
+            is_always_auth_api(
+                "POST",
+                "/api/agents/default/plugins/install/",
+            )
+            is True
+        )
+        assert (
+            is_always_auth_api(
+                "POST",
+                "/api//agents/default//plugins//upload/",
+            )
+            is True
+        )
+
     @patch("qwenpaw.app.auth._get_config_cached")
     @patch("qwenpaw.app.auth.is_auth_enabled", return_value=True)
     @patch("qwenpaw.app.auth.has_registered_users", return_value=True)

@@ -85,18 +85,31 @@ _ALWAYS_AUTH_PLUGIN_POST: frozenset[str] = frozenset(
 )
 _ALWAYS_AUTH_PLUGIN_DELETE_RE = re.compile(r"^/api/plugins/[^/]+$")
 _AGENT_SCOPED_API_RE = re.compile(r"^/api/agents/[^/]+")
+_MULTI_SLASH_RE = re.compile(r"/{2,}")
 
 
 def _normalize_api_path(path: str) -> str:
-    """Map ``/api/agents/{agentId}/...`` to ``/api/...`` for auth rules."""
-    return _AGENT_SCOPED_API_RE.sub("/api", path, count=1)
+    """Normalize path for always-auth matching.
+
+    - Collapse repeated ``/``
+    - Strip a trailing ``/`` (except bare ``/``)
+    - Map ``/api/agents/{agentId}/...`` to ``/api/...``
+    """
+    if not path:
+        return path
+    collapsed = _MULTI_SLASH_RE.sub("/", path)
+    if len(collapsed) > 1 and collapsed.endswith("/"):
+        collapsed = collapsed.rstrip("/")
+    return _AGENT_SCOPED_API_RE.sub("/api", collapsed, count=1)
 
 
 def is_always_auth_api(method: str, path: str) -> bool:
     """Return True if *method*/*path* must not use host-based auth bypass.
 
     Covers plugin install/upload/uninstall on both global and
-    agent-scoped routes when authentication is enabled.
+    agent-scoped routes when authentication is enabled.  Path matching
+    is slash-normalized so trailing or duplicate slashes cannot bypass
+    the check via redirect quirks.
     """
     normalized = _normalize_api_path(path)
     method_u = method.upper()
