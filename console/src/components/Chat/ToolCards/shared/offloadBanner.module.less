@@ -3,7 +3,10 @@
 
 .offloadBanner {
   margin-top: 6px;
-  max-width: 440px;
+  width: 100%;
+  // Wide enough for full EN labels; still capped so it doesn't dominate the chat column
+  max-width: min(100%, 520px);
+  box-sizing: border-box;
   background: var(--ant-color-bg-elevated, #fff);
   border: 1px solid var(--ant-color-warning-border, rgba(245, 158, 11, 0.2));
   border-radius: 10px;
@@ -48,8 +51,8 @@
 .offloadBar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
+  gap: 10px;
+  padding: 10px 12px 8px;
   background: var(--ant-color-warning-bg, rgba(245, 158, 11, 0.05));
 }
 
@@ -57,34 +60,52 @@
   background: var(--ant-color-primary-bg, rgba(139, 139, 255, 0.05));
 }
 
-.offloadGear {
-  font-size: 15px;
-  flex-shrink: 0;
-  animation: gearSpin 4s linear infinite;
-}
-
-.offloadGear.stopped {
-  animation: none;
-}
-
-@keyframes gearSpin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 .offloadInfo {
   flex: 1;
-  font-size: 11px;
+  min-width: 0;
+  font-size: 12px;
   font-weight: 600;
   color: var(--ant-color-warning, #d48806);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .bgMode .offloadInfo {
   color: var(--ant-color-primary, #1677ff);
+}
+
+// Single countdown: ring + short caption on the header right (light weight)
+.timerCluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  max-width: 48%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  border-radius: 0;
+  line-height: 1;
+}
+
+.timerCluster.urgent {
+  border: none;
+  background: transparent;
+}
+
+.timerCaption {
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--ant-color-warning, #d48806);
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+}
+
+.timerCluster.urgent .timerCaption {
+  color: var(--ant-color-error, #ff4d4f);
 }
 
 // Circular countdown ring
@@ -112,7 +133,9 @@
   stroke: var(--ant-color-warning, #d48806);
   stroke-width: 2.5;
   stroke-linecap: round;
-  transition: stroke-dashoffset 1s linear, stroke 0.5s;
+  transition:
+    stroke-dashoffset 1s linear,
+    stroke 0.5s;
 }
 
 .ringProgress.urgent {
@@ -134,20 +157,43 @@
   color: var(--ant-color-error, #ff4d4f);
 }
 
-// Action buttons row
+// Fixed columns (ZH layout): offload = 6-col (2+2+2 / 3+3), keep = 3-col.
+// EN keeps full copy and wraps inside the cell instead of changing the grid.
 .offloadActions {
-  padding: 6px 10px 8px;
-  display: flex;
-  gap: 5px;
-  flex-wrap: wrap;
+  padding: 8px 12px 12px;
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.actionsOffload {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.actionsOffload .offloadBtn:nth-child(-n + 3) {
+  grid-column: span 2;
+}
+
+.actionsOffload .offloadBtn:nth-child(n + 4) {
+  grid-column: span 3;
+}
+
+.actionsKeep {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .offloadBtn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  // Keep icon + label on one flex row; long EN text wraps inside .btnLabel
+  flex-wrap: nowrap;
   gap: 4px;
-  padding: 7px 10px;
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  padding: 6px 8px;
   border-radius: 7px;
   border: 1px solid var(--ant-color-border, #d9d9d9);
   background: var(--ant-color-bg-container, #fff);
@@ -156,7 +202,8 @@
   font-size: 11px;
   font-weight: 600;
   color: var(--ant-color-text, #000);
-  white-space: nowrap;
+  line-height: 1.25;
+  box-sizing: border-box;
 
   &:hover {
     transform: translateY(-1px);
@@ -167,8 +214,27 @@
   }
 }
 
+.primaryAct {
+  font-weight: 700;
+  border-color: var(--ant-color-warning-border, rgba(245, 158, 11, 0.35));
+  background: var(--ant-color-warning-bg, rgba(245, 158, 11, 0.06));
+}
+
 .offloadBtn .ico {
   font-size: 12px;
+  flex-shrink: 0;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+}
+
+.offloadBtn .btnLabel {
+  min-width: 0;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: break-word;
+  word-break: normal;
+  hyphens: auto;
 }
 
 .offloadBtn:hover {
@@ -187,18 +253,20 @@
 }
 
 .offloadNote {
-  padding: 0 12px 6px;
+  padding: 0 12px 10px;
   font-size: 10px;
   color: var(--ant-color-text-quaternary, #bfbfbf);
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  line-height: 1.4;
 }
 
 .noteDot {
   width: 4px;
   height: 4px;
   border-radius: 50%;
+  flex-shrink: 0;
   background: var(--ant-color-text-quaternary, #bfbfbf);
 }
 
@@ -338,6 +406,19 @@
 
   .timerCount {
     color: #f59e0b;
+  }
+
+  .timerCaption {
+    color: #f59e0b;
+  }
+
+  .timerCluster.urgent .timerCaption {
+    color: #ef4444;
+  }
+
+  .primaryAct {
+    border-color: rgba(245, 158, 11, 0.35);
+    background: rgba(245, 158, 11, 0.08);
   }
 
   .offloadBtn {

@@ -3170,10 +3170,30 @@
       "policyOffload": "转入后台",
       "policyKeep": "不转后台",
       "manage": "后台管理",
+      "offloadMode": {
+        "title": "工具执行较久 · 即将转入后台",
+        "offloadNow": "立即转入后台",
+        "preventOffload": "禁止转入后台",
+        "delayOffload": "延迟转入后台",
+        "countdownCaption": "后自动转入后台",
+        "footerNoCountdown": "无倒计时 · 默认将转入后台",
+        "ringAria": "距自动转入后台还剩 {{seconds}} 秒",
+        "toastAuto": "已自动转入后台",
+        "preventedTitle": "已禁止自动转入后台",
+        "preventedFooter": "不会自动转入后台；可手动转入后台或取消执行"
+      },
+      "keepMode": {
+        "title": "工具仍在前台执行",
+        "offload": "转入后台",
+        "countdownCaption": "后收起本面板",
+        "footerNoCountdown": "默认保持前台；可随时手动转入后台",
+        "ringAria": "面板将在 {{seconds}} 秒后收起",
+        "toastDismiss": "已收起提醒，工具继续前台执行"
+      },
       "toast": {
         "offloaded": "工具已转入后台",
         "keepWaiting": "继续前台等待…",
-        "extended": "已延长提醒，+30 秒后再次提示",
+        "extended": "已延迟转入后台，+30 秒后再次提示",
         "killExtended": "执行超时已延长 30 秒",
         "cancelled": "工具调用已取消",
         "cancelFailed": "取消工具失败",

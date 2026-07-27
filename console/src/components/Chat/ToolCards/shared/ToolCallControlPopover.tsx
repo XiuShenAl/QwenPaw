@@ -1,8 +1,11 @@
 /**
  * OffloadBanner — renders below the tool card as a horizontal panel.
  *
- * Shows a circular countdown ring, action buttons, and a note about
- * the default offload policy.
+ * Button set and countdown copy branch on effective mode:
+ * - auto-offload armed (policy offload + active deadline): offload decision UX
+ * - otherwise: foreground UX (keep policy, or offload deadline cleared / prevented)
+ *
+ * Countdown appears once in the header: ring + short caption (no footer duplicate).
  */
 
 import React, { useEffect, useRef, useState } from "react";
@@ -37,6 +40,7 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
   onUpdateRemaining,
 }) => {
   const { t } = useTranslation();
+  const isOffloadPolicy = defaultPolicy === "offload";
   const [collapsing, setCollapsing] = useState(false);
   const [displaySecs, setDisplaySecs] = useState(
     offloadRemaining !== null ? Math.ceil(offloadRemaining) : 0,
@@ -45,6 +49,12 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
   const startSecsRef = useRef(displaySecs);
   const timerRef = useRef<ReturnType<typeof setInterval>>();
   const [busy, setBusy] = useState<string | null>(null);
+
+  const hasCountdown = offloadRemaining !== null && offloadRemaining > 0;
+  // Policy may still be "offload", but after "don't auto-offload" the deadline
+  // is cleared — switch copy/buttons to foreground mode.
+  const autoOffloadArmed = isOffloadPolicy && hasCountdown;
+  const showForegroundUi = !autoOffloadArmed;
 
   useEffect(() => {
     if (offloadRemaining === null || offloadRemaining <= 0) return;
@@ -71,19 +81,27 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
   const dismiss = (showToast = false) => {
     if (timerRef.current) clearInterval(timerRef.current);
     if (showToast) {
-      // Default policy executed: if system auto-offloads, register the queue item.
-      if (defaultPolicy === "offload") {
+      // Countdown reached 0: honor settings policy (not the post-prevent UI mode).
+      if (isOffloadPolicy) {
         registerBackgroundTask({
           sessionId,
           toolCallId,
           toolName: toolName || toolCallId,
         });
+        message.info(
+          t(
+            "tool.control.offloadMode.toastAuto",
+            "Moved to background automatically",
+          ),
+        );
+      } else {
+        message.info(
+          t(
+            "tool.control.keepMode.toastDismiss",
+            "Reminder closed; tool keeps running in foreground",
+          ),
+        );
       }
-      const label =
-        defaultPolicy === "offload"
-          ? t("tool.control.policyOffload")
-          : t("tool.control.policyKeep");
-      message.info(label);
     }
     setCollapsing(true);
     setTimeout(() => onClose(), 250);
@@ -115,19 +133,24 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
       dismiss();
     });
 
-  const handleKeep = () =>
+  const handlePreventOffload = () =>
     withGuard("keep", async () => {
       const res = await toolCallsApi.preventOffload(sessionId, toolCallId);
       onUpdateRemaining(res.offload_remaining, res.kill_remaining);
       message.info(t("tool.control.toast.keepWaiting", "Continuing to wait…"));
-      dismiss();
+      // Stay open so title/footer switch to "won't auto-offload" in place.
     });
 
-  const handleExtendOffload = () =>
+  const handleDelayOffload = () =>
     withGuard("extendOffload", async () => {
       const res = await toolCallsApi.extendOffload(sessionId, toolCallId, 30);
       onUpdateRemaining(res.offload_remaining, res.kill_remaining);
-      message.info(t("tool.control.toast.extended", "Will remind you in +30s"));
+      message.info(
+        t(
+          "tool.control.toast.extended",
+          "Offload delayed; will remind you in +30s",
+        ),
+      );
     });
 
   const handleExtendKill = () =>
@@ -146,15 +169,43 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
       dismiss();
     });
 
-  const hasCountdown = offloadRemaining !== null && offloadRemaining > 0;
   const total = hasCountdown ? totalSeconds : 1;
   const pct = hasCountdown ? displaySecs / total : 0;
   const offset = CIRCUMFERENCE * (1 - pct);
   const isUrgent = displaySecs <= 5;
-  const defaultLabel =
-    defaultPolicy === "offload"
-      ? t("tool.control.policyOffload")
-      : t("tool.control.policyKeep");
+
+  const title = autoOffloadArmed
+    ? t(
+        "tool.control.offloadMode.title",
+        "Tool running longer — about to offload",
+      )
+    : isOffloadPolicy
+    ? t("tool.control.offloadMode.preventedTitle", "Auto-offload disabled")
+    : t("tool.control.keepMode.title", "Tool still running in foreground");
+
+  const ringAria = autoOffloadArmed
+    ? t("tool.control.offloadMode.ringAria", {
+        seconds: displaySecs,
+        defaultValue: "{{seconds}}s until auto-offload",
+      })
+    : t("tool.control.keepMode.ringAria", {
+        seconds: displaySecs,
+        defaultValue: "Panel closes in {{seconds}}s",
+      });
+
+  const countdownCaption = autoOffloadArmed
+    ? t("tool.control.offloadMode.countdownCaption", "until auto-offload")
+    : t("tool.control.keepMode.countdownCaption", "until panel closes");
+
+  const footerNoCountdown = isOffloadPolicy
+    ? t(
+        "tool.control.offloadMode.preventedFooter",
+        "Won't auto-offload; you can move to background or cancel",
+      )
+    : t(
+        "tool.control.keepMode.footerNoCountdown",
+        "Stays in foreground by default; you can offload anytime",
+      );
 
   return (
     <div
@@ -163,92 +214,159 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
       }`}
     >
       <div className={styles.offloadBar}>
-        <div className={styles.offloadGear}>⚙️</div>
-        <div className={styles.offloadInfo}>{t("tool.control.title")}</div>
+        <div className={styles.offloadInfo}>{title}</div>
 
-        {hasCountdown && (
-          <div className={styles.timerRing}>
-            <svg viewBox="0 0 26 26" width="26" height="26">
-              <circle className={styles.ringBg} cx="13" cy="13" r="10" />
-              <circle
-                className={`${styles.ringProgress} ${
+        {hasCountdown ? (
+          <div
+            className={`${styles.timerCluster} ${
+              isUrgent ? styles.urgent : ""
+            }`}
+            title={ringAria}
+            aria-label={ringAria}
+          >
+            <div className={styles.timerRing}>
+              <svg viewBox="0 0 26 26" width="26" height="26">
+                <circle className={styles.ringBg} cx="13" cy="13" r="10" />
+                <circle
+                  className={`${styles.ringProgress} ${
+                    isUrgent ? styles.urgent : ""
+                  }`}
+                  cx="13"
+                  cy="13"
+                  r="10"
+                  style={{
+                    strokeDasharray: CIRCUMFERENCE,
+                    strokeDashoffset: offset,
+                  }}
+                />
+              </svg>
+              <div
+                className={`${styles.timerCount} ${
                   isUrgent ? styles.urgent : ""
                 }`}
-                cx="13"
-                cy="13"
-                r="10"
-                style={{
-                  strokeDasharray: CIRCUMFERENCE,
-                  strokeDashoffset: offset,
-                }}
-              />
-            </svg>
-            <div
-              className={`${styles.timerCount} ${
-                isUrgent ? styles.urgent : ""
-              }`}
-            >
-              {displaySecs}
+              >
+                {displaySecs}
+              </div>
             </div>
+            <span className={styles.timerCaption}>{countdownCaption}</span>
           </div>
-        )}
+        ) : null}
       </div>
 
-      <div className={styles.offloadActions}>
-        <button
-          className={styles.offloadBtn}
-          onClick={handleBackground}
-          disabled={busy !== null}
-        >
-          <span className={styles.ico}>🌙</span> {t("tool.control.offload")}
-        </button>
-        <button
-          className={styles.offloadBtn}
-          onClick={handleKeep}
-          disabled={busy !== null}
-        >
-          <span className={styles.ico}>⏳</span> {t("tool.control.keep")}
-        </button>
-        <button
-          className={styles.offloadBtn}
-          onClick={handleExtendOffload}
-          disabled={busy !== null}
-        >
-          <span className={styles.ico}>🔄</span>{" "}
-          {t("tool.control.extendOffload")}
-        </button>
-        <button
-          className={styles.offloadBtn}
-          onClick={handleExtendKill}
-          disabled={busy !== null}
-        >
-          <span className={styles.ico}>⏱️</span> {t("tool.control.extendKill")}
-        </button>
-        <button
-          className={`${styles.offloadBtn} ${styles.cancelAct}`}
-          onClick={handleCancel}
-          disabled={busy !== null}
-        >
-          <span className={styles.ico}>✕</span> {t("tool.control.cancel")}
-        </button>
-      </div>
-
-      <div className={styles.offloadNote}>
-        <div className={styles.noteDot} />
-        {hasCountdown ? (
-          <>{t("tool.control.autoAction", { seconds: displaySecs })}</>
+      <div
+        className={`${styles.offloadActions} ${
+          showForegroundUi ? styles.actionsKeep : styles.actionsOffload
+        }`}
+      >
+        {autoOffloadArmed ? (
+          <>
+            <button
+              className={styles.offloadBtn}
+              onClick={handleBackground}
+              disabled={busy !== null}
+              type="button"
+            >
+              <span className={styles.ico}>🌙</span>
+              <span className={styles.btnLabel}>
+                {t(
+                  "tool.control.offloadMode.offloadNow",
+                  "Move to background now",
+                )}
+              </span>
+            </button>
+            <button
+              className={styles.offloadBtn}
+              onClick={handlePreventOffload}
+              disabled={busy !== null}
+              type="button"
+            >
+              <span className={styles.ico}>⏳</span>
+              <span className={styles.btnLabel}>
+                {t(
+                  "tool.control.offloadMode.preventOffload",
+                  "Don't auto-offload",
+                )}
+              </span>
+            </button>
+            <button
+              className={styles.offloadBtn}
+              onClick={handleDelayOffload}
+              disabled={busy !== null}
+              type="button"
+            >
+              <span className={styles.ico}>🔄</span>
+              <span className={styles.btnLabel}>
+                {t("tool.control.offloadMode.delayOffload", "Delay offload")}
+              </span>
+            </button>
+            <button
+              className={styles.offloadBtn}
+              onClick={handleExtendKill}
+              disabled={busy !== null}
+              type="button"
+            >
+              <span className={styles.ico}>⏱️</span>
+              <span className={styles.btnLabel}>
+                {t("tool.control.extendKill", "Extend timeout")}
+              </span>
+            </button>
+            <button
+              className={`${styles.offloadBtn} ${styles.cancelAct}`}
+              onClick={handleCancel}
+              disabled={busy !== null}
+              type="button"
+            >
+              <span className={styles.ico}>✕</span>
+              <span className={styles.btnLabel}>
+                {t("tool.control.cancel")}
+              </span>
+            </button>
+          </>
         ) : (
-          <>{t("tool.control.noCountdown")}</>
+          <>
+            <button
+              className={`${styles.offloadBtn} ${styles.primaryAct}`}
+              onClick={handleBackground}
+              disabled={busy !== null}
+              type="button"
+            >
+              <span className={styles.ico}>🌙</span>
+              <span className={styles.btnLabel}>
+                {t("tool.control.keepMode.offload", "Move to background")}
+              </span>
+            </button>
+            <button
+              className={styles.offloadBtn}
+              onClick={handleExtendKill}
+              disabled={busy !== null}
+              type="button"
+            >
+              <span className={styles.ico}>⏱️</span>
+              <span className={styles.btnLabel}>
+                {t("tool.control.extendKill", "Extend timeout")}
+              </span>
+            </button>
+            <button
+              className={`${styles.offloadBtn} ${styles.cancelAct}`}
+              onClick={handleCancel}
+              disabled={busy !== null}
+              type="button"
+            >
+              <span className={styles.ico}>✕</span>
+              <span className={styles.btnLabel}>
+                {t("tool.control.cancel")}
+              </span>
+            </button>
+          </>
         )}
-        <strong
-          style={{
-            color: "var(--ant-color-text, inherit)",
-            marginLeft: 2,
-          }}
-        >
-          {defaultLabel}
-        </strong>
       </div>
+
+      {!hasCountdown && (
+        <div className={styles.offloadNote}>
+          <div className={styles.noteDot} />
+          {footerNoCountdown}
+        </div>
+      )}
     </div>
   );
 };
