@@ -18,17 +18,19 @@ import {
 } from "../../../hooks/useBackgroundTaskWatcher";
 import {
   type QueueItem,
-  type QueueRunState,
+  useMessageQueueStore,
 } from "../../../stores/messageQueueStore";
 import BackgroundTaskPanel from "./BackgroundTaskPanel";
 import MessageQueuePanel from "./MessageQueuePanel";
 
 type TabKey = "bg" | "queue";
 
+const EMPTY_QUEUE: QueueItem[] = [];
+
 interface ChatSenderTabsPanelProps {
   bgSessionId: string;
-  queueItems: QueueItem[];
-  runState: QueueRunState;
+  /** Frontend chat/session id used by the message-queue store. */
+  queueSessionId: string;
   onRemove: (id: string) => void;
   onEdit: (id: string, text: string) => void;
   onReorder: (items: QueueItem[]) => void;
@@ -41,8 +43,7 @@ interface ChatSenderTabsPanelProps {
 
 export default function ChatSenderTabsPanel({
   bgSessionId,
-  queueItems,
-  runState,
+  queueSessionId,
   onRemove,
   onEdit,
   onReorder,
@@ -56,6 +57,12 @@ export default function ChatSenderTabsPanel({
   const { isDark } = useTheme();
   const tasks = useBackgroundTasksStore((s) => s.tasks);
   const removeTasks = useBackgroundTasksStore((s) => s.removeTasks);
+  // Self-subscribe so queue/run-state updates don't invalidate ChatPage options.
+  const queueItems =
+    useMessageQueueStore((s) => s.queues[queueSessionId]) ?? EMPTY_QUEUE;
+  const runState = useMessageQueueStore(
+    (s) => s.runStates[queueSessionId] ?? "idle",
+  );
   const [batchBusy, setBatchBusy] = useState(false);
 
   const sessionTasks = useMemo(

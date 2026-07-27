@@ -1113,25 +1113,6 @@ const timestampStyle: React.CSSProperties = {
   whiteSpace: "nowrap",
 };
 
-type SessionQueuePanelProps = Omit<
-  React.ComponentProps<typeof MessageQueuePanel>,
-  "items" | "runState"
-> & { sessionId: string };
-
-/**
- * Self-subscribed queue panel: item/run-state changes re-render only this
- * component instead of invalidating the whole ChatPage options memo (and
- * with it the SDK options object) on every queue mutation.
- */
-function SessionQueuePanel({ sessionId, ...handlers }: SessionQueuePanelProps) {
-  const items = useMessageQueueStore((s) => s.queues[sessionId]) ?? EMPTY_QUEUE;
-  const runState = useMessageQueueStore(
-    (s) => s.runStates[sessionId] ?? "idle",
-  );
-  if (items.length === 0) return null;
-  return <MessageQueuePanel items={items} runState={runState} {...handlers} />;
-}
-
 const HISTORY_PANEL_STORAGE_KEY = "qwenpaw_history_panel_open";
 
 export default function ChatPage() {
@@ -2802,8 +2783,7 @@ export default function ChatPage() {
                 sessionApi.getBackendSessionId(queueSessionId) ||
                 ""
               }
-              queueItems={messageQueue}
-              runState={runState}
+              queueSessionId={queueSessionId}
               onRemove={handleQueueRemove}
               onEdit={handleQueueEdit}
               onReorder={handleQueueReorder}
@@ -3090,11 +3070,10 @@ export default function ChatPage() {
     toggleHistoryPanel,
     handleCompactCommand,
     handleNewCommand,
-    runState,
     isOwner,
     bgTaskCount,
     bgBackendSessionId,
-    chatId,
+    queueSessionId,
   ]);
 
   return (

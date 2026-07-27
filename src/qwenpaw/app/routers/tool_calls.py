@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """API routes for tool call lifecycle management."""
+
 from __future__ import annotations
 
 import asyncio
@@ -63,6 +64,11 @@ def _get_coordinator(request: Request) -> Any:
     return coordinator
 
 
+def _safe_log_token(value: str) -> str:
+    """Neutralize CR/LF so untrusted IDs cannot forge log lines (CWE-117)."""
+    return value.replace("\r", "\\r").replace("\n", "\\n")
+
+
 def _get_entry(
     coordinator: Any,
     tool_call_id: str,
@@ -82,9 +88,9 @@ def _get_entry(
 
         logging.getLogger(__name__).warning(
             "session_id mismatch: url=%s backend=%s tc=%s",
-            session_id,
-            entry.ctx.session_id,
-            tool_call_id,
+            _safe_log_token(session_id),
+            _safe_log_token(entry.ctx.session_id),
+            _safe_log_token(tool_call_id),
         )
     return entry
 
