@@ -14,6 +14,15 @@
   animation: bannerIn 0.3s cubic-bezier(0.34, 1.3, 0.64, 1);
 }
 
+// keep_foreground → amber/warning; offload → blue/primary (matches OffloadPolicyCard)
+.offloadBanner.policyKeep {
+  border-color: var(--ant-color-warning-border, rgba(245, 158, 11, 0.28));
+}
+
+.offloadBanner.policyOffload {
+  border-color: var(--ant-color-primary-border, rgba(22, 119, 255, 0.28));
+}
+
 .offloadBanner.bgMode {
   border-color: var(--ant-color-primary-border, rgba(139, 139, 255, 0.25));
 }
@@ -56,6 +65,14 @@
   background: var(--ant-color-warning-bg, rgba(245, 158, 11, 0.05));
 }
 
+.policyKeep .offloadBar {
+  background: var(--ant-color-warning-bg, rgba(245, 158, 11, 0.06));
+}
+
+.policyOffload .offloadBar {
+  background: var(--ant-color-primary-bg, rgba(22, 119, 255, 0.06));
+}
+
 .bgMode .offloadBar {
   background: var(--ant-color-primary-bg, rgba(139, 139, 255, 0.05));
 }
@@ -69,6 +86,14 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.policyKeep .offloadInfo {
+  color: var(--ant-color-warning, #d48806);
+}
+
+.policyOffload .offloadInfo {
+  color: var(--ant-color-primary, #1677ff);
 }
 
 .bgMode .offloadInfo {
@@ -102,6 +127,10 @@
   white-space: nowrap;
   display: inline-flex;
   align-items: center;
+}
+
+.policyOffload .timerCaption {
+  color: var(--ant-color-primary, #1677ff);
 }
 
 .timerCluster.urgent .timerCaption {
@@ -138,6 +167,10 @@
     stroke 0.5s;
 }
 
+.policyOffload .ringProgress {
+  stroke: var(--ant-color-primary, #1677ff);
+}
+
 .ringProgress.urgent {
   stroke: var(--ant-color-error, #ff4d4f);
 }
@@ -151,6 +184,10 @@
   font-size: 9px;
   font-weight: 700;
   color: var(--ant-color-warning, #d48806);
+}
+
+.policyOffload .timerCount {
+  color: var(--ant-color-primary, #1677ff);
 }
 
 .timerCount.urgent {
@@ -218,6 +255,11 @@
   font-weight: 700;
   border-color: var(--ant-color-warning-border, rgba(245, 158, 11, 0.35));
   background: var(--ant-color-warning-bg, rgba(245, 158, 11, 0.06));
+}
+
+.policyOffload .primaryAct {
+  border-color: var(--ant-color-primary-border, rgba(22, 119, 255, 0.35));
+  background: var(--ant-color-primary-bg, rgba(22, 119, 255, 0.06));
 }
 
 .offloadBtn .ico {
@@ -384,12 +426,28 @@
     background: rgba(245, 158, 11, 0.05);
   }
 
+  .policyKeep .offloadBar {
+    background: rgba(245, 158, 11, 0.06);
+  }
+
+  .policyOffload .offloadBar {
+    background: rgba(22, 119, 255, 0.08);
+  }
+
   .bgMode .offloadBar {
     background: rgba(139, 139, 255, 0.05);
   }
 
   .offloadInfo {
     color: #f59e0b;
+  }
+
+  .policyKeep .offloadInfo {
+    color: #f59e0b;
+  }
+
+  .policyOffload .offloadInfo {
+    color: #69b1ff;
   }
 
   .bgMode .offloadInfo {
@@ -404,12 +462,24 @@
     stroke: #f59e0b;
   }
 
+  .policyOffload .ringProgress {
+    stroke: #69b1ff;
+  }
+
   .timerCount {
     color: #f59e0b;
   }
 
+  .policyOffload .timerCount {
+    color: #69b1ff;
+  }
+
   .timerCaption {
     color: #f59e0b;
+  }
+
+  .policyOffload .timerCaption {
+    color: #69b1ff;
   }
 
   .timerCluster.urgent .timerCaption {
@@ -419,6 +489,19 @@
   .primaryAct {
     border-color: rgba(245, 158, 11, 0.35);
     background: rgba(245, 158, 11, 0.08);
+  }
+
+  .policyOffload .primaryAct {
+    border-color: rgba(22, 119, 255, 0.4);
+    background: rgba(22, 119, 255, 0.1);
+  }
+
+  .policyKeep {
+    border-color: rgba(245, 158, 11, 0.28);
+  }
+
+  .policyOffload {
+    border-color: rgba(22, 119, 255, 0.35);
   }
 
   .offloadBtn {

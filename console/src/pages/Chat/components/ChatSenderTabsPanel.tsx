@@ -6,6 +6,7 @@ import {
   SparkErrorCircleLine,
   SparkPauseLine,
   SparkPlayFill,
+  SparkStopCircleLine,
 } from "@agentscope-ai/icons";
 import { useTheme } from "../../../contexts/ThemeContext";
 import {
@@ -80,7 +81,7 @@ export default function ChatSenderTabsPanel({
   const isPausedOrError = runState === "paused" || runState === "error";
 
   const [activeTab, setActiveTab] = useState<TabKey>(() =>
-    hasRunningBg ? "bg" : hasQueue ? "queue" : "bg",
+    hasRunningBg ? "bg" : hasQueue ? "queue" : hasBg ? "bg" : "queue",
   );
 
   useEffect(() => {
@@ -160,12 +161,26 @@ export default function ChatSenderTabsPanel({
     fontSize: 11,
     padding: "2px 10px",
     borderRadius: 999,
-    lineHeight: "18px",
+    lineHeight: 1,
     height: 24,
     display: "inline-flex" as const,
     alignItems: "center" as const,
+    justifyContent: "center" as const,
     gap: 4,
     cursor: "pointer" as const,
+  };
+
+  const chipIconStyle = {
+    fontSize: 12,
+    display: "block" as const,
+    flexShrink: 0,
+    lineHeight: 1,
+  };
+
+  const chipLabelStyle = {
+    lineHeight: 1,
+    display: "inline-flex" as const,
+    alignItems: "center" as const,
   };
 
   const renderTab = (
@@ -232,7 +247,10 @@ export default function ChatSenderTabsPanel({
             cursor: batchBusy || !hasRunningBg ? "not-allowed" : "pointer",
           }}
         >
-          {t("tool.control.bgQueue.cancelAll", "Cancel all")}
+          <SparkStopCircleLine style={{ ...chipIconStyle, color: "#ff4d4f" }} />
+          <span style={chipLabelStyle}>
+            {t("tool.control.bgQueue.cancelAll", "Cancel all")}
+          </span>
         </button>
         <button
           type="button"
@@ -247,7 +265,10 @@ export default function ChatSenderTabsPanel({
                 : "pointer",
           }}
         >
-          {t("tool.control.bgQueue.clearAll", "Clear all")}
+          <SparkClearLine style={{ ...chipIconStyle, color: mutedColor }} />
+          <span style={chipLabelStyle}>
+            {t("tool.control.bgQueue.clearAll", "Clear all")}
+          </span>
         </button>
       </div>
     ) : activeTab === "queue" && hasQueue ? (
@@ -268,7 +289,7 @@ export default function ChatSenderTabsPanel({
               marginRight: 2,
             }}
           >
-            <SparkErrorCircleLine style={{ fontSize: 11 }} />
+            <SparkErrorCircleLine style={{ fontSize: 11, display: "block" }} />
             {t("chat.queue.sendFailed")}
           </span>
         )}
@@ -287,11 +308,11 @@ export default function ChatSenderTabsPanel({
             }
           >
             {isPausedOrError ? (
-              <SparkPlayFill style={{ fontSize: 12, color: "#52c41a" }} />
+              <SparkPlayFill style={{ ...chipIconStyle, color: "#52c41a" }} />
             ) : (
-              <SparkPauseLine style={{ fontSize: 12, color: "#faad14" }} />
+              <SparkPauseLine style={{ ...chipIconStyle, color: "#faad14" }} />
             )}
-            <span>
+            <span style={chipLabelStyle}>
               {isPausedOrError ? t("chat.queue.resume") : t("chat.queue.pause")}
             </span>
           </button>
@@ -304,8 +325,8 @@ export default function ChatSenderTabsPanel({
               style={chipBtnStyle}
               aria-label={t("chat.queue.clear")}
             >
-              <SparkClearLine style={{ fontSize: 12, color: mutedColor }} />
-              <span>{t("chat.queue.clear")}</span>
+              <SparkClearLine style={{ ...chipIconStyle, color: mutedColor }} />
+              <span style={chipLabelStyle}>{t("chat.queue.clear")}</span>
             </button>
           </Tooltip>
         )}
@@ -343,14 +364,6 @@ export default function ChatSenderTabsPanel({
             minWidth: 0,
           }}
         >
-          {hasBg &&
-            renderTab(
-              "bg",
-              t("tool.control.bgQueue.title", "Background tasks"),
-              sessionTasks.length,
-              bgBadgeBg,
-              bgBadgeColor,
-            )}
           {hasQueue &&
             renderTab(
               "queue",
@@ -358,6 +371,14 @@ export default function ChatSenderTabsPanel({
               queueItems.length,
               isDark ? "rgba(24,144,255,0.2)" : "rgba(24,144,255,0.12)",
               "#1677ff",
+            )}
+          {hasBg &&
+            renderTab(
+              "bg",
+              t("tool.control.bgQueue.title", "Background tasks"),
+              sessionTasks.length,
+              bgBadgeBg,
+              bgBadgeColor,
             )}
         </div>
         {tabActions && (

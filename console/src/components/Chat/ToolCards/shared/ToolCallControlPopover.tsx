@@ -210,8 +210,8 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
   return (
     <div
       className={`${styles.offloadBanner} ${
-        collapsing ? styles.collapsing : ""
-      }`}
+        isOffloadPolicy ? styles.policyOffload : styles.policyKeep
+      } ${collapsing ? styles.collapsing : ""}`}
     >
       <div className={styles.offloadBar}>
         <div className={styles.offloadInfo}>{title}</div>
