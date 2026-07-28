@@ -451,14 +451,12 @@ async def _execute_windows_host(
     lifetime follows ``kill_deadline`` (extend / ``no_deadline`` / cancel)
     rather than a frozen copy of the original command timeout.
     """
-    from ...tool_calls import get_call_context
+    from ...tool_calls import arm_kill_deadline, get_call_context
 
     stop_event = threading.Event()
     ctx = get_call_context()
-    if ctx is not None and ctx.kill_deadline is None:
-        loop = asyncio.get_running_loop()
-        ctx.kill_deadline = loop.time() + timeout
-        ctx.deadline_changed_event.set()
+    if ctx is not None:
+        arm_kill_deadline(ctx, timeout)
 
     # Context present: coordinator owns kill via cancel_event → stop_event.
     # No context (SDK/direct): keep a local sync wall-clock timeout.
@@ -515,7 +513,11 @@ async def _execute_in_sandbox(
     timeout — that would collapse offload and kill into the same instant).
     """
     from ...sandbox import create_sandbox
-    from ...tool_calls import cancellable_wait, get_call_context
+    from ...tool_calls import (
+        COORDINATOR_OWNED_EXEC_TIMEOUT_SECS,
+        cancellable_wait,
+        get_call_context,
+    )
 
     # Sandbox backends rebuild their environment from os.environ. Carry over
     # the PATH adjusted by the shell entrypoint unless policy set one itself.
@@ -527,13 +529,20 @@ async def _execute_in_sandbox(
         )
         sandbox_env[path_key] = env[path_key]
 
+    ctx = get_call_context()
+    # Under ToolCallContext the coordinator owns kill via cancellable_wait /
+    # cancel_event. Do not freeze sandbox wait_for to the original timeout or
+    # ``extend_kill_deadline`` cannot actually prolong execution.
+    sandbox_timeout = (
+        COORDINATOR_OWNED_EXEC_TIMEOUT_SECS
+        if ctx is not None
+        else int(timeout)
+    )
     effective_config = replace(
         sandbox_config,
-        timeout_seconds=int(timeout),
+        timeout_seconds=sandbox_timeout,
         env_vars=sandbox_env,
     )
-
-    ctx = get_call_context()
     loop = asyncio.get_running_loop()
     setup_started_at = loop.time()
     original_offload = None

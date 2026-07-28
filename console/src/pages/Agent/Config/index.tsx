@@ -8,7 +8,7 @@ import {
   LlmRetryCard,
   LlmRateLimiterCard,
   ToolExecutionLevelCard,
-  OffloadPolicyCard,
+  OffloadPolicyRedirectCard,
   AgentLoopCard,
 } from "./components";
 import { PageHeader } from "@/components/PageHeader";
@@ -226,7 +226,7 @@ function AgentConfigPage() {
       ),
       children: (
         <div className={styles.tabContent}>
-          <OffloadPolicyCard />
+          <OffloadPolicyRedirectCard />
         </div>
       ),
     });

@@ -15,6 +15,8 @@ export interface ToolCallInfo {
   end_state?: string | null;
   force_cancelled?: boolean;
   extra?: Record<string, unknown>;
+  /** Hook hard cap from start; extend-kill must stay below this. */
+  max_internal_timeout_secs?: number | null;
 }
 
 export interface ToolCallListResponse {

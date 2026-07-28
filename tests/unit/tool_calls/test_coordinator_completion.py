@@ -946,3 +946,228 @@ async def test_force_cancel_sets_cancel_event_before_task_cancel():
     assert entry.force_cancelled is True
 
     await asyncio.wait_for(task, timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_equal_timeout_budget_offloads_before_kill():
+    """Default equal offload/kill budgets must still auto-offload.
+
+    Regression for review P1: when hook timeout equals tool kill timeout,
+    kill must not win at the same instant and skip backgrounding.
+    """
+    coordinator = ToolCoordinator(
+        default_timeout_secs=0.08,
+        offload_on_deadline=True,
+    )
+    tool_call = _ToolCall(id="call-equal-budget", name="equal_budget_tool")
+    release = asyncio.Event()
+    saw_cancel = asyncio.Event()
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        from qwenpaw.tool_calls import cancellable_wait
+
+        # Arm kill to the same budget the coordinator resolved for offload.
+        try:
+            await cancellable_wait(
+                release.wait(),
+                fallback_secs=0.08,
+                as_kill_deadline=True,
+            )
+        except asyncio.CancelledError:
+            saw_cancel.set()
+            raise
+        yield _text_response(tool_call.id, "should-not-matter")
+
+    events = await asyncio.wait_for(
+        _collect(
+            coordinator.execute(
+                tool_call=tool_call,
+                next_handler=next_handler,
+                session_id="session-equal-budget",
+                agent_id="agent-1",
+                root_session_id="root-1",
+            ),
+        ),
+        timeout=2,
+    )
+
+    assert events[-1].metadata.get("offloaded") is True
+    entry = coordinator.get("call-equal-budget")
+    assert entry is not None
+    assert entry.status.value == "offloaded"
+    assert not entry.ctx.cancel_event.is_set()
+    assert entry.ctx.kill_deadline is not None
+    remaining = entry.ctx.kill_deadline - asyncio.get_running_loop().time()
+    assert remaining > 0.02
+    assert not saw_cancel.is_set()
+
+    release.set()
+    await asyncio.wait_for(
+        _wait_for_hint(coordinator, "session-equal-budget"),
+        timeout=2,
+    )
+
+
+@pytest.mark.asyncio
+async def test_extend_kill_allows_tool_past_original_budget():
+    """extend_kill must keep a tool alive past its first kill budget."""
+    coordinator = ToolCoordinator(offload_on_deadline=False)
+    tool_call = _ToolCall(id="call-extend-e2e", name="slow_tool")
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        from qwenpaw.tool_calls import cancellable_wait
+
+        await cancellable_wait(
+            asyncio.sleep(0.25),
+            fallback_secs=0.08,
+            as_kill_deadline=True,
+        )
+        yield _text_response(tool_call.id, "survived-extend")
+
+    async def extend_soon() -> None:
+        await asyncio.sleep(0.04)
+        ok = await coordinator.extend_kill_deadline(
+            "call-extend-e2e",
+            seconds=1.0,
+        )
+        assert ok is True
+
+    ext_task = asyncio.create_task(extend_soon())
+    events = await asyncio.wait_for(
+        _collect(
+            coordinator.execute(
+                tool_call=tool_call,
+                next_handler=next_handler,
+                session_id="session-extend-e2e",
+                agent_id="agent-1",
+                root_session_id="root-1",
+            ),
+        ),
+        timeout=2,
+    )
+    await ext_task
+    assert any(
+        getattr(evt, "content", None)
+        and any(
+            getattr(b, "text", "") == "survived-extend" for b in evt.content
+        )
+        for evt in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_extend_kill_keeps_chat_style_async_collect_alive():
+    """chat_with_agent-style async wait must survive past original timeout."""
+    coordinator = ToolCoordinator(offload_on_deadline=False)
+    tool_call = _ToolCall(id="call-chat-extend", name="chat_with_agent")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        from qwenpaw.tool_calls import cancellable_wait
+
+        async def collect_hang() -> str:
+            started.set()
+            await release.wait()
+            return "peer-ok"
+
+        await cancellable_wait(
+            collect_hang(),
+            fallback_secs=0.08,
+            as_kill_deadline=True,
+        )
+        yield _text_response(tool_call.id, "chat-survived-extend")
+
+    async def extend_soon() -> None:
+        await started.wait()
+        await asyncio.sleep(0.04)
+        ok = await coordinator.extend_kill_deadline(
+            "call-chat-extend",
+            seconds=1.0,
+        )
+        assert ok is True
+        # Past original 0.08s kill budget; tool must still be running.
+        await asyncio.sleep(0.08)
+        assert release.is_set() is False
+        release.set()
+
+    ext_task = asyncio.create_task(extend_soon())
+    events = await asyncio.wait_for(
+        _collect(
+            coordinator.execute(
+                tool_call=tool_call,
+                next_handler=next_handler,
+                session_id="session-chat-extend",
+                agent_id="agent-1",
+                root_session_id="root-1",
+            ),
+        ),
+        timeout=2,
+    )
+    await ext_task
+    assert any(
+        getattr(evt, "content", None)
+        and any(
+            getattr(b, "text", "") == "chat-survived-extend"
+            for b in evt.content
+        )
+        for evt in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_offloaded_rejects_clearing_kill_deadline():
+    """OFFLOADED tasks must keep a hard kill bound (no_deadline refused)."""
+    coordinator = ToolCoordinator(
+        default_timeout_secs=0.05,
+        offload_on_deadline=True,
+    )
+    tool_call = _ToolCall(id="call-no-clear-kill", name="bound_tool")
+    release = asyncio.Event()
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        from qwenpaw.tool_calls import cancellable_wait
+
+        await cancellable_wait(
+            release.wait(),
+            fallback_secs=5.0,
+            as_kill_deadline=True,
+        )
+        yield _text_response(tool_call.id, "done")
+
+    events = await asyncio.wait_for(
+        _collect(
+            coordinator.execute(
+                tool_call=tool_call,
+                next_handler=next_handler,
+                session_id="session-no-clear-kill",
+                agent_id="agent-1",
+                root_session_id="root-1",
+            ),
+        ),
+        timeout=2,
+    )
+    assert events[-1].metadata.get("offloaded") is True
+
+    ok = await coordinator.extend_kill_deadline(
+        "call-no-clear-kill",
+        no_deadline=True,
+    )
+    assert ok is False
+    entry = coordinator.get("call-no-clear-kill")
+    assert entry is not None
+    assert entry.ctx.kill_deadline is not None
+
+    release.set()
+    await asyncio.wait_for(
+        _wait_for_hint(coordinator, "session-no-clear-kill"),
+        timeout=2,
+    )

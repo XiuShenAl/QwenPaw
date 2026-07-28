@@ -2,8 +2,7 @@ import { useEffect, useState } from "react";
 import { Card, Radio, Space, Typography, Alert, Spin, message } from "antd";
 import { Clock } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { toolCallsApi } from "../../../../api/modules/toolCalls";
-import styles from "../index.module.less";
+import { toolCallsApi } from "../../../api/modules/toolCalls";
 
 const { Text, Paragraph } = Typography;
 
@@ -42,19 +41,22 @@ export function OffloadPolicyCard() {
   const options = [
     {
       value: "keep_foreground" as OffloadPolicy,
-      label: t("agentConfig.offloadPolicy.keepForeground", "保持前台执行"),
+      label: t("agentConfig.offloadPolicy.keepForeground", "Keep Foreground"),
       description: t(
         "agentConfig.offloadPolicy.keepForegroundDesc",
-        "倒计时结束后工具继续在前台运行，不自动转入后台。适合需要实时查看输出的场景。",
+        "After the countdown expires, the tool continues running in the foreground without auto-offloading. Suitable for scenarios requiring real-time output monitoring.",
       ),
       color: "#faad14",
     },
     {
       value: "offload" as OffloadPolicy,
-      label: t("agentConfig.offloadPolicy.offload", "自动转入后台"),
+      label: t(
+        "agentConfig.offloadPolicy.offload",
+        "Auto Offload to Background",
+      ),
       description: t(
         "agentConfig.offloadPolicy.offloadDesc",
-        "倒计时结束后工具自动转入后台执行，Agent 可继续处理其他任务。适合长时间运行的工具。",
+        "After the countdown expires, the tool is automatically moved to background execution, allowing the Agent to continue processing other tasks. Suitable for long-running tools.",
       ),
       color: "#1890ff",
     },
@@ -62,11 +64,10 @@ export function OffloadPolicyCard() {
 
   return (
     <Card
-      className={styles.formCard}
       title={
         <Space>
           <Clock size={18} />
-          {t("agentConfig.offloadPolicy.title", "工具后台执行策略")}
+          {t("agentConfig.offloadPolicy.title", "Tool Background Execution")}
         </Space>
       }
     >
@@ -74,7 +75,7 @@ export function OffloadPolicyCard() {
         type="info"
         message={t(
           "agentConfig.offloadPolicy.alertMessage",
-          "配置工具执行达到转入后台时限后的默认行为。用户可在工具执行时通过控制面板实时覆盖此设置。",
+          "This is a global setting (settings.json), not per-agent. It controls the default action when a tool reaches its offload deadline. Users can override it from the tool control panel while a tool is running.",
         )}
         style={{ marginBottom: 24 }}
         showIcon
@@ -95,7 +96,6 @@ export function OffloadPolicyCard() {
             {options.map((option) => (
               <Card
                 key={option.value}
-                className={styles.levelOptionCard}
                 style={{
                   borderColor:
                     policy === option.value ? option.color : undefined,

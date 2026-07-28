@@ -285,11 +285,12 @@ async def test_check_agent_task_formats_finished_background_result(
     assert "Background reply" in text
 
 
-async def test_chat_with_agent_uses_to_thread_for_final_mode(monkeypatch):
-    monkeypatch.setattr(
-        agent_management,
-        "collect_final_agent_chat_response",
-        lambda *_args, **_kwargs: {
+async def test_chat_with_agent_uses_async_collect_for_final_mode(monkeypatch):
+    calls = []
+
+    async def fake_collect_async(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {
             "output": [
                 {
                     "content": [
@@ -297,16 +298,13 @@ async def test_chat_with_agent_uses_to_thread_for_final_mode(monkeypatch):
                     ],
                 },
             ],
-        },
+        }
+
+    monkeypatch.setattr(
+        agent_management,
+        "collect_final_agent_chat_response_async",
+        fake_collect_async,
     )
-
-    calls = []
-
-    async def fake_to_thread(func, *args, **kwargs):
-        calls.append((func, args, kwargs))
-        return func(*args, **kwargs)
-
-    monkeypatch.setattr(agent_management.asyncio, "to_thread", fake_to_thread)
     monkeypatch.setattr(
         agent_management,
         "resolve_calling_agent_id",
@@ -324,7 +322,6 @@ async def test_chat_with_agent_uses_to_thread_for_final_mode(monkeypatch):
     )
 
     assert calls
-    assert calls[-1][0] is agent_management.collect_final_agent_chat_response
     assert "reply from peer" in response.content[0].text
 
 
@@ -335,10 +332,8 @@ async def test_chat_with_agent_arms_kill_deadline_from_timeout(monkeypatch):
     from qwenpaw.tool_calls import reset_call_context, set_call_context
     from qwenpaw.tool_calls._context import ToolCallContext
 
-    monkeypatch.setattr(
-        agent_management,
-        "collect_final_agent_chat_response",
-        lambda *_args, **_kwargs: {
+    async def fake_collect_async(*_args, **_kwargs):
+        return {
             "output": [
                 {
                     "content": [
@@ -346,16 +341,12 @@ async def test_chat_with_agent_arms_kill_deadline_from_timeout(monkeypatch):
                     ],
                 },
             ],
-        },
-    )
-
-    async def immediate_to_thread(func, *args, **kwargs):
-        return func(*args, **kwargs)
+        }
 
     monkeypatch.setattr(
-        agent_management.asyncio,
-        "to_thread",
-        immediate_to_thread,
+        agent_management,
+        "collect_final_agent_chat_response_async",
+        fake_collect_async,
     )
     monkeypatch.setattr(
         agent_management,
@@ -392,7 +383,12 @@ async def test_chat_with_agent_arms_kill_deadline_from_timeout(monkeypatch):
 async def test_chat_with_agent_normalizes_agent_ids(monkeypatch):
     captured = {}
 
-    def fake_collect_final(_base_url, request_payload, to_agent, _timeout):
+    async def fake_collect_async(
+        _base_url,
+        request_payload,
+        to_agent,
+        _timeout,
+    ):
         captured["to_agent"] = to_agent
         captured["session_id"] = request_payload["session_id"]
         captured["text"] = request_payload["input"][0]["content"][0]["text"]
@@ -406,15 +402,11 @@ async def test_chat_with_agent_normalizes_agent_ids(monkeypatch):
             ],
         }
 
-    async def fake_to_thread(func, *args, **kwargs):
-        return func(*args, **kwargs)
-
     monkeypatch.setattr(
         agent_management,
-        "collect_final_agent_chat_response",
-        fake_collect_final,
+        "collect_final_agent_chat_response_async",
+        fake_collect_async,
     )
-    monkeypatch.setattr(agent_management.asyncio, "to_thread", fake_to_thread)
     monkeypatch.setattr(
         agent_management,
         "agent_exists",

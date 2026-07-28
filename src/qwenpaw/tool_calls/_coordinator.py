@@ -19,6 +19,10 @@ from ._entry import ToolCallEntry, ToolCallStatus
 from ._hint import make_offload_hint_msg
 from ._hooks import ToolHookRegistry
 from ._stream import ToolStream, _SENTINEL as _STREAM_SENTINEL
+from ._timeout_helper import (
+    MIN_BACKGROUND_WINDOW_SECS,
+    OFFLOAD_TIMEOUT_RATIO,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +203,12 @@ class ToolCoordinator:
             tool_call.name,
             deadline_override,
         )
+        offload_deadline = None
+        if timeout is not None:
+            # Reserve the second half of the timeout for background execution
+            # so equal hook/tool budgets do not let kill win over offload.
+            offload_secs = max(0.0, timeout * OFFLOAD_TIMEOUT_RATIO)
+            offload_deadline = now + offload_secs
         ctx = ToolCallContext(
             tool_call_id=tool_call.id,
             tool_name=tool_call.name,
@@ -206,7 +216,7 @@ class ToolCoordinator:
             agent_id=agent_id,
             root_session_id=root_session_id,
             started_at=now,
-            offload_deadline=now + timeout if timeout is not None else None,
+            offload_deadline=offload_deadline,
             cancel_event=asyncio.Event(),
         )
         return ToolCallEntry(
@@ -443,7 +453,8 @@ class ToolCoordinator:
         cap = hook.max_internal_timeout_secs
 
         if no_deadline:
-            if cap is not None:
+            # Cap or OFFLOADED: refuse clearing the last hard execution bound.
+            if cap is not None or entry.status == ToolCallStatus.OFFLOADED:
                 return False
             entry.ctx.kill_deadline = None
             entry.ctx.deadline_changed_event.set()
@@ -455,9 +466,8 @@ class ToolCoordinator:
         loop = asyncio.get_running_loop()
         base = entry.ctx.kill_deadline or loop.time()
         new_deadline = base + seconds
-        if cap is not None:
-            if new_deadline > entry.ctx.started_at + cap:
-                return False
+        if cap is not None and new_deadline > entry.ctx.started_at + cap:
+            return False
         entry.ctx.kill_deadline = new_deadline
         entry.ctx.deadline_changed_event.set()
         return True
@@ -588,11 +598,18 @@ class ToolCoordinator:
                 timeout=remaining,
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            for t in pending:
-                t.cancel()
+            if pending:
+                for t in pending:
+                    t.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
         except asyncio.CancelledError:
             for t in waiters.values():
-                t.cancel()
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(
+                *waiters.values(),
+                return_exceptions=True,
+            )
             raise
 
         if "chunk" in waiters and waiters["chunk"] in done:
@@ -916,23 +933,51 @@ class ToolCoordinator:
         self,
         ctx: ToolCallContext,
     ) -> bool:
-        """Ensure background offload has a hard kill bound.
+        """Ensure background offload has a usable hard kill bound.
 
-        Returns True when ``kill_deadline`` already exists or was seeded from
-        the tool/coordinator timeout. Returns False when no bound is
-        available (caller should refuse offload / cancel instead).
+        Returns True when ``kill_deadline`` already has enough remaining
+        budget, or was seeded/topped up from the tool/coordinator timeout.
+        Returns False when no bound is available (caller should refuse
+        offload / cancel instead).
+
+        Note: topping up to ``MIN_BACKGROUND_WINDOW_SECS`` can make a short
+        tool's total lifetime exceed its original timeout (e.g. 15s grep
+        offloads at ~7.5s then may run up to +30s in background). This is
+        intentional so offloaded work keeps a usable bounded window.
         """
-        if ctx.kill_deadline is not None:
-            return True
+        loop = asyncio.get_running_loop()
+        now = loop.time()
         bound = self._resolve_timeout(ctx.agent_id, ctx.tool_name, None)
+
+        if ctx.kill_deadline is not None:
+            remaining = ctx.kill_deadline - now
+            if remaining >= MIN_BACKGROUND_WINDOW_SECS:
+                return True
+            if remaining > 0 and (bound is None or bound <= 0):
+                return True
+            if bound is None or bound <= 0:
+                return remaining > 0
+            seed = max(MIN_BACKGROUND_WINDOW_SECS, bound)
+            ctx.kill_deadline = now + seed
+            ctx.deadline_changed_event.set()
+            logger.info(
+                "Topped up kill_deadline (+%.1fs) for offload of %s/%s "
+                "(was %.1fs remaining)",
+                seed,
+                ctx.tool_name,
+                ctx.tool_call_id,
+                remaining,
+            )
+            return True
+
         if bound is None or bound <= 0:
             return False
-        loop = asyncio.get_running_loop()
-        ctx.kill_deadline = loop.time() + bound
+        seed = max(MIN_BACKGROUND_WINDOW_SECS, bound)
+        ctx.kill_deadline = now + seed
         ctx.deadline_changed_event.set()
         logger.info(
             "Seeded kill_deadline (+%.1fs) for offload of %s/%s",
-            bound,
+            seed,
             ctx.tool_name,
             ctx.tool_call_id,
         )

@@ -1,22 +1,25 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const cancelApi = vi.fn();
+const getOutputApi = vi.fn();
 const messageError = vi.fn();
+const messageSuccess = vi.fn();
 
 vi.mock("../api/modules/toolCalls", () => ({
   toolCallsApi: {
     cancel: (...args: unknown[]) => cancelApi(...args),
-    getOutput: vi.fn(),
+    getOutput: (...args: unknown[]) => getOutputApi(...args),
   },
   subscribeToolCallStream: () => () => {},
-  extractOutputText: () => "",
+  extractOutputText: (output: { content?: Array<{ text?: string }> }) =>
+    output.content?.[0]?.text || "",
 }));
 
 vi.mock("antd", () => ({
   message: {
     error: (...args: unknown[]) => messageError(...args),
     info: vi.fn(),
-    success: vi.fn(),
+    success: (...args: unknown[]) => messageSuccess(...args),
   },
 }));
 
@@ -31,13 +34,16 @@ vi.mock("../utils/resolveBackendSessionId", () => ({
 import { useBackgroundTasksStore } from "../stores/backgroundTasksStore";
 import {
   cancelBackgroundTask,
+  registerBackgroundTask,
   stopBackgroundWatchersNotInSession,
 } from "./useBackgroundTaskWatcher";
 
 describe("useBackgroundTaskWatcher session isolation", () => {
   beforeEach(() => {
     cancelApi.mockReset();
+    getOutputApi.mockReset();
     messageError.mockReset();
+    messageSuccess.mockReset();
     useBackgroundTasksStore.setState({ tasks: [] });
   });
 
@@ -77,5 +83,30 @@ describe("useBackgroundTaskWatcher session isolation", () => {
     );
     expect(cancelApi).not.toHaveBeenCalled();
     expect(messageError).toHaveBeenCalled();
+  });
+
+  it("hydrates /output immediately when alreadyCompleted", async () => {
+    getOutputApi.mockResolvedValue({
+      tool_call_id: "tc-fast",
+      is_closed: true,
+      final_state: "success",
+      content: [{ text: "fast-done" }],
+    });
+
+    registerBackgroundTask({
+      sessionId: "sid-fast",
+      toolCallId: "tc-fast",
+      toolName: "shell",
+      alreadyCompleted: true,
+    });
+
+    await vi.waitFor(() => {
+      const task = useBackgroundTasksStore
+        .getState()
+        .tasks.find((t) => t.toolCallId === "tc-fast");
+      expect(task?.status).toBe("done");
+      expect(task?.result).toBe("fast-done");
+    });
+    expect(getOutputApi).toHaveBeenCalledWith("sid-fast", "tc-fast");
   });
 });

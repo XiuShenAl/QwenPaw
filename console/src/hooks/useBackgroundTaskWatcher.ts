@@ -166,8 +166,15 @@ export function registerBackgroundTask(opts: {
   toolCallId: string;
   toolName: string;
   startTime?: number;
+  /** When true, skip SSE and hydrate /output immediately (fast bg finish). */
+  alreadyCompleted?: boolean;
 }): void {
-  const { toolCallId, toolName, startTime = Date.now() } = opts;
+  const {
+    toolCallId,
+    toolName,
+    startTime = Date.now(),
+    alreadyCompleted = false,
+  } = opts;
   if (!toolCallId) return;
 
   const resolvedSessionId = resolveBackendSessionId(opts.sessionId);
@@ -179,11 +186,7 @@ export function registerBackgroundTask(opts: {
     startTime,
   });
 
-  // Watcher needs a session id for API paths; retry briefly if still empty.
-  const startWatcher = (sid: string) => {
-    if (!sid) return false;
-    startBackgroundTaskWatcher(sid, toolCallId);
-    // Back-fill sessionId on the task if it was empty at enqueue time.
+  const backfillSessionId = (sid: string) => {
     useBackgroundTasksStore.setState((state) => ({
       tasks: state.tasks.map((t) =>
         t.toolCallId === toolCallId && !t.sessionId
@@ -191,6 +194,34 @@ export function registerBackgroundTask(opts: {
           : t,
       ),
     }));
+  };
+
+  if (alreadyCompleted) {
+    const hydrate = (sid: string) => {
+      if (!sid) return false;
+      backfillSessionId(sid);
+      void finalizeFromOutput(sid, toolCallId, "", false);
+      return true;
+    };
+    if (!hydrate(resolvedSessionId)) {
+      let attempts = 0;
+      const timer = setInterval(() => {
+        attempts += 1;
+        const sid = resolveBackendSessionId();
+        if (hydrate(sid) || attempts >= 20) {
+          clearInterval(timer);
+        }
+      }, 250);
+    }
+    return;
+  }
+
+  // Watcher needs a session id for API paths; retry briefly if still empty.
+  const startWatcher = (sid: string) => {
+    if (!sid) return false;
+    startBackgroundTaskWatcher(sid, toolCallId);
+    // Back-fill sessionId on the task if it was empty at enqueue time.
+    backfillSessionId(sid);
     return true;
   };
 

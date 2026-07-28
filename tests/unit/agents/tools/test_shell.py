@@ -699,23 +699,241 @@ class TestExecuteShellCommand:
 
 
 @pytest.mark.asyncio
+async def test_sandbox_under_ctx_does_not_freeze_original_timeout(tmp_path):
+    """With ToolCallContext, sandbox wait must not freeze the tool timeout."""
+    import asyncio
+
+    from qwenpaw.tool_calls import (
+        COORDINATOR_OWNED_EXEC_TIMEOUT_SECS,
+        reset_call_context,
+        set_call_context,
+    )
+    from qwenpaw.tool_calls._context import ToolCallContext
+
+    loop = asyncio.get_running_loop()
+    ctx = ToolCallContext(
+        tool_call_id="tc-sandbox-extend",
+        tool_name="execute_shell_command",
+        session_id="s",
+        agent_id="a",
+        root_session_id="r",
+        started_at=loop.time(),
+        offload_deadline=loop.time() + 30,
+        cancel_event=asyncio.Event(),
+    )
+    token = set_call_context(ctx)
+
+    sandbox = AsyncMock()
+    sandbox.execute.return_value = ExecutionResult(0, "ok", "")
+    context_manager = MagicMock()
+    context_manager.__aenter__ = AsyncMock(return_value=sandbox)
+    context_manager.__aexit__ = AsyncMock(return_value=None)
+    config = SandboxConfig(
+        mode=SandboxMode.NONE,
+        workspace_dir=str(tmp_path),
+    )
+
+    try:
+        with patch(
+            "qwenpaw.sandbox.create_sandbox",
+            return_value=context_manager,
+        ) as create_sandbox:
+            await _execute_in_sandbox(
+                "echo ok",
+                config,
+                12.0,
+                str(tmp_path),
+                {"PATH": "/bin"},
+            )
+        effective_config = create_sandbox.call_args.args[0]
+        assert (
+            effective_config.timeout_seconds
+            == COORDINATOR_OWNED_EXEC_TIMEOUT_SECS
+        )
+    finally:
+        reset_call_context(token)
+
+
+@pytest.mark.asyncio
+async def test_sandbox_extend_kill_survives_then_cancel_stops(tmp_path):
+    """extend_kill keeps sandbox past original timeout; cancel calls stop()."""
+    import asyncio
+    from dataclasses import dataclass, field
+    from typing import Any, AsyncGenerator
+
+    from agentscope.message import TextBlock
+    from agentscope.tool import ToolResponse
+
+    from qwenpaw.sandbox.local_sandbox import NoneSandbox
+    from qwenpaw.tool_calls import ToolCoordinator
+
+    @dataclass
+    class _ToolCall:
+        id: str = "call-sandbox-ext"
+        name: str = "execute_shell_command"
+        input: dict[str, Any] = field(default_factory=dict)
+
+    coordinator = ToolCoordinator(offload_on_deadline=False)
+    tool_call = _ToolCall()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    stop_mock = AsyncMock()
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        config = SandboxConfig(
+            mode=SandboxMode.NONE,
+            workspace_dir=str(tmp_path),
+            timeout_seconds=60,
+        )
+        sandbox = NoneSandbox(config)
+        proc = MagicMock()
+        proc.returncode = None
+        proc.pid = 4243
+
+        async def hang_communicate():
+            started.set()
+            await release.wait()
+            return b"survived\n", b""
+
+        proc.communicate = hang_communicate
+        context_manager = MagicMock()
+        context_manager.__aenter__ = AsyncMock(return_value=sandbox)
+        context_manager.__aexit__ = AsyncMock(return_value=None)
+
+        with (
+            patch(
+                "qwenpaw.sandbox.create_sandbox",
+                return_value=context_manager,
+            ),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=proc),
+            ),
+            patch.object(sandbox, "stop", new=stop_mock),
+        ):
+            result = await _execute_in_sandbox(
+                "sleep 1",
+                config,
+                0.08,
+                str(tmp_path),
+                {"PATH": "/bin"},
+            )
+        yield ToolResponse(
+            content=[TextBlock(type="text", text=result.stdout or "")],
+            id=tool_call.id,
+        )
+
+    async def extend_then_cancel() -> None:
+        await started.wait()
+        await asyncio.sleep(0.04)
+        ok = await coordinator.extend_kill_deadline(
+            "call-sandbox-ext",
+            seconds=1.0,
+        )
+        assert ok is True
+        # Past original 0.08s — must still be running (not returned yet).
+        await asyncio.sleep(0.08)
+        assert release.is_set() is False
+        assert stop_mock.await_count == 0
+        cancelled = await coordinator.cancel("call-sandbox-ext")
+        assert cancelled is True
+        await asyncio.sleep(0.05)
+        stop_mock.assert_awaited()
+
+    ctrl = asyncio.create_task(extend_then_cancel())
+    events = await asyncio.wait_for(
+        _collect_sandbox_events(
+            coordinator.execute(
+                tool_call=tool_call,
+                next_handler=next_handler,
+                session_id="session-sandbox-ext",
+                agent_id="agent-1",
+                root_session_id="root-1",
+            ),
+        ),
+        timeout=3,
+    )
+    await ctrl
+    # Cancel may surface as interrupted; key assertion is stop().
+    assert events
+    assert stop_mock.await_count >= 1
+
+
+async def _collect_sandbox_events(iterator):
+    events = []
+    async for item in iterator:
+        events.append(item)
+    return events
+
+
+@pytest.mark.asyncio
+async def test_none_sandbox_execute_cancel_calls_stop(tmp_path):
+    """CancelledError in sandbox.execute must call stop()."""
+    import asyncio
+
+    from qwenpaw.sandbox.local_sandbox import NoneSandbox
+
+    config = SandboxConfig(
+        mode=SandboxMode.NONE,
+        workspace_dir=str(tmp_path),
+        timeout_seconds=60,
+    )
+    sandbox = NoneSandbox(config)
+    proc = MagicMock()
+    proc.returncode = None
+    proc.pid = 4242
+
+    async def hang_communicate():
+        await asyncio.sleep(60)
+        return b"", b""
+
+    proc.communicate = hang_communicate
+    stop_mock = AsyncMock()
+
+    with (
+        patch(
+            "asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=proc),
+        ),
+        patch.object(sandbox, "stop", new=stop_mock),
+    ):
+        task = asyncio.create_task(
+            sandbox.execute("sleep 1", cwd=str(tmp_path)),
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        stop_mock.assert_awaited()
+
+
+@pytest.mark.asyncio
 async def test_sandbox_setup_preserves_offload_remaining_and_arms_kill(
     tmp_path,
 ):
-    """Setup must not rewrite offload_deadline to the command timeout.
+    """Setup must not collapse offload into the command timeout.
 
-    After setup, offload *remaining* matches pre-setup remaining and
-    kill_deadline is registered from the command timeout only.
+    When command kill (12s) is shorter than the pre-setup offload window
+    (30s), arming kill pulls offload back to ``12 * OFFLOAD_TIMEOUT_RATIO``
+    so kill stays strictly later — without rewriting offload to the full
+    command timeout.
     """
     import asyncio
 
-    from qwenpaw.tool_calls import reset_call_context, set_call_context
+    from qwenpaw.tool_calls import (
+        OFFLOAD_TIMEOUT_RATIO,
+        reset_call_context,
+        set_call_context,
+    )
     from qwenpaw.tool_calls._context import ToolCallContext
 
     loop = asyncio.get_running_loop()
     now = loop.time()
     offload_remaining = 30.0
     offload_at = now + offload_remaining
+    command_timeout = 12.0
     ctx = ToolCallContext(
         tool_call_id="tc-sandbox-ddl",
         tool_name="execute_shell_command",
@@ -747,15 +965,22 @@ async def test_sandbox_setup_preserves_offload_remaining_and_arms_kill(
             result = await _execute_in_sandbox(
                 "echo ok",
                 config,
-                12.0,
+                command_timeout,
                 str(tmp_path),
                 {"PATH": "/bin"},
             )
         assert result.exit_code == 0
-        remaining = ctx.offload_deadline - loop.time()
-        assert remaining == pytest.approx(offload_remaining, abs=0.2)
         assert ctx.kill_deadline is not None
-        assert ctx.kill_deadline - loop.time() == pytest.approx(12.0, abs=1.0)
+        kill_remaining = ctx.kill_deadline - loop.time()
+        assert kill_remaining == pytest.approx(command_timeout, abs=1.0)
+        # Short kill pulled offload back; must stay strictly before kill.
+        assert ctx.offload_deadline is not None
+        offload_left = ctx.offload_deadline - loop.time()
+        assert offload_left == pytest.approx(
+            command_timeout * OFFLOAD_TIMEOUT_RATIO,
+            abs=0.5,
+        )
+        assert ctx.offload_deadline < ctx.kill_deadline
         assert not ctx.cancel_event.is_set()
         sandbox.execute.assert_awaited_once()
     finally:

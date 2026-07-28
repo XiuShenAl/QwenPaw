@@ -121,6 +121,7 @@
     "settings": "Settings",
     "models": "Models",
     "environments": "Environments",
+    "offloadPolicy": "Tool Offload",
     "security": "Security",
     "tokenUsage": "Token Usage",
     "agentStats": "Agent Statistics",
@@ -2421,12 +2422,14 @@
     "saveLevelFailed": "Failed to save tool execution security level",
     "offloadPolicy": {
       "title": "Tool Background Execution",
-      "alertMessage": "Configure the default behavior when a tool reaches its offload threshold. Users can override this per-call via the tool control panel.",
+      "alertMessage": "This is a global setting (settings.json), not per-agent. It controls the default action when a tool reaches its offload deadline. Users can override it from the tool control panel while a tool is running.",
       "keepForeground": "Keep Foreground",
       "keepForegroundDesc": "After the countdown expires, the tool continues running in the foreground without auto-offloading. Suitable for scenarios requiring real-time output monitoring.",
       "offload": "Auto Offload to Background",
       "offloadDesc": "After the countdown expires, the tool is automatically moved to background execution, allowing the Agent to continue processing other tasks. Suitable for long-running tools.",
-      "saveFailed": "Failed to save policy"
+      "saveFailed": "Failed to save policy",
+      "movedMessage": "Tool offload policy is a global setting. Manage it under Settings → Tool Offload.",
+      "openSettings": "Open in Settings"
     },
     "maxContextLength": "Max Context Length",
     "maxContextLengthTooltip": "Maximum token count for the model context window, determining how much history fits in each request",
@@ -3297,6 +3300,10 @@
         "killExtended": "Timeout extended by 30s",
         "cancelled": "Tool call cancelled",
         "cancelFailed": "Failed to cancel tool",
+        "actionFailed": "Action failed. The tool may have finished or the request was rejected.",
+        "notFound": "Tool call not found (it may have already finished).",
+        "conflict": "Action rejected (tool state changed or limit reached).",
+        "networkError": "Network error. Check your connection and try again.",
         "bgComplete": "Background tool complete: {{tool}}",
         "bgCancelled": "Background tool cancelled: {{tool}}"
       },

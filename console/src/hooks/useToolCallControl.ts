@@ -15,6 +15,10 @@ export interface ToolCallControlState {
   isBackground: boolean;
   bgElapsed: number;
   defaultPolicy: "offload" | "keep_foreground";
+  /** Absolute hard cap from tool start; null when uncapped. */
+  maxInternalTimeoutSecs: number | null;
+  /** Seconds since tool start (from last backend snapshot + local tick). */
+  elapsed: number;
 }
 
 function resolveSessionId(sessionId: string): string {
@@ -35,11 +39,14 @@ export function useToolCallControl(
     isBackground: false,
     bgElapsed: 0,
     defaultPolicy: "keep_foreground",
+    maxInternalTimeoutSecs: null,
+    elapsed: 0,
   });
 
   const timerRef = useRef<ReturnType<typeof setInterval>>();
   const serverOffloadRef = useRef<number | null>(null);
   const serverKillRef = useRef<number | null>(null);
+  const serverElapsedRef = useRef(0);
   const serverTimestampRef = useRef<number>(0);
   const fetchedRef = useRef(false);
   const autoTriggeredRef = useRef(false);
@@ -121,6 +128,7 @@ export function useToolCallControl(
           ...s,
           offloadRemaining: offR,
           killRemaining: killR,
+          elapsed: serverElapsedRef.current + elapsed,
           bannerVisible: shouldAutoPopup ? true : s.bannerVisible,
           autoTriggered: shouldAutoPopup ? true : s.autoTriggered,
         };
@@ -147,14 +155,30 @@ export function useToolCallControl(
   }, []);
 
   const applyServerValues = useCallback(
-    (offload: number | null, kill: number | null) => {
+    (
+      offload: number | null,
+      kill: number | null,
+      opts?: {
+        elapsed?: number;
+        maxInternalTimeoutSecs?: number | null;
+      },
+    ) => {
       serverOffloadRef.current = offload;
       serverKillRef.current = kill;
+      if (opts?.elapsed != null) {
+        serverElapsedRef.current = opts.elapsed;
+      }
       serverTimestampRef.current = performance.now();
       setState((s) => ({
         ...s,
         offloadRemaining: offload,
         killRemaining: kill,
+        elapsed:
+          opts?.elapsed != null ? opts.elapsed : s.elapsed,
+        maxInternalTimeoutSecs:
+          opts?.maxInternalTimeoutSecs !== undefined
+            ? opts.maxInternalTimeoutSecs
+            : s.maxInternalTimeoutSecs,
       }));
       startLocalCountdown();
     },
@@ -205,6 +229,10 @@ export function useToolCallControl(
       applyServerValues(
         info.offload_remaining ?? null,
         info.kill_remaining ?? null,
+        {
+          elapsed: info.elapsed ?? 0,
+          maxInternalTimeoutSecs: info.max_internal_timeout_secs ?? null,
+        },
       );
     };
 
@@ -253,6 +281,10 @@ export function useToolCallControl(
           applyServerValues(
             info.offload_remaining ?? null,
             info.kill_remaining ?? null,
+            {
+              elapsed: info.elapsed ?? 0,
+              maxInternalTimeoutSecs: info.max_internal_timeout_secs ?? null,
+            },
           );
         }
       } catch {
@@ -300,12 +332,28 @@ export function useToolCallControl(
       void toolCallsApi
         .getInfo(sid, toolCallId)
         .then((info) => {
+          // Offloaded, or already completed after a fast background finish —
+          // register so the watcher can still hydrate from /output.
           if (info.status === "offloaded") {
             tryRegisterBackground("leave-calling-getInfo");
+          } else if (info.status === "completed") {
+            if (autoOffloadRegisteredRef.current) return;
+            autoOffloadRegisteredRef.current = true;
+            registerBackgroundTask({
+              sessionId: sid,
+              toolCallId,
+              toolName: toolNameRef.current || toolCallId,
+              alreadyCompleted: true,
+            });
+            setState((s) => ({
+              ...s,
+              isBackground: true,
+              bannerVisible: false,
+            }));
           }
         })
         .catch(() => {
-          /* entry may already be in completed cache as completed after fast bg finish */
+          /* network blip — poll path may still catch offload */
         });
     }
 
@@ -329,8 +377,15 @@ export function useToolCallControl(
   }, []);
 
   const updateRemaining = useCallback(
-    (offload: number | null, kill: number | null) => {
-      applyServerValues(offload, kill);
+    (
+      offload: number | null,
+      kill: number | null,
+      opts?: {
+        elapsed?: number;
+        maxInternalTimeoutSecs?: number | null;
+      },
+    ) => {
+      applyServerValues(offload, kill, opts);
     },
     [applyServerValues],
   );

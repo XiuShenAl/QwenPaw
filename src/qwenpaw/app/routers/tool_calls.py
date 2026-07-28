@@ -96,7 +96,7 @@ def _get_entry(
     return entry
 
 
-def _entry_to_info(entry: Any) -> ToolCallInfo:
+def _entry_to_info(entry: Any, coordinator: Any = None) -> ToolCallInfo:
     loop = asyncio.get_running_loop()
     now = loop.time()
     elapsed = now - entry.ctx.started_at
@@ -109,6 +109,12 @@ def _entry_to_info(entry: Any) -> ToolCallInfo:
     kill_remaining = None
     if ctx.kill_deadline is not None:
         kill_remaining = max(0.0, ctx.kill_deadline - now)
+
+    max_internal = None
+    if coordinator is not None:
+        hook = coordinator.hooks.get(ctx.tool_name)
+        if hook is not None:
+            max_internal = hook.max_internal_timeout_secs
 
     return ToolCallInfo(
         tool_call_id=ctx.tool_call_id,
@@ -123,7 +129,7 @@ def _entry_to_info(entry: Any) -> ToolCallInfo:
         extra=ctx.extra,
         end_state=entry.end_state,
         force_cancelled=entry.force_cancelled,
-        max_internal_timeout_secs=None,
+        max_internal_timeout_secs=max_internal,
     )
 
 
@@ -156,7 +162,7 @@ async def list_calls(
 ) -> ListResponse:
     coordinator = _get_coordinator(request)
     entries = coordinator.list_entries(session_id=session_id)
-    items = [_entry_to_info(e) for e in entries]
+    items = [_entry_to_info(e, coordinator) for e in entries]
     return ListResponse(items=items, total=len(items))
 
 
@@ -168,7 +174,7 @@ async def get_call(
 ) -> ToolCallInfo:
     coordinator = _get_coordinator(request)
     entry = _get_entry(coordinator, tool_call_id, session_id)
-    return _entry_to_info(entry)
+    return _entry_to_info(entry, coordinator)
 
 
 @router.post("/{session_id}/{tool_call_id}/offload", status_code=202)

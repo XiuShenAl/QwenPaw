@@ -11,11 +11,61 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { message } from "antd";
+import {
+  Clock3,
+  Hourglass,
+  Moon,
+  RefreshCw,
+  X,
+} from "lucide-react";
 import { toolCallsApi } from "../../../../api/modules/toolCalls";
 import { registerBackgroundTask } from "../../../../hooks/useBackgroundTaskWatcher";
 import styles from "./offloadBanner.module.less";
 
+function controlActionErrorMessage(
+  err: unknown,
+  t: (key: string, fallback: string) => string,
+): string {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  if (
+    /\b404\b/.test(msg) ||
+    /not found/i.test(msg) ||
+    /tool call not found/i.test(msg)
+  ) {
+    return t(
+      "tool.control.toast.notFound",
+      "Tool call not found (it may have already finished).",
+    );
+  }
+  if (
+    /\b409\b/.test(msg) ||
+    /cannot offload/i.test(msg) ||
+    /cannot cancel/i.test(msg) ||
+    /cannot extend/i.test(msg)
+  ) {
+    return t(
+      "tool.control.toast.conflict",
+      "Action rejected (tool state changed or limit reached).",
+    );
+  }
+  if (
+    /failed to fetch/i.test(msg) ||
+    /networkerror/i.test(msg) ||
+    /network request failed/i.test(msg)
+  ) {
+    return t(
+      "tool.control.toast.networkError",
+      "Network error. Check your connection and try again.",
+    );
+  }
+  return t(
+    "tool.control.toast.actionFailed",
+    "Action failed. The tool may have finished or the request was rejected.",
+  );
+}
+
 const CIRCUMFERENCE = 2 * Math.PI * 10;
+const EXTEND_KILL_SECS = 30;
 
 interface OffloadBannerProps {
   sessionId: string;
@@ -25,6 +75,9 @@ interface OffloadBannerProps {
   killRemaining: number | null;
   totalSeconds: number;
   defaultPolicy: "offload" | "keep_foreground";
+  /** Absolute hard cap from tool start; null/undefined when uncapped. */
+  maxInternalTimeoutSecs?: number | null;
+  elapsed?: number;
   onClose: () => void;
   onUpdateRemaining: (offload: number | null, kill: number | null) => void;
 }
@@ -34,8 +87,11 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
   toolCallId,
   toolName,
   offloadRemaining,
+  killRemaining,
   totalSeconds,
   defaultPolicy,
+  maxInternalTimeoutSecs = null,
+  elapsed = 0,
   onClose,
   onUpdateRemaining,
 }) => {
@@ -55,6 +111,11 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
   // is cleared — switch copy/buttons to foreground mode.
   const autoOffloadArmed = isOffloadPolicy && hasCountdown;
   const showForegroundUi = !autoOffloadArmed;
+  // Mirror coordinator cap: new kill = now/current + 30 must stay ≤ started+cap.
+  const canExtendKill =
+    maxInternalTimeoutSecs == null ||
+    elapsed + (killRemaining ?? 0) + EXTEND_KILL_SECS <=
+      maxInternalTimeoutSecs + 0.01;
 
   useEffect(() => {
     if (offloadRemaining === null || offloadRemaining <= 0) return;
@@ -87,18 +148,28 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
         void toolCallsApi
           .getInfo(sessionId, toolCallId)
           .then((info) => {
-            if (info.status !== "offloaded") return;
+            // Fast bg finish may already be "completed" in the cache —
+            // still register so the watcher can hydrate /output.
+            if (
+              info.status !== "offloaded" &&
+              info.status !== "completed"
+            ) {
+              return;
+            }
             registerBackgroundTask({
               sessionId,
               toolCallId,
               toolName: toolName || toolCallId,
+              alreadyCompleted: info.status === "completed",
             });
-            message.info(
-              t(
-                "tool.control.offloadMode.toastAuto",
-                "Moved to background automatically",
-              ),
-            );
+            if (info.status === "offloaded") {
+              message.info(
+                t(
+                  "tool.control.offloadMode.toastAuto",
+                  "Moved to background automatically",
+                ),
+              );
+            }
           })
           .catch(() => {
             /* poll in useToolCallControl may still confirm shortly */
@@ -123,6 +194,7 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
       await fn();
     } catch (e) {
       console.error(`[OffloadBanner] ${action} failed:`, e);
+      message.error(controlActionErrorMessage(e, t));
     } finally {
       setBusy(null);
     }
@@ -164,7 +236,11 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
 
   const handleExtendKill = () =>
     withGuard("extendKill", async () => {
-      const res = await toolCallsApi.extendKill(sessionId, toolCallId, 30);
+      const res = await toolCallsApi.extendKill(
+        sessionId,
+        toolCallId,
+        EXTEND_KILL_SECS,
+      );
       onUpdateRemaining(res.offload_remaining, res.kill_remaining);
       message.info(
         t("tool.control.toast.killExtended", "Timeout extended by 30s"),
@@ -275,7 +351,9 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
               disabled={busy !== null}
               type="button"
             >
-              <span className={styles.ico}>🌙</span>
+              <span className={styles.ico}>
+                <Moon size={14} aria-hidden />
+              </span>
               <span className={styles.btnLabel}>
                 {t(
                   "tool.control.offloadMode.offloadNow",
@@ -289,7 +367,9 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
               disabled={busy !== null}
               type="button"
             >
-              <span className={styles.ico}>⏳</span>
+              <span className={styles.ico}>
+                <Hourglass size={14} aria-hidden />
+              </span>
               <span className={styles.btnLabel}>
                 {t(
                   "tool.control.offloadMode.preventOffload",
@@ -303,7 +383,9 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
               disabled={busy !== null}
               type="button"
             >
-              <span className={styles.ico}>🔄</span>
+              <span className={styles.ico}>
+                <RefreshCw size={14} aria-hidden />
+              </span>
               <span className={styles.btnLabel}>
                 {t("tool.control.offloadMode.delayOffload", "Delay offload")}
               </span>
@@ -311,10 +393,20 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
             <button
               className={styles.offloadBtn}
               onClick={handleExtendKill}
-              disabled={busy !== null}
+              disabled={busy !== null || !canExtendKill}
+              title={
+                canExtendKill
+                  ? undefined
+                  : t(
+                      "tool.control.toast.conflict",
+                      "Action rejected (tool state changed or limit reached).",
+                    )
+              }
               type="button"
             >
-              <span className={styles.ico}>⏱️</span>
+              <span className={styles.ico}>
+                <Clock3 size={14} aria-hidden />
+              </span>
               <span className={styles.btnLabel}>
                 {t("tool.control.extendKill", "Extend timeout")}
               </span>
@@ -325,7 +417,9 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
               disabled={busy !== null}
               type="button"
             >
-              <span className={styles.ico}>✕</span>
+              <span className={styles.ico}>
+                <X size={14} aria-hidden />
+              </span>
               <span className={styles.btnLabel}>
                 {t("tool.control.cancel")}
               </span>
@@ -339,7 +433,9 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
               disabled={busy !== null}
               type="button"
             >
-              <span className={styles.ico}>🌙</span>
+              <span className={styles.ico}>
+                <Moon size={14} aria-hidden />
+              </span>
               <span className={styles.btnLabel}>
                 {t("tool.control.keepMode.offload", "Move to background")}
               </span>
@@ -347,10 +443,20 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
             <button
               className={styles.offloadBtn}
               onClick={handleExtendKill}
-              disabled={busy !== null}
+              disabled={busy !== null || !canExtendKill}
+              title={
+                canExtendKill
+                  ? undefined
+                  : t(
+                      "tool.control.toast.conflict",
+                      "Action rejected (tool state changed or limit reached).",
+                    )
+              }
               type="button"
             >
-              <span className={styles.ico}>⏱️</span>
+              <span className={styles.ico}>
+                <Clock3 size={14} aria-hidden />
+              </span>
               <span className={styles.btnLabel}>
                 {t("tool.control.extendKill", "Extend timeout")}
               </span>
@@ -361,7 +467,9 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
               disabled={busy !== null}
               type="button"
             >
-              <span className={styles.ico}>✕</span>
+              <span className={styles.ico}>
+                <X size={14} aria-hidden />
+              </span>
               <span className={styles.btnLabel}>
                 {t("tool.control.cancel")}
               </span>

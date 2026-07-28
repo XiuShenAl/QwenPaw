@@ -6,6 +6,7 @@ import {
   type CSSProperties,
 } from "react";
 import { useTranslation } from "react-i18next";
+import { ChevronDown, ChevronUp, X } from "lucide-react";
 import { useTheme } from "../../../contexts/ThemeContext";
 import {
   selectTasksForSession,
@@ -238,8 +239,19 @@ export default function BackgroundTaskPanel({
             >
               {sessionTasks.length}
             </span>
-            <span style={{ marginLeft: "auto", opacity: 0.6 }}>
-              {collapsed ? "▼" : "▲"}
+            <span
+              style={{
+                marginLeft: "auto",
+                opacity: 0.6,
+                display: "inline-flex",
+                alignItems: "center",
+              }}
+            >
+              {collapsed ? (
+                <ChevronDown size={14} aria-hidden />
+              ) : (
+                <ChevronUp size={14} aria-hidden />
+              )}
             </span>
           </button>
           {showBody && batchActions}
@@ -292,9 +304,13 @@ export default function BackgroundTaskPanel({
                       cursor: "pointer",
                       color: "inherit",
                       opacity: 0.7,
+                      display: "inline-flex",
+                      alignItems: "center",
+                      padding: 0,
                     }}
+                    aria-label={t("common.close", "Close")}
                   >
-                    ✕
+                    <X size={14} aria-hidden />
                   </button>
                 </div>
               )}

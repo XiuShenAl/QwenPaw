@@ -10,6 +10,66 @@ from ._ctxvars import get_call_context
 
 logger = logging.getLogger(__name__)
 
+# Foreground offload window as a fraction of the resolved tool timeout so
+# tools that arm kill_deadline to the same timeout still get a background
+# phase (kill must remain strictly later than offload).
+OFFLOAD_TIMEOUT_RATIO = 0.5
+
+# After offload, ensure at least this much kill budget remains.
+MIN_BACKGROUND_WINDOW_SECS = 30.0
+
+# When ToolCallContext owns the hard kill, sandbox/HTTP layers use this
+# large ceiling so ``extend_kill_deadline`` is not defeated by a frozen
+# copy of the original timeout. Coordinator cancel remains the real stop.
+COORDINATOR_OWNED_EXEC_TIMEOUT_SECS = 24 * 3600
+
+
+def arm_kill_deadline(
+    ctx: Any,
+    secs: float,
+    *,
+    only_if_unset: bool = True,
+) -> bool:
+    """Arm ``kill_deadline`` and keep offload strictly earlier when needed.
+
+    When the tool's hard timeout is shorter than the coordinator offload
+    window, pull ``offload_deadline`` back to ``secs * OFFLOAD_TIMEOUT_RATIO``
+    so kill cannot win before automatic offload — without exceeding the
+    user-provided hard limit.
+
+    Returns True when a kill deadline was written (or already present when
+    *only_if_unset* is True).
+    """
+    if only_if_unset and ctx.kill_deadline is not None:
+        return True
+    if secs is None or secs < 0:
+        return False
+
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    desired_kill = now + secs
+    ctx.kill_deadline = desired_kill
+    if (
+        ctx.offload_deadline is not None
+        and ctx.offload_deadline >= desired_kill
+    ):
+        pulled = now + max(0.0, secs * OFFLOAD_TIMEOUT_RATIO)
+        if pulled >= desired_kill and secs > 0:
+            pulled = desired_kill - min(0.001, secs / 2.0)
+        ctx.offload_deadline = pulled
+        logger.debug(
+            "Pulled offload_deadline before kill (%.1fs) for %s",
+            secs,
+            getattr(ctx, "tool_name", "?"),
+        )
+    ctx.deadline_changed_event.set()
+    logger.debug(
+        "kill_deadline set to %.1fs for %s",
+        secs,
+        getattr(ctx, "tool_name", "?"),
+    )
+    return True
+
 
 async def cancellable_wait(
     coro_or_task: Any,
@@ -35,19 +95,8 @@ async def cancellable_wait(
             return await coro_or_task
         return await asyncio.wait_for(coro_or_task, timeout=fallback_secs)
 
-    if (
-        as_kill_deadline
-        and fallback_secs is not None
-        and ctx.kill_deadline is None
-    ):
-        loop = asyncio.get_running_loop()
-        ctx.kill_deadline = loop.time() + fallback_secs
-        ctx.deadline_changed_event.set()
-        logger.debug(
-            "kill_deadline set to %.1fs for %s",
-            fallback_secs,
-            ctx.tool_name,
-        )
+    if as_kill_deadline and fallback_secs is not None:
+        arm_kill_deadline(ctx, fallback_secs)
 
     task = (
         coro_or_task

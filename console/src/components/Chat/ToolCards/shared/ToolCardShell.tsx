@@ -14,6 +14,7 @@
 
 import React, { useMemo } from "react";
 import { useTranslation } from "react-i18next";
+import { Settings } from "lucide-react";
 import type { ToolCallContent } from "./types";
 import DefaultBlock from "./DefaultBlock";
 import { stringifyResult } from "./utils";
@@ -156,7 +157,7 @@ const ToolCardShell: React.FC<ToolCardShellProps> = ({
               }}
               title={t("tool.control.manage")}
             >
-              <span>⚙️</span>
+              <Settings size={14} aria-hidden />
               <div className={`${bannerStyles.gearDot} ${gearDotClass}`} />
             </button>
           )}
@@ -201,6 +202,8 @@ const ToolCardShell: React.FC<ToolCardShellProps> = ({
           killRemaining={control.killRemaining}
           totalSeconds={AUTO_POPUP_TOTAL_SECS}
           defaultPolicy={control.defaultPolicy}
+          maxInternalTimeoutSecs={control.maxInternalTimeoutSecs}
+          elapsed={control.elapsed}
           onClose={control.closeBanner}
           onUpdateRemaining={control.updateRemaining}
         />
