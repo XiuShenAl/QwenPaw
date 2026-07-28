@@ -367,6 +367,26 @@ def _execute_subprocess_sync(
 _SANDBOX_SETUP_DEADLINE_EXTENSION = 180.0
 
 
+def _cancel_stderr_message(timeout: float) -> str:
+    """Stderr suffix for CancelledError from cancellable_wait.
+
+    Coordinator kill_deadline expiry sets ``CancelReason.TIMEOUT``; user/API
+    cancel sets ``CancelReason.USER``. Distinguish them for LLM-facing text.
+    """
+    from ...tool_calls import get_call_context
+    from ...tool_calls._context import CancelReason
+
+    ctx = get_call_context()
+    if ctx is not None and ctx.cancel_reason == CancelReason.TIMEOUT:
+        return (
+            f"⚠️ TimeoutError: The command execution exceeded "
+            f"the timeout of {timeout} seconds. "
+            f"Please consider increasing the timeout value if this "
+            f"command requires more time to complete."
+        )
+    return "⚠️ Command execution was cancelled."
+
+
 async def _execute_in_sandbox(
     cmd: str,
     sandbox_config: Any,
@@ -377,13 +397,16 @@ async def _execute_in_sandbox(
     """Execute a shell command inside the sandbox and return raw result.
 
     On first invocation the sandbox setup (user creation, profile, ACLs,
-    firewall rules) can take 5-100+ seconds. To prevent the ToolCoordinator's
-    deadline from expiring during this one-time setup, we temporarily extend
-    the deadline by _SANDBOX_SETUP_DEADLINE_EXTENSION seconds. The extension
-    is only applied when the call context has a deadline set.
+    firewall rules) can take 5-100+ seconds. During setup we temporarily
+    extend existing coordinator deadlines; after setup we restore them by
+    shifting absolute deadlines forward by the setup elapsed time so the
+    remaining offload/kill budgets are unchanged. Then we register
+    ``kill_deadline`` for the command ``timeout`` only around
+    ``sandbox.execute`` (never rewrite ``offload_deadline`` to the command
+    timeout — that would collapse offload and kill into the same instant).
     """
     from ...sandbox import create_sandbox
-    from ...tool_calls import get_call_context
+    from ...tool_calls import cancellable_wait, get_call_context
 
     # Sandbox backends rebuild their environment from os.environ. Carry over
     # the PATH adjusted by the shell entrypoint unless policy set one itself.
@@ -401,29 +424,56 @@ async def _execute_in_sandbox(
         env_vars=sandbox_env,
     )
 
-    # Temporarily extend the offload deadline so that sandbox creation
-    # does not consume the user's command timeout budget.
     ctx = get_call_context()
-    original_deadline = None
-    if ctx is not None and ctx.offload_deadline is not None:
-        original_deadline = ctx.offload_deadline
-        ctx.offload_deadline += _SANDBOX_SETUP_DEADLINE_EXTENSION
+    loop = asyncio.get_running_loop()
+    setup_started_at = loop.time()
+    original_offload = None
+    original_kill = None
+    if ctx is not None:
+        if ctx.offload_deadline is not None:
+            original_offload = ctx.offload_deadline
+            ctx.offload_deadline += _SANDBOX_SETUP_DEADLINE_EXTENSION
+        if ctx.kill_deadline is not None:
+            original_kill = ctx.kill_deadline
+            ctx.kill_deadline += _SANDBOX_SETUP_DEADLINE_EXTENSION
+        if original_offload is not None or original_kill is not None:
+            ctx.deadline_changed_event.set()
+
+    def _restore_setup_deadlines() -> None:
+        """Restore deadlines so remaining time matches pre-setup remaining.
+
+        Writing back the pre-setup absolute timestamp would still charge
+        setup duration against the budget; shift forward by elapsed setup.
+        """
+        if ctx is None:
+            return
+        elapsed = max(
+            0.0,
+            asyncio.get_running_loop().time() - setup_started_at,
+        )
+        changed = False
+        if original_offload is not None:
+            ctx.offload_deadline = original_offload + elapsed
+            changed = True
+        if original_kill is not None:
+            ctx.kill_deadline = original_kill + elapsed
+            changed = True
+        if changed:
+            ctx.deadline_changed_event.set()
 
     try:
         async with create_sandbox(effective_config) as sandbox:
-            # Restore the original deadline (plus only the command timeout)
-            # now that sandbox setup is complete.
-            if ctx is not None and original_deadline is not None:
-                now = asyncio.get_event_loop().time()
-                ctx.offload_deadline = now + timeout
-            result = await sandbox.execute(cmd, cwd=cwd)
+            # Setup finished: compensate setup elapsed on borrowed deadlines,
+            # then arm kill_deadline for the command timeout only.
+            _restore_setup_deadlines()
+            return await cancellable_wait(
+                sandbox.execute(cmd, cwd=cwd),
+                fallback_secs=timeout,
+                as_kill_deadline=True,
+            )
     except BaseException:
-        # On failure, restore original deadline to avoid permanent extension
-        if ctx is not None and original_deadline is not None:
-            ctx.offload_deadline = original_deadline
+        _restore_setup_deadlines()
         raise
-
-    return result
 
 
 _DANGER_NAMES = {
@@ -637,13 +687,32 @@ async def execute_shell_command(
             shell_executable=shell_executable,
             timeout_seconds=int(timeout),
         )
-        result = await _execute_in_sandbox(
-            cmd,
-            sandbox_config,
-            timeout,
-            str(working_dir),
-            env,
-        )
+        try:
+            # kill_deadline is armed inside _execute_in_sandbox after setup,
+            # so setup time does not consume the command timeout budget and
+            # offload_deadline keeps the coordinator's offload semantics.
+            result = await _execute_in_sandbox(
+                cmd,
+                sandbox_config,
+                timeout,
+                str(working_dir),
+                env,
+            )
+        except asyncio.CancelledError:
+            stderr_msg = _cancel_stderr_message(timeout)
+            return ToolChunk(
+                is_last=True,
+                state=ToolResultState.SUCCESS,
+                content=[
+                    TextBlock(
+                        type="text",
+                        text=(
+                            "Command failed with exit code -1.\n"
+                            f"[stderr]\n{stderr_msg}"
+                        ),
+                    ),
+                ],
+            )
         # Sandbox violation: command tried to access something not permitted
         if result.sandbox_violation:
             return ToolChunk(
@@ -739,7 +808,7 @@ async def execute_shell_command(
                 )
 
             except asyncio.CancelledError:
-                stderr_suffix = "⚠️ Command execution was cancelled."
+                stderr_suffix = _cancel_stderr_message(timeout)
                 returncode = -1
                 stdout_str, stderr_str = await _cleanup_proc(
                     proc,

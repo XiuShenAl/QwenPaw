@@ -426,3 +426,107 @@ async def test_extend_offload_deadline_rejects_after_offload():
         seconds=10,
     )
     assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_offload_does_not_set_cancel_event_background_keeps_running():
+    """Regression #6056: auto-offload must not signal cancel_event.
+
+    The background task must keep running after the foreground yields the
+    offloaded ToolResponse.
+    """
+    coordinator = ToolCoordinator(
+        default_timeout_secs=0.001,
+        offload_on_deadline=True,
+    )
+    tool_call = _ToolCall(id="call-offload-alive", name="slow_tool")
+    release = asyncio.Event()
+    still_running = asyncio.Event()
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        await asyncio.sleep(0.05)
+        from qwenpaw.tool_calls import get_call_context
+
+        ctx = get_call_context()
+        assert ctx is not None
+        assert not ctx.cancel_event.is_set()
+        still_running.set()
+        await release.wait()
+        yield _text_response(tool_call.id, "bg-done")
+
+    events = await asyncio.wait_for(
+        _collect(
+            coordinator.execute(
+                tool_call=tool_call,
+                next_handler=next_handler,
+                session_id="session-offload-alive",
+                agent_id="agent-1",
+                root_session_id="root-1",
+            ),
+        ),
+        timeout=2,
+    )
+
+    assert events[-1].metadata.get("offloaded") is True
+    entry = coordinator.get("call-offload-alive")
+    assert entry is not None
+    assert entry.status.value == "offloaded"
+    assert not entry.ctx.cancel_event.is_set()
+    assert entry.background_task is not None
+    assert not entry.background_task.done()
+
+    await asyncio.wait_for(still_running.wait(), timeout=1)
+    release.set()
+    await asyncio.wait_for(
+        _wait_for_hint(coordinator, "session-offload-alive"),
+        timeout=2,
+    )
+
+
+@pytest.mark.asyncio
+async def test_keep_foreground_survives_offload_deadline_then_kill():
+    """Regression #6245: with offload_on_deadline=False, clearing the
+    offload deadline must not strand the session — kill_deadline still
+    terminates and execute() returns.
+    """
+    coordinator = ToolCoordinator(
+        default_timeout_secs=0.02,
+        offload_on_deadline=False,
+    )
+    tool_call = _ToolCall(id="call-keep-kill", name="keep_kill_tool")
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        from qwenpaw.tool_calls import cancellable_wait
+
+        # Offload window (~0.02s) clears first; kill (~0.08s) must still fire.
+        await cancellable_wait(
+            asyncio.sleep(10),
+            fallback_secs=0.08,
+            as_kill_deadline=True,
+        )
+        yield _text_response(tool_call.id, "should not reach")
+
+    events = await asyncio.wait_for(
+        _collect(
+            coordinator.execute(
+                tool_call=tool_call,
+                next_handler=next_handler,
+                session_id="session-keep-kill",
+                agent_id="agent-1",
+                root_session_id="root-1",
+            ),
+        ),
+        timeout=5,
+    )
+
+    final = events[-1]
+    assert isinstance(final, ToolResponse)
+    assert "should not reach" not in final.content[0].text
+    entry = coordinator.get("call-keep-kill")
+    if entry is not None:
+        assert entry.ctx.cancel_event.is_set()
+        assert entry.ctx.cancel_reason == CancelReason.TIMEOUT

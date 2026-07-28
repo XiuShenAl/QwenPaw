@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toolCallsApi } from "../api/modules/toolCalls";
+import { resolveBackendSessionId } from "../utils/resolveBackendSessionId";
 import { registerBackgroundTask } from "./useBackgroundTaskWatcher";
 import { useBackgroundTasksStore } from "../stores/backgroundTasksStore";
 
@@ -17,12 +18,7 @@ export interface ToolCallControlState {
 }
 
 function resolveSessionId(sessionId: string): string {
-  return (
-    sessionId ||
-    ((window as unknown as { currentSessionId?: string })
-      .currentSessionId as string) ||
-    ""
-  );
+  return resolveBackendSessionId(sessionId);
 }
 
 export function useToolCallControl(
@@ -94,7 +90,12 @@ export function useToolCallControl(
       clearInterval(timerRef.current);
       timerRef.current = undefined;
     }
-    if (serverOffloadRef.current === null || serverOffloadRef.current <= 0) {
+    const hasOffload =
+      serverOffloadRef.current !== null && serverOffloadRef.current > 0;
+    const hasKill = serverKillRef.current !== null && serverKillRef.current > 0;
+    // Keep ticking while either deadline is still live (keep_foreground may
+    // clear offload while kill_remaining must continue).
+    if (!hasOffload && !hasKill) {
       return;
     }
 
@@ -131,12 +132,20 @@ export function useToolCallControl(
       });
 
       if (offR !== null && offR <= 0) {
+        registerIfAutoOffloaded();
+        setState((s) => (s.bannerVisible ? { ...s, bannerVisible: false } : s));
+        // Stop only when kill countdown is also done/absent.
+        if (killR === null || killR <= 0) {
+          if (timerRef.current) {
+            clearInterval(timerRef.current);
+            timerRef.current = undefined;
+          }
+        }
+      } else if (killR !== null && killR <= 0 && (offR === null || offR <= 0)) {
         if (timerRef.current) {
           clearInterval(timerRef.current);
           timerRef.current = undefined;
         }
-        registerIfAutoOffloaded();
-        setState((s) => (s.bannerVisible ? { ...s, bannerVisible: false } : s));
       }
     }, 1000);
   }, [registerIfAutoOffloaded]);
@@ -156,36 +165,67 @@ export function useToolCallControl(
     [startLocalCountdown],
   );
 
-  // One-time fetch when tool starts executing (sessionId may still be empty).
+  // Fetch deadlines when the tool starts. Backend session_id may not be ready
+  // on the first paint (new chat / mapping lag) — retry like bg-task hydrate
+  // instead of permanently locking fetchedRef after a failed/empty attempt.
   useEffect(() => {
-    if (!isCalling || !toolCallId || fetchedRef.current) return;
-    fetchedRef.current = true;
+    if (!isCalling || !toolCallId) return;
+
+    fetchedRef.current = false;
     autoOffloadRegisteredRef.current = false;
+    let cancelled = false;
+    let attempts = 0;
+    let policyLoaded = false;
 
-    const sid = resolveSessionId(sessionId);
+    const tryFetch = async () => {
+      if (cancelled || fetchedRef.current) return;
 
-    Promise.all([
-      sid
+      const sid = resolveSessionId(sessionId);
+      const infoPromise = sid
         ? toolCallsApi.getInfo(sid, toolCallId).catch(() => null)
-        : Promise.resolve(null),
-      toolCallsApi.getOffloadPolicy().catch(() => null),
-    ]).then(([info, policy]) => {
-      const dp =
-        (policy?.default_action as "offload" | "keep_foreground") ??
-        "keep_foreground";
-      defaultPolicyRef.current = dp;
-      setState((s) => ({ ...s, defaultPolicy: dp }));
+        : Promise.resolve(null);
+      const policyPromise = policyLoaded
+        ? Promise.resolve(null)
+        : toolCallsApi.getOffloadPolicy().catch(() => null);
 
-      if (info) {
-        if (info.status === "offloaded") {
-          tryRegisterBackground("initial-getInfo-offloaded");
-        }
-        applyServerValues(
-          info.offload_remaining ?? null,
-          info.kill_remaining ?? null,
-        );
+      const [info, policy] = await Promise.all([infoPromise, policyPromise]);
+      if (cancelled) return;
+
+      if (policy) {
+        policyLoaded = true;
+        const dp =
+          (policy.default_action as "offload" | "keep_foreground") ??
+          "keep_foreground";
+        defaultPolicyRef.current = dp;
+        setState((s) => ({ ...s, defaultPolicy: dp }));
       }
-    });
+
+      if (!info) return;
+
+      fetchedRef.current = true;
+      if (info.status === "offloaded") {
+        tryRegisterBackground("initial-getInfo-offloaded");
+      }
+      applyServerValues(
+        info.offload_remaining ?? null,
+        info.kill_remaining ?? null,
+      );
+    };
+
+    void tryFetch();
+    const timer = setInterval(() => {
+      attempts += 1;
+      if (fetchedRef.current || attempts >= 20) {
+        clearInterval(timer);
+        return;
+      }
+      void tryFetch();
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   }, [
     isCalling,
     sessionId,
@@ -209,6 +249,15 @@ export function useToolCallControl(
         if (cancelled) return;
         if (info.status === "offloaded") {
           tryRegisterBackground("poll-offloaded");
+          return;
+        }
+        if (info.status === "running") {
+          // Refresh remaining so kill countdown stays correct after offload
+          // deadline clears under keep_foreground.
+          applyServerValues(
+            info.offload_remaining ?? null,
+            info.kill_remaining ?? null,
+          );
         }
       } catch {
         /* ignore transient errors */
@@ -221,7 +270,13 @@ export function useToolCallControl(
       cancelled = true;
       clearInterval(id);
     };
-  }, [isCalling, sessionId, toolCallId, tryRegisterBackground]);
+  }, [
+    isCalling,
+    sessionId,
+    toolCallId,
+    tryRegisterBackground,
+    applyServerValues,
+  ]);
 
   // When the card leaves "calling" (offloaded ToolResponse often flips status
   // immediately), register if the offload deadline was reached / backend says so.

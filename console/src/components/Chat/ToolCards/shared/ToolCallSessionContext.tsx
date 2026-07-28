@@ -1,6 +1,6 @@
+import { resolveBackendSessionId } from "../../../../utils/resolveBackendSessionId";
+
+/** Backend session_id for tool-call control APIs (never a bare local library id). */
 export function useToolCallSessionId(): string {
-  return (
-    ((window as unknown as Record<string, unknown>)
-      .currentSessionId as string) || ""
-  );
+  return resolveBackendSessionId();
 }

@@ -74,12 +74,12 @@ def _get_entry(
     tool_call_id: str,
     session_id: str = "",
 ) -> Any:
-    """Look up by tool_call_id (globally unique).
+    """Look up by tool_call_id and enforce session scoping.
 
-    session_id is validated when provided: a mismatch is logged as a
-    warning for audit purposes but does not block the request, because
-    the frontend may pass a local-timestamp ID that differs from the
-    backend session_id (e.g. ``console:default``)."""
+    When *session_id* is provided it must match ``entry.ctx.session_id``;
+    otherwise the call is treated as not found (404). This prevents
+    cross-session cancel/offload/stream using only a leaked tool_call_id.
+    """
     entry = coordinator.get(tool_call_id)
     if entry is None:
         raise HTTPException(404, "Tool call not found")
@@ -92,6 +92,7 @@ def _get_entry(
             _safe_log_token(entry.ctx.session_id),
             _safe_log_token(tool_call_id),
         )
+        raise HTTPException(404, "Tool call not found")
     return entry
 
 

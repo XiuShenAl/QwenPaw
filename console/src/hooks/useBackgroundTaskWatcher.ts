@@ -11,6 +11,7 @@ import {
   toolCallsApi,
 } from "../api/modules/toolCalls";
 import { useBackgroundTasksStore } from "../stores/backgroundTasksStore";
+import { resolveBackendSessionId } from "../utils/resolveBackendSessionId";
 
 const POLL_INTERVAL_MS = 3000;
 const LIVE_OUTPUT_MAX = 80_000;
@@ -169,11 +170,7 @@ export function registerBackgroundTask(opts: {
   const { toolCallId, toolName, startTime = Date.now() } = opts;
   if (!toolCallId) return;
 
-  const resolvedSessionId =
-    opts.sessionId ||
-    ((window as unknown as { currentSessionId?: string })
-      .currentSessionId as string) ||
-    "";
+  const resolvedSessionId = resolveBackendSessionId(opts.sessionId);
 
   useBackgroundTasksStore.getState().addTask({
     toolCallId,
@@ -201,9 +198,7 @@ export function registerBackgroundTask(opts: {
     let attempts = 0;
     const timer = setInterval(() => {
       attempts += 1;
-      const sid =
-        ((window as unknown as { currentSessionId?: string })
-          .currentSessionId as string) || "";
+      const sid = resolveBackendSessionId();
       if (startWatcher(sid) || attempts >= 20) {
         clearInterval(timer);
       }
