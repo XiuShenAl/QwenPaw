@@ -28,12 +28,22 @@ const custom: LoopModeInfo = {
   description: "Keep the user's original description.",
   source: "custom",
 };
+const ompUltraqa: LoopModeInfo = {
+  id: "plugin:ultraqa",
+  name: "ultraqa",
+  slash_command: "ultraqa",
+  description:
+    "**UltraQA** — automated QA cycle engine\n\n" +
+    "Usage:\n" +
+    '  `/ultraqa [--tests|--build|--lint|--typecheck|--custom "cmd"]`\n',
+  source: "plugin",
+};
 
 describe("LoopModeSelector", () => {
   beforeEach(() => {
     useLoopStore.setState({
       selectedModeId: "default",
-      availableModes: [DEFAULT_LOOP_MODE, goal, custom],
+      availableModes: [DEFAULT_LOOP_MODE, goal, custom, ompUltraqa],
       sessionState: "idle",
       activeMode: null,
       catalogLoading: false,
@@ -58,6 +68,11 @@ describe("LoopModeSelector", () => {
     expect(
       screen.queryByText("Backend goal description"),
     ).not.toBeInTheDocument();
+    expect(screen.getByText("UltraQA")).toBeInTheDocument();
+    expect(screen.getByText("UltraQA").tagName).toBe("STRONG");
+    expect(screen.getByText(/automated QA cycle engine/)).toBeInTheDocument();
+    expect(screen.queryByText(/\*\*UltraQA\*\*/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/`\/ultraqa/)).not.toBeInTheDocument();
   });
 
   it("selects a custom mode from the compact menu", async () => {

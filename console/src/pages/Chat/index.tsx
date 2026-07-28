@@ -34,6 +34,8 @@ import {
   prepareLoopModeMessage,
   useLoopStore,
 } from "../../stores/loopStore";
+import { buildLoopSlashSuggestions } from "./loopSlashSuggestions";
+import { InlineMarkdown } from "../../components/Markdown/InlineMarkdown";
 import { LoopModeSelector } from "../../components/LoopInput";
 import { useChatAnywhereInput } from "@agentscope-ai/chat";
 import styles from "./index.module.less";
@@ -549,21 +551,12 @@ function renderSuggestionLabel(command: string, description?: string) {
     >
       <span className={styles.suggestionCommand}>{command}</span>
       {description ? (
-        <span className={styles.suggestionDescription}>{description}</span>
+        <span className={styles.suggestionDescription}>
+          <InlineMarkdown markdown={description} />
+        </span>
       ) : null}
     </div>
   );
-}
-
-/** First-line, plain-text blurb for loop slash suggestions (OMP help is multi-line MD). */
-function shortLoopSuggestionDescription(description?: string): string {
-  if (!description) return "";
-  const firstLine = description
-    .split(/\r?\n/, 1)[0]
-    .replace(/\*\*/g, "")
-    .trim();
-  if (firstLine.length <= 80) return firstLine;
-  return `${firstLine.slice(0, 77)}...`;
 }
 
 // ---------------------------------------------------------------------------
@@ -2498,17 +2491,7 @@ export default function ChatPage() {
     // LoopModeSelector; include them in the slash menu when the QwenPaw
     // backend is active. Empty slash_command (default mode) is skipped.
     const loopSuggestions: CommandSuggestion[] = usesQwenPawBackend
-      ? loopAvailableModes
-          .filter(
-            (mode) =>
-              Boolean(mode.slash_command) &&
-              !reservedCommands.has(mode.slash_command),
-          )
-          .map((mode) => ({
-            command: `/${mode.slash_command}`,
-            value: mode.slash_command,
-            description: shortLoopSuggestionDescription(mode.description),
-          }))
+      ? buildLoopSlashSuggestions(loopAvailableModes, reservedCommands, t)
       : [];
     const skillSuggestions: CommandSuggestion[] = consoleSkills
       .filter(

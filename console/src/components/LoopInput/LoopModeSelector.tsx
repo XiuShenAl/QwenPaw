@@ -20,19 +20,13 @@ import {
   type LoopModeInfo,
   useLoopStore,
 } from "../../stores/loopStore";
+import { InlineMarkdown } from "../Markdown/InlineMarkdown";
+import { resolveLoopModeDescriptionMarkdown } from "../../utils/loopModeDescription";
 import styles from "./index.module.less";
 
 function modeName(mode: LoopModeInfo, t: (key: string) => string): string {
   if (mode.source !== "builtin") return mode.name;
   return t(`loop.modes.${mode.id}.name`);
-}
-
-function modeDescription(
-  mode: LoopModeInfo,
-  t: (key: string) => string,
-): string {
-  if (mode.source !== "builtin") return mode.description;
-  return t(`loop.modes.${mode.id}.description`);
 }
 
 function ModeIcon({ mode, size = 14 }: { mode: LoopModeInfo; size?: number }) {
@@ -122,7 +116,9 @@ export function LoopModeSelector() {
               <span className={styles.optionCopy}>
                 <span className={styles.optionName}>{modeName(mode, t)}</span>
                 <span className={styles.optionDescription}>
-                  {modeDescription(mode, t)}
+                  <InlineMarkdown
+                    markdown={resolveLoopModeDescriptionMarkdown(mode, t)}
+                  />
                 </span>
               </span>
               {selected ? <CircleDot size={15} /> : null}
