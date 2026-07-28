@@ -555,6 +555,17 @@ function renderSuggestionLabel(command: string, description?: string) {
   );
 }
 
+/** First-line, plain-text blurb for loop slash suggestions (OMP help is multi-line MD). */
+function shortLoopSuggestionDescription(description?: string): string {
+  if (!description) return "";
+  const firstLine = description
+    .split(/\r?\n/, 1)[0]
+    .replace(/\*\*/g, "")
+    .trim();
+  if (firstLine.length <= 80) return firstLine;
+  return `${firstLine.slice(0, 77)}...`;
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -2483,6 +2494,22 @@ export default function ChatPage() {
     const loopCommandNames = new Set(
       loopAvailableModes.map((mode) => mode.slash_command).filter(Boolean),
     );
+    // Loop/plugin modes (goal, mission, OMP, custom) share GET /loops with
+    // LoopModeSelector; include them in the slash menu when the QwenPaw
+    // backend is active. Empty slash_command (default mode) is skipped.
+    const loopSuggestions: CommandSuggestion[] = usesQwenPawBackend
+      ? loopAvailableModes
+          .filter(
+            (mode) =>
+              Boolean(mode.slash_command) &&
+              !reservedCommands.has(mode.slash_command),
+          )
+          .map((mode) => ({
+            command: `/${mode.slash_command}`,
+            value: mode.slash_command,
+            description: shortLoopSuggestionDescription(mode.description),
+          }))
+      : [];
     const skillSuggestions: CommandSuggestion[] = consoleSkills
       .filter(
         (skill) =>
@@ -2719,12 +2746,14 @@ export default function ChatPage() {
       );
     }
 
-    const baseSuggestions = [...commandSuggestions, ...skillSuggestions].map(
-      (item) => ({
-        label: renderSuggestionLabel(item.command, item.description),
-        value: item.value,
-      }),
-    );
+    const baseSuggestions = [
+      ...commandSuggestions,
+      ...loopSuggestions,
+      ...skillSuggestions,
+    ].map((item) => ({
+      label: renderSuggestionLabel(item.command, item.description),
+      value: item.value,
+    }));
     const userMessageAnchorsConfig = {
       ...defaultConfig.theme.bubbleList.userMessageAnchors,
       variant: "navigator" as const,
