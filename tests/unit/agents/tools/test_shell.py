@@ -1055,10 +1055,27 @@ def test_execute_subprocess_sync_honors_stop_event(tmp_path):
 
     def _fake_kill(pid: int) -> None:
         killed_pids.append(pid)
+        if sys.platform == "win32":
+            subprocess.call(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+            return
         try:
             os.kill(pid, signal.SIGKILL)
         except OSError:
             pass
+
+    # Avoid /bin/sh on Windows (FileNotFound → except path returns -1
+    # without calling the kill helper).
+    if sys.platform == "win32":
+        cmd = "ping -n 60 127.0.0.1 >NUL"
+        shell_executable = None
+    else:
+        cmd = "sleep 30"
+        shell_executable = "/bin/sh"
 
     armer = threading.Thread(target=_arm_stop)
     armer.start()
@@ -1069,10 +1086,10 @@ def test_execute_subprocess_sync_honors_stop_event(tmp_path):
             side_effect=_fake_kill,
         ):
             code, _stdout, _stderr = _execute_subprocess_sync(
-                "sleep 30",
+                cmd,
                 str(tmp_path),
                 timeout=60.0,
-                shell_executable="/bin/sh",
+                shell_executable=shell_executable,
                 stop_event=stop_event,
             )
     finally:
