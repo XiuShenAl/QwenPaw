@@ -545,6 +545,52 @@ async def test_keep_foreground_survives_offload_deadline_then_kill():
 
 
 @pytest.mark.asyncio
+async def test_keep_foreground_timeout_gt_hook_survives_offload_window():
+    """Regression: tool timeout > hook offload must not be killed at offload.
+
+    Mirrors chat_with_agent(timeout=600) under hook default_timeout=300 with
+    keep_foreground: after offload clears, kill_deadline still bounds
+    execution.
+    """
+    coordinator = ToolCoordinator(
+        default_timeout_secs=0.05,
+        offload_on_deadline=False,
+    )
+    tool_call = _ToolCall(id="call-long-timeout", name="chat_with_agent")
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        from qwenpaw.tool_calls import cancellable_wait
+
+        # Offload ~0.05s; tool timeout / kill ~0.2s.
+        await cancellable_wait(
+            asyncio.sleep(0.12),
+            fallback_secs=0.25,
+            as_kill_deadline=True,
+        )
+        yield _text_response(tool_call.id, "peer-reply")
+
+    events = await asyncio.wait_for(
+        _collect(
+            coordinator.execute(
+                tool_call=tool_call,
+                next_handler=next_handler,
+                session_id="session-long-timeout",
+                agent_id="agent-1",
+                root_session_id="root-1",
+            ),
+        ),
+        timeout=2,
+    )
+
+    final = events[-1]
+    assert isinstance(final, ToolResponse)
+    assert final.content[0].text == "peer-reply"
+    assert final.metadata.get("offloaded") is not True
+
+
+@pytest.mark.asyncio
 async def test_keep_foreground_without_kill_cancels_on_offload_expiry():
     """#6245 without as_kill_deadline: keep_foreground must not hang forever.
 

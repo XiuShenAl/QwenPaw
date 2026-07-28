@@ -272,12 +272,22 @@ export async function cancelBackgroundTask(
   sessionId: string,
   toolCallId: string,
 ): Promise<void> {
+  const sid = (sessionId || "").trim();
+  if (!sid) {
+    message.error(
+      i18n.t(
+        "chat.backgroundTasks.cancelFailed",
+        "Failed to cancel background task",
+      ),
+    );
+    throw new Error("Missing backend session id for cancel");
+  }
   stopBackgroundTaskWatcher(toolCallId);
   try {
-    await toolCallsApi.cancel(sessionId, toolCallId);
+    await toolCallsApi.cancel(sid, toolCallId);
   } catch (err) {
     finalizedIds.delete(toolCallId);
-    startBackgroundTaskWatcher(sessionId, toolCallId);
+    startBackgroundTaskWatcher(sid, toolCallId);
     message.error(
       i18n.t(
         "chat.backgroundTasks.cancelFailed",
@@ -302,6 +312,7 @@ export async function cancelBackgroundTask(
  * Stop watchers and drop store rows that do not belong to the given session.
  * Call before hydrating a newly selected session to avoid leaking SSE/poll.
  * Pass an empty session id to tear down every tracked task (e.g. blank "new" chat).
+ * Orphan rows with empty sessionId are always treated as stale on switch.
  */
 export function stopBackgroundWatchersNotInSession(
   backendSessionId: string,
@@ -310,7 +321,7 @@ export function stopBackgroundWatchersNotInSession(
   const staleIds = !backendSessionId
     ? store.tasks.map((t) => t.toolCallId)
     : store.tasks
-        .filter((t) => t.sessionId && t.sessionId !== backendSessionId)
+        .filter((t) => !t.sessionId || t.sessionId !== backendSessionId)
         .map((t) => t.toolCallId);
   for (const id of staleIds) {
     stopBackgroundTaskWatcher(id);

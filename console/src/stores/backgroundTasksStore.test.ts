@@ -31,7 +31,7 @@ describe("backgroundTasksStore", () => {
     expect(useBackgroundTasksStore.getState().tasks[0].startTime).toBe(1000);
   });
 
-  it("selectTasksForSession filters by session and keeps empty-session tasks", () => {
+  it("selectTasksForSession filters by session and excludes empty-session tasks", () => {
     const store = useBackgroundTasksStore.getState();
     store.addTask({
       toolCallId: "tc-a",
@@ -54,7 +54,7 @@ describe("backgroundTasksStore", () => {
 
     const tasks = useBackgroundTasksStore.getState().tasks;
     const forA = selectTasksForSession(tasks, "sid-a");
-    expect(forA.map((t) => t.toolCallId).sort()).toEqual(["tc-a", "tc-empty"]);
+    expect(forA.map((t) => t.toolCallId)).toEqual(["tc-a"]);
   });
 
   it("selectTasksForSession returns empty while sessionId is pending", () => {

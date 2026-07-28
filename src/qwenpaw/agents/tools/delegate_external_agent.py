@@ -596,6 +596,16 @@ async def _stream_action_responses(
     from ...tool_calls import get_call_context
 
     _tc_ctx = get_call_context()
+    # Publish max_runtime onto kill_deadline so coordinator keep_foreground
+    # does not treat a shorter offload hook timeout as a hard kill.
+    if (
+        _tc_ctx is not None
+        and _tc_ctx.kill_deadline is None
+        and max_runtime is not None
+        and max_runtime > 0
+    ):
+        _tc_ctx.kill_deadline = loop.time() + max_runtime
+        _tc_ctx.deadline_changed_event.set()
     if _tc_ctx is not None and _tc_ctx.kill_deadline is not None:
         deadline = _tc_ctx.kill_deadline
     elif max_runtime is not None and max_runtime > 0:

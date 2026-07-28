@@ -127,9 +127,8 @@ export function selectTasksForSession(
   tasks: BackgroundTask[],
   sessionId: string,
 ): BackgroundTask[] {
-  // Empty/pending sessionId → show nothing (avoid cross-session flash while
-  // backend id is resolving). Tasks with empty sessionId (enqueued before
-  // mapping was ready) remain visible once a real session filter is set.
+  // Empty/pending filter → show nothing (avoid cross-session flash).
+  // Tasks with empty sessionId must NOT appear under other sessions.
   if (!sessionId) return [];
-  return tasks.filter((t) => !t.sessionId || t.sessionId === sessionId);
+  return tasks.filter((t) => t.sessionId === sessionId);
 }

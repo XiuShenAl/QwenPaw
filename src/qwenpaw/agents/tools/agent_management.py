@@ -543,13 +543,27 @@ async def chat_with_agent(
         root_session_id=final_root_session,
     )
 
-    response_data = await asyncio.to_thread(
-        collect_final_agent_chat_response,
-        None,
-        request_payload,
-        normalized_to_agent,
-        timeout,
-    )
+    # Register LLM/tool timeout as kill_deadline so keep_foreground clearing
+    # the shorter hook offload window does not force-cancel early (#6245).
+    from ...tool_calls import cancellable_wait
+
+    try:
+        response_data = await cancellable_wait(
+            asyncio.to_thread(
+                collect_final_agent_chat_response,
+                None,
+                request_payload,
+                normalized_to_agent,
+                timeout,
+            ),
+            fallback_secs=float(timeout),
+            as_kill_deadline=True,
+        )
+    except asyncio.CancelledError:
+        return _tool_text_response(
+            "chat_with_agent was cancelled. "
+            "Do not retry unless the user explicitly asks.",
+        )
     if not response_data:
         return _tool_text_response("(No response received)")
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 from agentscope.tool import FunctionTool
 from agentscope.tool import Toolkit
 
@@ -325,6 +326,67 @@ async def test_chat_with_agent_uses_to_thread_for_final_mode(monkeypatch):
     assert calls
     assert calls[-1][0] is agent_management.collect_final_agent_chat_response
     assert "reply from peer" in response.content[0].text
+
+
+async def test_chat_with_agent_arms_kill_deadline_from_timeout(monkeypatch):
+    """Caller timeout must register kill_deadline (may exceed hook offload)."""
+    import asyncio
+
+    from qwenpaw.tool_calls import reset_call_context, set_call_context
+    from qwenpaw.tool_calls._context import ToolCallContext
+
+    monkeypatch.setattr(
+        agent_management,
+        "collect_final_agent_chat_response",
+        lambda *_args, **_kwargs: {
+            "output": [
+                {
+                    "content": [
+                        {"type": "text", "text": "ok"},
+                    ],
+                },
+            ],
+        },
+    )
+
+    async def immediate_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(
+        agent_management.asyncio,
+        "to_thread",
+        immediate_to_thread,
+    )
+    monkeypatch.setattr(
+        agent_management,
+        "agent_exists",
+        lambda _to_agent, _base_url=None: True,
+    )
+
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    ctx = ToolCallContext(
+        tool_call_id="tc-chat",
+        tool_name="chat_with_agent",
+        session_id="s",
+        agent_id="a",
+        root_session_id="r",
+        started_at=now,
+        offload_deadline=now + 300.0,
+        cancel_event=asyncio.Event(),
+    )
+    token = set_call_context(ctx)
+    try:
+        await agent_management.chat_with_agent(
+            to_agent="bot_b",
+            text="hi",
+            timeout=600,
+        )
+        assert ctx.kill_deadline is not None
+        remaining = ctx.kill_deadline - loop.time()
+        assert remaining == pytest.approx(600.0, abs=1.0)
+    finally:
+        reset_call_context(token)
 
 
 async def test_chat_with_agent_normalizes_agent_ids(monkeypatch):
