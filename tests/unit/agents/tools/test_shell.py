@@ -160,19 +160,47 @@ class TestCollapseEmbeddedNewlines:
     """Tests for _collapse_embedded_newlines."""
 
     def test_no_newlines_unchanged(self):
-        assert _collapse_embedded_newlines("echo hello") == "echo hello"
+        command = "echo hello"
+        assert (
+            _collapse_embedded_newlines(command, "powershell.exe") == command
+        )
 
     @patch("qwenpaw.agents.tools.shell.sys")
-    def test_windows_collapses_all(self, mock_sys):
+    def test_windows_cmd_collapses_all(self, mock_sys):
+        mock_sys.platform = "win32"
+        result = _collapse_embedded_newlines(
+            'echo "hello\r\nworld"',
+            r"C:\Windows\System32\cmd.exe",
+        )
+        assert result == 'echo "hello world"'
+
+    @patch("qwenpaw.agents.tools.shell.sys")
+    def test_windows_default_shell_collapses_all(self, mock_sys):
         mock_sys.platform = "win32"
         result = _collapse_embedded_newlines('echo "hello\nworld"')
-        assert "\n" not in result
+        assert result == 'echo "hello world"'
+
+    @pytest.mark.parametrize("shell", ["powershell.exe", "pwsh.exe"])
+    @pytest.mark.parametrize("newline", ["\n", "\r\n"])
+    @patch("qwenpaw.agents.tools.shell.sys")
+    def test_windows_powershell_preserves_here_string(
+        self,
+        mock_sys,
+        newline,
+        shell,
+    ):
+        mock_sys.platform = "win32"
+        command = (
+            f'$content = @"{newline}hello{newline}'
+            f'world{newline}"@{newline}$content'
+        )
+        assert _collapse_embedded_newlines(command, shell) == command
 
     @patch("qwenpaw.agents.tools.shell.sys")
-    def test_unix_preserves_quoted(self, mock_sys):
+    def test_unix_preserves_quoted_newlines(self, mock_sys):
         mock_sys.platform = "linux"
-        result = _collapse_embedded_newlines('echo "hello\nworld"')
-        assert "\n" in result
+        command = 'echo "hello\nworld"'
+        assert _collapse_embedded_newlines(command, "/bin/bash") == command
 
 
 # ---------------------------------------------------------------------------
@@ -402,12 +430,15 @@ class TestExecuteShellCommand:
         mock_proc.returncode = 0
         mock_proc.pid = 12345
 
-        with patch(
-            "qwenpaw.agents.tools.shell.asyncio.create_subprocess_shell",
-            AsyncMock(return_value=mock_proc),
-        ), patch(
-            "qwenpaw.agents.tools.shell.asyncio.wait_for",
-            side_effect=fake_wait_for,
+        with (
+            patch(
+                "qwenpaw.agents.tools.shell.asyncio.create_subprocess_shell",
+                AsyncMock(return_value=mock_proc),
+            ),
+            patch(
+                "qwenpaw.agents.tools.shell.asyncio.wait_for",
+                side_effect=fake_wait_for,
+            ),
         ):
             from qwenpaw.agents.tools.shell import (
                 execute_shell_command,
@@ -442,12 +473,15 @@ class TestExecuteShellCommand:
         mock_proc.returncode = 1
         mock_proc.pid = 12345
 
-        with patch(
-            "qwenpaw.agents.tools.shell.asyncio.create_subprocess_shell",
-            AsyncMock(return_value=mock_proc),
-        ), patch(
-            "qwenpaw.agents.tools.shell.asyncio.wait_for",
-            side_effect=fake_wait_for,
+        with (
+            patch(
+                "qwenpaw.agents.tools.shell.asyncio.create_subprocess_shell",
+                AsyncMock(return_value=mock_proc),
+            ),
+            patch(
+                "qwenpaw.agents.tools.shell.asyncio.wait_for",
+                side_effect=fake_wait_for,
+            ),
         ):
             from qwenpaw.agents.tools.shell import (
                 execute_shell_command,
@@ -479,12 +513,15 @@ class TestExecuteShellCommand:
         mock_proc.returncode = 0
         mock_proc.pid = 12345
 
-        with patch(
-            "qwenpaw.agents.tools.shell.asyncio.create_subprocess_shell",
-            AsyncMock(return_value=mock_proc),
-        ), patch(
-            "qwenpaw.agents.tools.shell.asyncio.wait_for",
-            side_effect=fake_wait_for,
+        with (
+            patch(
+                "qwenpaw.agents.tools.shell.asyncio.create_subprocess_shell",
+                AsyncMock(return_value=mock_proc),
+            ),
+            patch(
+                "qwenpaw.agents.tools.shell.asyncio.wait_for",
+                side_effect=fake_wait_for,
+            ),
         ):
             from qwenpaw.agents.tools.shell import (
                 execute_shell_command,
@@ -516,12 +553,15 @@ class TestExecuteShellCommand:
         mock_proc.returncode = 0
         mock_proc.pid = 12345
 
-        with patch(
-            "qwenpaw.agents.tools.shell.asyncio.create_subprocess_shell",
-            AsyncMock(return_value=mock_proc),
-        ), patch(
-            "qwenpaw.agents.tools.shell.asyncio.wait_for",
-            side_effect=fake_wait_for,
+        with (
+            patch(
+                "qwenpaw.agents.tools.shell.asyncio.create_subprocess_shell",
+                AsyncMock(return_value=mock_proc),
+            ),
+            patch(
+                "qwenpaw.agents.tools.shell.asyncio.wait_for",
+                side_effect=fake_wait_for,
+            ),
         ):
             from qwenpaw.agents.tools.shell import (
                 execute_shell_command,
@@ -553,12 +593,15 @@ class TestExecuteShellCommand:
         mock_proc.returncode = 0
         mock_proc.pid = 12345
 
-        with patch(
-            "qwenpaw.agents.tools.shell.asyncio.create_subprocess_shell",
-            AsyncMock(return_value=mock_proc),
-        ), patch(
-            "qwenpaw.agents.tools.shell.asyncio.wait_for",
-            side_effect=fake_wait_for,
+        with (
+            patch(
+                "qwenpaw.agents.tools.shell.asyncio.create_subprocess_shell",
+                AsyncMock(return_value=mock_proc),
+            ),
+            patch(
+                "qwenpaw.agents.tools.shell.asyncio.wait_for",
+                side_effect=fake_wait_for,
+            ),
         ):
             from qwenpaw.agents.tools.shell import (
                 execute_shell_command,
