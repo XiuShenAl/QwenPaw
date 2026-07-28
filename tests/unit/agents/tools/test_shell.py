@@ -871,9 +871,9 @@ def test_cancel_stderr_message_distinguishes_timeout_and_user():
         assert "42.0" in msg
 
         ctx.cancel_reason = CancelReason.USER
-        assert _cancel_stderr_message(42.0) == (
-            "⚠️ Command execution was cancelled."
-        )
+        user_msg = _cancel_stderr_message(42.0)
+        assert "cancelled by the user" in user_msg
+        assert "Do not retry" in user_msg
     finally:
         reset_call_context(token)
 
@@ -990,7 +990,8 @@ async def test_unix_shell_cancellederror_uses_user_cancel_stderr():
                 sandbox_config=None,
             )
         text = result.content[0].text
-        assert "Command execution was cancelled." in text
+        assert "cancelled by the user" in text
+        assert "Do not retry" in text
         assert "TimeoutError" not in text
     finally:
         reset_call_context(token)
@@ -1150,7 +1151,8 @@ async def test_windows_host_cancel_bridges_stop_event():
         assert seen.get("has_stop") is True
         assert seen.get("stopped") is True
         assert code == -1
-        assert "Command execution was cancelled." in err
+        assert "cancelled by the user" in err
+        assert "Do not retry" in err
         assert "TimeoutError" not in err
     finally:
         reset_call_context(token)
@@ -1294,7 +1296,8 @@ async def test_windows_host_extend_kill_and_no_deadline_ignore_sync_timeout():
         assert "sync-timeout-" not in str(seen)
         assert seen.get("stopped") is True
         assert code == -1
-        assert "Command execution was cancelled." in err
+        assert "cancelled by the user" in err
+        assert "Do not retry" in err
     finally:
         reset_call_context(token)
 

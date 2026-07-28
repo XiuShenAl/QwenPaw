@@ -767,6 +767,95 @@ async def test_request_offload_rejects_when_no_kill_bound_available():
 
 
 @pytest.mark.asyncio
+async def test_user_offload_message_tells_agent_not_to_rerun():
+    """Manual offload ToolResponse must attribute the user and forbid rerun."""
+    from qwenpaw.tool_calls._context import OffloadReason
+
+    coordinator = ToolCoordinator(
+        default_timeout_secs=30.0,
+        offload_on_deadline=False,
+    )
+    tool_call = _ToolCall(id="call-user-offload", name="shell_tool")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        from qwenpaw.tool_calls import cancellable_wait
+
+        started.set()
+        await cancellable_wait(
+            release.wait(),
+            fallback_secs=30.0,
+            as_kill_deadline=True,
+        )
+        yield _text_response(tool_call.id, "done")
+
+    task = asyncio.create_task(
+        _collect(
+            coordinator.execute(
+                tool_call=tool_call,
+                next_handler=next_handler,
+                session_id="session-user-offload",
+                agent_id="agent-1",
+                root_session_id="root-1",
+            ),
+        ),
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert await coordinator.request_offload(
+        "call-user-offload",
+        reason=OffloadReason.USER,
+    )
+    events = await asyncio.wait_for(task, timeout=2)
+    text = events[-1].content[0].text
+    assert "user moved tool" in text.lower() or "reason=user" in text
+    assert "do not re-run" in text.lower()
+    release.set()
+
+
+@pytest.mark.asyncio
+async def test_user_cancel_message_tells_agent_not_to_retry():
+    """User cancel ToolResponse must say cancelled by user and not to retry."""
+    coordinator = ToolCoordinator(
+        offload_on_deadline=False,
+        cancel_grace_period_secs=0.05,
+    )
+    tool_call = _ToolCall(id="call-user-msg", name="slow_tool")
+    started = asyncio.Event()
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        started.set()
+        await asyncio.sleep(10)
+        yield _text_response(tool_call.id, "should not reach")
+
+    task = asyncio.create_task(
+        _collect(
+            coordinator.execute(
+                tool_call=tool_call,
+                next_handler=next_handler,
+                session_id="session-user-msg",
+                agent_id="agent-1",
+                root_session_id="root-1",
+            ),
+        ),
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    await coordinator.cancel(
+        "call-user-msg",
+        reason=CancelReason.USER,
+        force=True,
+    )
+    events = await asyncio.wait_for(task, timeout=2)
+    text = events[-1].content[0].text
+    assert "cancelled by the user" in text.lower()
+    assert "do not retry" in text.lower()
+
+
+@pytest.mark.asyncio
 async def test_force_cancel_sets_cancel_event_before_task_cancel():
     """force=True must set cancel_event so process bridges can stop workers."""
     coordinator = ToolCoordinator(

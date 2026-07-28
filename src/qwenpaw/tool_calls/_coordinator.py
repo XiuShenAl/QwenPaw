@@ -246,15 +246,25 @@ class ToolCoordinator:
             entry.background_task.get_name() if entry.background_task else ""
         )
         reason = ctx.offload_reason.value if ctx.offload_reason else "unknown"
+        if ctx.offload_reason == OffloadReason.USER:
+            text = (
+                f"The user moved tool `{ctx.tool_name}` to the background "
+                f"(task={bg_task_name}, reason=user). Continue other work; "
+                f"do not re-run the same tool. You will be notified when "
+                f"it finishes."
+            )
+        else:
+            text = (
+                f"Tool `{ctx.tool_name}` was automatically moved to the "
+                f"background (task={bg_task_name}, reason={reason}). "
+                f"Continue other work; do not re-run the same tool. "
+                f"You will be notified when it finishes."
+            )
         return ToolResponse(
             content=[
                 TextBlock(
                     type="text",
-                    text=(
-                        f"Tool `{ctx.tool_name}` has been offloaded"
-                        f" to background (task={bg_task_name},"
-                        f" reason={reason}). You may continue."
-                    ),
+                    text=text,
                 ),
             ],
             id=ctx.tool_call_id,
@@ -645,7 +655,7 @@ class ToolCoordinator:
                 content=[
                     TextBlock(
                         type="text",
-                        text="Tool cancelled by manager",
+                        text=self._cancel_message_for_llm(entry.ctx),
                     ),
                 ],
                 id=entry.ctx.tool_call_id,
@@ -705,7 +715,7 @@ class ToolCoordinator:
                     content=[
                         TextBlock(
                             type="text",
-                            text="Cancelled before execution",
+                            text=self._cancel_message_for_llm(entry.ctx),
                         ),
                     ],
                     id=entry.ctx.tool_call_id,
@@ -881,6 +891,26 @@ class ToolCoordinator:
         self._entries.pop(entry.ctx.tool_call_id, None)
         self._store_completed(entry)
         return entry.final_response
+
+    @staticmethod
+    def _cancel_message_for_llm(ctx: ToolCallContext) -> str:
+        """LLM-facing text for a cancelled tool call."""
+        if ctx.cancel_reason == CancelReason.USER:
+            return (
+                f"Tool `{ctx.tool_name}` was cancelled by the user. "
+                "Do not retry this tool call unless the user explicitly asks."
+            )
+        if ctx.cancel_reason == CancelReason.TIMEOUT:
+            return (
+                f"Tool `{ctx.tool_name}` was cancelled due to timeout. "
+                "Do not retry with the same timeout unless the user asks; "
+                "consider a longer timeout or a different approach."
+            )
+        reason = ctx.cancel_reason.value if ctx.cancel_reason else "unknown"
+        return (
+            f"Tool `{ctx.tool_name}` was cancelled (reason={reason}). "
+            "Do not retry unless appropriate for the new situation."
+        )
 
     def _ensure_kill_deadline_for_offload(
         self,

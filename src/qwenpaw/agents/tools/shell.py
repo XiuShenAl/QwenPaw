@@ -420,6 +420,11 @@ def _cancel_stderr_message(timeout: float) -> str:
             f"Please consider increasing the timeout value if this "
             f"command requires more time to complete."
         )
+    if ctx is not None and ctx.cancel_reason == CancelReason.USER:
+        return (
+            "⚠️ Command execution was cancelled by the user. "
+            "Do not retry this command unless the user explicitly asks."
+        )
     return "⚠️ Command execution was cancelled."
 
 
