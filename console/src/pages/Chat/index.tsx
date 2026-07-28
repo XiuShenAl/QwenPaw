@@ -121,7 +121,10 @@ import { openExternalLink } from "../../utils/openExternalLink";
 import { getLastEditorCopy } from "../Coding/lastEditorCopy";
 import { useUploadLimitStore } from "../../stores/uploadLimitStore";
 import ChatSenderTabsPanel from "./components/ChatSenderTabsPanel";
-import { useBackgroundTasksStore } from "../../stores/backgroundTasksStore";
+import {
+  selectTasksForSession,
+  useBackgroundTasksStore,
+} from "../../stores/backgroundTasksStore";
 import {
   hydrateBackgroundTasksForSession,
   stopBackgroundWatchersNotInSession,
@@ -1298,17 +1301,23 @@ export default function ChatPage() {
   // the "other tab is owner" banner on every session switch.
   const isQueueOnlyTab = ownershipResolved && !isOwner;
   const hasQueueItems = messageQueue.length > 0;
-  const bgTaskCount = useBackgroundTasksStore((s) => s.tasks.length);
-  const showSenderBeforeUI = isQueueOnlyTab || hasQueueItems || bgTaskCount > 0;
 
   // Backend session id for the background-task panel (list API + store filter).
   const [bgBackendSessionId, setBgBackendSessionId] = useState("");
+  // Count only this session's bg tasks so other sessions don't force empty
+  // sender chrome / layout padding.
+  const bgTaskCount = useBackgroundTasksStore(
+    (s) => selectTasksForSession(s.tasks, bgBackendSessionId).length,
+  );
+  const showSenderBeforeUI = isQueueOnlyTab || hasQueueItems || bgTaskCount > 0;
 
   // On session load / switch: prune other sessions' watchers, then rehydrate
   // still-offloaded tools from GET /tool-calls/{session_id}.
   useEffect(() => {
+    // Invalidate immediately so A→B never briefly filters/shows A's tasks.
+    setBgBackendSessionId("");
+
     if (!queueSessionId || queueSessionId === "new") {
-      setBgBackendSessionId("");
       stopBackgroundWatchersNotInSession("");
       return;
     }
@@ -1339,6 +1348,8 @@ export default function ChatPage() {
 
     return () => {
       cancelled = true;
+      // Drop stale binding as soon as queueSessionId changes / unmounts.
+      setBgBackendSessionId("");
     };
   }, [queueSessionId]);
 
@@ -2777,12 +2788,7 @@ export default function ChatPage() {
               />
             )}
             <ChatSenderTabsPanel
-              bgSessionId={
-                bgBackendSessionId ||
-                window.currentSessionId ||
-                sessionApi.getBackendSessionId(queueSessionId) ||
-                ""
-              }
+              bgSessionId={bgBackendSessionId}
               queueSessionId={queueSessionId}
               onRemove={handleQueueRemove}
               onEdit={handleQueueEdit}

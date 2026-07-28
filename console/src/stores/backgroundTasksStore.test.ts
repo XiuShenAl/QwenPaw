@@ -57,6 +57,18 @@ describe("backgroundTasksStore", () => {
     expect(forA.map((t) => t.toolCallId).sort()).toEqual(["tc-a", "tc-empty"]);
   });
 
+  it("selectTasksForSession returns empty while sessionId is pending", () => {
+    const store = useBackgroundTasksStore.getState();
+    store.addTask({
+      toolCallId: "tc-a",
+      toolName: "a",
+      sessionId: "sid-a",
+      startTime: 1,
+    });
+    const tasks = useBackgroundTasksStore.getState().tasks;
+    expect(selectTasksForSession(tasks, "")).toEqual([]);
+  });
+
   it("removeTasks drops only requested ids", () => {
     const store = useBackgroundTasksStore.getState();
     store.addTask({

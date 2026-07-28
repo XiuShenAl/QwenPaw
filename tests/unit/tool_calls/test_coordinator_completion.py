@@ -403,7 +403,13 @@ async def test_extend_offload_deadline_rejects_after_offload():
     async def next_handler(
         tool_call: _ToolCall,
     ) -> AsyncGenerator[Any, None]:
-        await asyncio.sleep(1)
+        from qwenpaw.tool_calls import cancellable_wait
+
+        await cancellable_wait(
+            asyncio.sleep(1),
+            fallback_secs=5.0,
+            as_kill_deadline=True,
+        )
         yield _text_response(tool_call.id, "done")
 
     events = await asyncio.wait_for(
@@ -446,9 +452,14 @@ async def test_offload_does_not_set_cancel_event_background_keeps_running():
     async def next_handler(
         tool_call: _ToolCall,
     ) -> AsyncGenerator[Any, None]:
-        await asyncio.sleep(0.05)
-        from qwenpaw.tool_calls import get_call_context
+        from qwenpaw.tool_calls import cancellable_wait, get_call_context
 
+        # Arm a long kill so seeded post-offload kill does not race this test.
+        await cancellable_wait(
+            asyncio.sleep(0.05),
+            fallback_secs=5.0,
+            as_kill_deadline=True,
+        )
         ctx = get_call_context()
         assert ctx is not None
         assert not ctx.cancel_event.is_set()
@@ -476,6 +487,7 @@ async def test_offload_does_not_set_cancel_event_background_keeps_running():
     assert not entry.ctx.cancel_event.is_set()
     assert entry.background_task is not None
     assert not entry.background_task.done()
+    assert entry.ctx.kill_deadline is not None
 
     await asyncio.wait_for(still_running.wait(), timeout=1)
     release.set()
@@ -623,19 +635,21 @@ async def test_foreground_cancel_force_cancels_non_cooperative_tool():
 async def test_background_cancel_force_cancels_non_cooperative_tool():
     """Background Cancel must not busy-continue; grace + force instead."""
     coordinator = ToolCoordinator(
-        default_timeout_secs=0.001,
-        offload_on_deadline=True,
+        default_timeout_secs=30.0,
+        offload_on_deadline=False,
         cancel_grace_period_secs=0.05,
     )
     tool_call = _ToolCall(id="call-bg-cancel", name="bg_ignore_cancel")
+    started = asyncio.Event()
 
     async def next_handler(
         tool_call: _ToolCall,
     ) -> AsyncGenerator[Any, None]:
+        started.set()
         await asyncio.sleep(10)
         yield _text_response(tool_call.id, "should not reach")
 
-    events = await asyncio.wait_for(
+    task = asyncio.create_task(
         _collect(
             coordinator.execute(
                 tool_call=tool_call,
@@ -645,8 +659,10 @@ async def test_background_cancel_force_cancels_non_cooperative_tool():
                 root_session_id="root-1",
             ),
         ),
-        timeout=2,
     )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert await coordinator.request_offload("call-bg-cancel") is True
+    events = await asyncio.wait_for(task, timeout=2)
     assert events[-1].metadata.get("offloaded") is True
 
     entry = coordinator.get("call-bg-cancel")
@@ -663,6 +679,91 @@ async def test_background_cancel_force_cancels_non_cooperative_tool():
     await asyncio.wait_for(entry.background_task, timeout=2)
     assert entry.force_cancelled is True
     assert entry.ctx.cancel_reason == CancelReason.USER
+
+
+@pytest.mark.asyncio
+async def test_offload_without_kill_seeds_kill_deadline():
+    """Offload of unbound tools must seed kill_deadline (no forever bg)."""
+    coordinator = ToolCoordinator(
+        default_timeout_secs=0.02,
+        offload_on_deadline=True,
+    )
+    tool_call = _ToolCall(id="call-seed-kill", name="unbound_tool")
+    release = asyncio.Event()
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        await release.wait()
+        yield _text_response(tool_call.id, "bg-done")
+
+    events = await asyncio.wait_for(
+        _collect(
+            coordinator.execute(
+                tool_call=tool_call,
+                next_handler=next_handler,
+                session_id="session-seed-kill",
+                agent_id="agent-1",
+                root_session_id="root-1",
+            ),
+        ),
+        timeout=2,
+    )
+    assert events[-1].metadata.get("offloaded") is True
+    entry = coordinator.get("call-seed-kill")
+    assert entry is not None
+    assert entry.ctx.kill_deadline is not None
+    assert not entry.ctx.cancel_event.is_set()
+    release.set()
+    await asyncio.wait_for(
+        _wait_for_hint(coordinator, "session-seed-kill"),
+        timeout=2,
+    )
+
+
+@pytest.mark.asyncio
+async def test_request_offload_rejects_when_no_kill_bound_available():
+    """Manual offload without kill and without seedable timeout must fail."""
+    coordinator = ToolCoordinator(
+        default_timeout_secs=None,
+        offload_on_deadline=False,
+    )
+    tool_call = _ToolCall(id="call-no-bound", name="no_timeout_tool")
+    started = asyncio.Event()
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        started.set()
+        await asyncio.sleep(10)
+        yield _text_response(tool_call.id, "done")
+
+    task = asyncio.create_task(
+        _collect(
+            coordinator.execute(
+                tool_call=tool_call,
+                next_handler=next_handler,
+                session_id="session-no-bound",
+                agent_id="agent-1",
+                root_session_id="root-1",
+            ),
+        ),
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    entry = coordinator.get("call-no-bound")
+    assert entry is not None
+    assert entry.ctx.kill_deadline is None
+    assert entry.ctx.offload_deadline is None
+
+    ok = await coordinator.request_offload("call-no-bound")
+    assert ok is False
+
+    await coordinator.cancel(
+        "call-no-bound",
+        reason=CancelReason.USER,
+        force=True,
+    )
+    await asyncio.wait_for(task, timeout=2)
 
 
 @pytest.mark.asyncio

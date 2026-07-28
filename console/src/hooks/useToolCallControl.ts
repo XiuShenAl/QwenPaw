@@ -80,11 +80,6 @@ export function useToolCallControl(
     [sessionId, toolCallId],
   );
 
-  const registerIfAutoOffloaded = useCallback(() => {
-    if (defaultPolicyRef.current !== "offload") return;
-    tryRegisterBackground("local-countdown-zero");
-  }, [tryRegisterBackground]);
-
   const startLocalCountdown = useCallback(() => {
     if (timerRef.current) {
       clearInterval(timerRef.current);
@@ -132,7 +127,8 @@ export function useToolCallControl(
       });
 
       if (offR !== null && offR <= 0) {
-        registerIfAutoOffloaded();
+        // Do not register a background task from the local countdown alone —
+        // wait for poll/getInfo to confirm status === "offloaded".
         setState((s) => (s.bannerVisible ? { ...s, bannerVisible: false } : s));
         // Stop only when kill countdown is also done/absent.
         if (killR === null || killR <= 0) {
@@ -148,7 +144,7 @@ export function useToolCallControl(
         }
       }
     }, 1000);
-  }, [registerIfAutoOffloaded]);
+  }, []);
 
   const applyServerValues = useCallback(
     (offload: number | null, kill: number | null) => {
@@ -297,25 +293,8 @@ export function useToolCallControl(
       return;
     }
 
-    const elapsed = (performance.now() - serverTimestampRef.current) / 1000;
-    const offR =
-      serverOffloadRef.current !== null
-        ? Math.max(0, serverOffloadRef.current - elapsed)
-        : null;
-
-    // Deadline reached (or about to) under offload policy → treat as auto-offload.
-    if (
-      defaultPolicyRef.current === "offload" &&
-      serverOffloadRef.current !== null &&
-      offR !== null &&
-      offR <= 2
-    ) {
-      tryRegisterBackground("leave-calling-deadline");
-      fetchedRef.current = false;
-      autoTriggeredRef.current = false;
-      return;
-    }
-
+    // Only register after the backend confirms offloaded — local countdown
+    // reaching zero is not sufficient (policy changes / clock skew).
     const sid = resolveSessionId(sessionId);
     if (sid) {
       void toolCallsApi

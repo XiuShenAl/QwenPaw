@@ -137,6 +137,13 @@ class ToolCoordinator:
                         self._offload_on_deadline
                         or ctx.offload_reason == OffloadReason.USER
                     ):
+                        # Offload must not create unbounded background work.
+                        if not self._ensure_kill_deadline_for_offload(ctx):
+                            ctx.cancel_event.set()
+                            ctx.cancel_reason = CancelReason.TIMEOUT
+                            await self._await_grace_or_force_cancel(entry)
+                            terminal = "completed"
+                            break
                         self._handle_deadline_reached(ctx)
                         terminal = "offload"
                         break
@@ -348,6 +355,9 @@ class ToolCoordinator:
     ) -> bool:
         entry = self._entries.get(tool_call_id)
         if entry is None or entry.status != ToolCallStatus.RUNNING:
+            return False
+        # Refuse unbounded background: require an existing or seedable kill.
+        if not self._ensure_kill_deadline_for_offload(entry.ctx):
             return False
         entry.ctx.offload_reason = reason
         entry.ctx.offload_deadline = asyncio.get_running_loop().time()
@@ -871,6 +881,32 @@ class ToolCoordinator:
         self._entries.pop(entry.ctx.tool_call_id, None)
         self._store_completed(entry)
         return entry.final_response
+
+    def _ensure_kill_deadline_for_offload(
+        self,
+        ctx: ToolCallContext,
+    ) -> bool:
+        """Ensure background offload has a hard kill bound.
+
+        Returns True when ``kill_deadline`` already exists or was seeded from
+        the tool/coordinator timeout. Returns False when no bound is
+        available (caller should refuse offload / cancel instead).
+        """
+        if ctx.kill_deadline is not None:
+            return True
+        bound = self._resolve_timeout(ctx.agent_id, ctx.tool_name, None)
+        if bound is None or bound <= 0:
+            return False
+        loop = asyncio.get_running_loop()
+        ctx.kill_deadline = loop.time() + bound
+        ctx.deadline_changed_event.set()
+        logger.info(
+            "Seeded kill_deadline (+%.1fs) for offload of %s/%s",
+            bound,
+            ctx.tool_name,
+            ctx.tool_call_id,
+        )
+        return True
 
     def _resolve_timeout(
         self,

@@ -266,14 +266,27 @@ export function stopBackgroundTaskWatcher(toolCallId: string): void {
 
 /**
  * User cancelled from panel: stop stream, call cancel API, update store.
+ * On API failure, resume the watcher so the task is not orphaned.
  */
 export async function cancelBackgroundTask(
   sessionId: string,
   toolCallId: string,
 ): Promise<void> {
   stopBackgroundTaskWatcher(toolCallId);
+  try {
+    await toolCallsApi.cancel(sessionId, toolCallId);
+  } catch (err) {
+    finalizedIds.delete(toolCallId);
+    startBackgroundTaskWatcher(sessionId, toolCallId);
+    message.error(
+      i18n.t(
+        "chat.backgroundTasks.cancelFailed",
+        "Failed to cancel background task",
+      ),
+    );
+    throw err;
+  }
   finalizedIds.add(toolCallId);
-  await toolCallsApi.cancel(sessionId, toolCallId);
   const live =
     useBackgroundTasksStore
       .getState()

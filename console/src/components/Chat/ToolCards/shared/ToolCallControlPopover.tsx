@@ -81,19 +81,28 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
   const dismiss = (showToast = false) => {
     if (timerRef.current) clearInterval(timerRef.current);
     if (showToast) {
-      // Countdown reached 0: honor settings policy (not the post-prevent UI mode).
+      // Countdown reached 0: only toast/register after backend confirms
+      // offloaded (local timer alone can race policy changes).
       if (isOffloadPolicy) {
-        registerBackgroundTask({
-          sessionId,
-          toolCallId,
-          toolName: toolName || toolCallId,
-        });
-        message.info(
-          t(
-            "tool.control.offloadMode.toastAuto",
-            "Moved to background automatically",
-          ),
-        );
+        void toolCallsApi
+          .getInfo(sessionId, toolCallId)
+          .then((info) => {
+            if (info.status !== "offloaded") return;
+            registerBackgroundTask({
+              sessionId,
+              toolCallId,
+              toolName: toolName || toolCallId,
+            });
+            message.info(
+              t(
+                "tool.control.offloadMode.toastAuto",
+                "Moved to background automatically",
+              ),
+            );
+          })
+          .catch(() => {
+            /* poll in useToolCallControl may still confirm shortly */
+          });
       } else {
         message.info(
           t(

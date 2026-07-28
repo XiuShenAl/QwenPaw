@@ -127,8 +127,9 @@ export function selectTasksForSession(
   tasks: BackgroundTask[],
   sessionId: string,
 ): BackgroundTask[] {
-  // No filter id → show all. Tasks with empty sessionId (enqueued before
-  // window.currentSessionId was ready) are always visible.
-  if (!sessionId) return tasks;
+  // Empty/pending sessionId → show nothing (avoid cross-session flash while
+  // backend id is resolving). Tasks with empty sessionId (enqueued before
+  // mapping was ready) remain visible once a real session filter is set.
+  if (!sessionId) return [];
   return tasks.filter((t) => !t.sessionId || t.sessionId === sessionId);
 }
