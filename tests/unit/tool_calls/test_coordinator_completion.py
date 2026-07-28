@@ -530,3 +530,183 @@ async def test_keep_foreground_survives_offload_deadline_then_kill():
     if entry is not None:
         assert entry.ctx.cancel_event.is_set()
         assert entry.ctx.cancel_reason == CancelReason.TIMEOUT
+
+
+@pytest.mark.asyncio
+async def test_keep_foreground_without_kill_cancels_on_offload_expiry():
+    """#6245 without as_kill_deadline: keep_foreground must not hang forever.
+
+    When offload expires and kill_deadline was never armed, fall back to
+    cancel + grace/force so execute() returns.
+    """
+    coordinator = ToolCoordinator(
+        default_timeout_secs=0.03,
+        offload_on_deadline=False,
+        cancel_grace_period_secs=0.05,
+    )
+    tool_call = _ToolCall(id="call-no-kill", name="sleep_only_tool")
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        # Non-cooperative: ignores cancel_event, never arms kill_deadline.
+        await asyncio.sleep(10)
+        yield _text_response(tool_call.id, "should not reach")
+
+    events = await asyncio.wait_for(
+        _collect(
+            coordinator.execute(
+                tool_call=tool_call,
+                next_handler=next_handler,
+                session_id="session-no-kill",
+                agent_id="agent-1",
+                root_session_id="root-1",
+            ),
+        ),
+        timeout=2,
+    )
+
+    final = events[-1]
+    assert isinstance(final, ToolResponse)
+    assert "should not reach" not in final.content[0].text
+    entry = coordinator.get("call-no-kill")
+    assert entry is not None
+    assert entry.ctx.cancel_reason == CancelReason.TIMEOUT
+    assert entry.force_cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_foreground_cancel_force_cancels_non_cooperative_tool():
+    """Foreground Cancel must grace then force_cancel non-cooperative tools."""
+    coordinator = ToolCoordinator(
+        offload_on_deadline=False,
+        cancel_grace_period_secs=0.05,
+    )
+    tool_call = _ToolCall(id="call-fg-cancel", name="ignore_cancel_tool")
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        await asyncio.sleep(10)
+        yield _text_response(tool_call.id, "should not reach")
+
+    task = asyncio.create_task(
+        _collect(
+            coordinator.execute(
+                tool_call=tool_call,
+                next_handler=next_handler,
+                session_id="session-fg-cancel",
+                agent_id="agent-1",
+                root_session_id="root-1",
+            ),
+        ),
+    )
+
+    await asyncio.sleep(0.02)
+    ok = await coordinator.cancel(
+        "call-fg-cancel",
+        reason=CancelReason.USER,
+    )
+    assert ok is True
+
+    events = await asyncio.wait_for(task, timeout=2)
+    final = events[-1]
+    assert isinstance(final, ToolResponse)
+    assert "should not reach" not in final.content[0].text
+    entry = coordinator.get("call-fg-cancel")
+    assert entry is not None
+    assert entry.ctx.cancel_reason == CancelReason.USER
+    assert entry.force_cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_background_cancel_force_cancels_non_cooperative_tool():
+    """Background Cancel must not busy-continue; grace + force instead."""
+    coordinator = ToolCoordinator(
+        default_timeout_secs=0.001,
+        offload_on_deadline=True,
+        cancel_grace_period_secs=0.05,
+    )
+    tool_call = _ToolCall(id="call-bg-cancel", name="bg_ignore_cancel")
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        await asyncio.sleep(10)
+        yield _text_response(tool_call.id, "should not reach")
+
+    events = await asyncio.wait_for(
+        _collect(
+            coordinator.execute(
+                tool_call=tool_call,
+                next_handler=next_handler,
+                session_id="session-bg-cancel",
+                agent_id="agent-1",
+                root_session_id="root-1",
+            ),
+        ),
+        timeout=2,
+    )
+    assert events[-1].metadata.get("offloaded") is True
+
+    entry = coordinator.get("call-bg-cancel")
+    assert entry is not None
+    assert entry.background_task is not None
+    assert not entry.background_task.done()
+
+    ok = await coordinator.cancel(
+        "call-bg-cancel",
+        reason=CancelReason.USER,
+    )
+    assert ok is True
+
+    await asyncio.wait_for(entry.background_task, timeout=2)
+    assert entry.force_cancelled is True
+    assert entry.ctx.cancel_reason == CancelReason.USER
+
+
+@pytest.mark.asyncio
+async def test_force_cancel_sets_cancel_event_before_task_cancel():
+    """force=True must set cancel_event so process bridges can stop workers."""
+    coordinator = ToolCoordinator(
+        offload_on_deadline=False,
+        cancel_grace_period_secs=0.05,
+    )
+    tool_call = _ToolCall(id="call-force", name="force_tool")
+    started = asyncio.Event()
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        started.set()
+        await asyncio.sleep(10)
+        yield _text_response(tool_call.id, "should not reach")
+
+    task = asyncio.create_task(
+        _collect(
+            coordinator.execute(
+                tool_call=tool_call,
+                next_handler=next_handler,
+                session_id="session-force",
+                agent_id="agent-1",
+                root_session_id="root-1",
+            ),
+        ),
+    )
+
+    await asyncio.wait_for(started.wait(), timeout=1)
+    entry = coordinator.get("call-force")
+    assert entry is not None
+    assert not entry.ctx.cancel_event.is_set()
+
+    ok = await coordinator.cancel(
+        "call-force",
+        reason=CancelReason.USER,
+        force=True,
+    )
+    assert ok is True
+    assert entry.ctx.cancel_event.is_set()
+    assert entry.ctx.cancel_reason == CancelReason.USER
+    assert entry.force_cancelled is True
+
+    await asyncio.wait_for(task, timeout=2)

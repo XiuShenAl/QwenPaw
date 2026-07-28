@@ -16,6 +16,7 @@ Covers:
 
 import os
 import shlex
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -28,6 +29,8 @@ from qwenpaw.agents.tools.shell import (
     _collapse_embedded_newlines,
     _collapse_newlines_outside_quotes,
     _execute_in_sandbox,
+    _execute_subprocess_sync,
+    _execute_windows_host,
     _extract_powershell_command,
     _is_cmd,
     _is_dangerous_self_kill,
@@ -991,3 +994,444 @@ async def test_unix_shell_cancellederror_uses_user_cancel_stderr():
         assert "TimeoutError" not in text
     finally:
         reset_call_context(token)
+
+
+def test_execute_subprocess_sync_honors_stop_event(tmp_path):
+    """stop_event must kill the process tree before the full timeout."""
+    import threading
+    import time
+
+    stop_event = threading.Event()
+
+    def _arm_stop() -> None:
+        time.sleep(0.15)
+        stop_event.set()
+
+    killed_pids: list[int] = []
+
+    def _fake_kill(pid: int) -> None:
+        killed_pids.append(pid)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+    armer = threading.Thread(target=_arm_stop)
+    armer.start()
+    started = time.monotonic()
+    try:
+        with patch(
+            "qwenpaw.agents.tools.shell._kill_process_tree_win32",
+            side_effect=_fake_kill,
+        ):
+            code, _stdout, _stderr = _execute_subprocess_sync(
+                "sleep 30",
+                str(tmp_path),
+                timeout=60.0,
+                shell_executable="/bin/sh",
+                stop_event=stop_event,
+            )
+    finally:
+        armer.join(timeout=2)
+
+    elapsed = time.monotonic() - started
+    assert code == -1
+    assert killed_pids
+    assert elapsed < 5.0
+
+
+@pytest.mark.asyncio
+async def test_windows_host_arms_kill_deadline():
+    import asyncio
+
+    from qwenpaw.tool_calls import reset_call_context, set_call_context
+    from qwenpaw.tool_calls._context import ToolCallContext
+
+    loop = asyncio.get_running_loop()
+    ctx = ToolCallContext(
+        tool_call_id="tc-win-kill",
+        tool_name="execute_shell_command",
+        session_id="s",
+        agent_id="a",
+        root_session_id="r",
+        started_at=loop.time(),
+        offload_deadline=None,
+        cancel_event=asyncio.Event(),
+    )
+    token = set_call_context(ctx)
+
+    def _fake_sync(*_args, **_kwargs):
+        return 0, "ok", ""
+
+    try:
+        with patch(
+            "qwenpaw.agents.tools.shell._execute_subprocess_sync",
+            side_effect=_fake_sync,
+        ):
+            code, out, _err = await _execute_windows_host(
+                "echo ok",
+                "/tmp",
+                3.5,
+                {"PATH": "/bin"},
+                None,
+            )
+        assert code == 0
+        assert out == "ok"
+        assert ctx.kill_deadline is not None
+        remaining = ctx.kill_deadline - loop.time()
+        assert remaining == pytest.approx(3.5, abs=0.5)
+    finally:
+        reset_call_context(token)
+
+
+@pytest.mark.asyncio
+async def test_windows_host_cancel_bridges_stop_event():
+    import asyncio
+    import time
+
+    from qwenpaw.tool_calls import reset_call_context, set_call_context
+    from qwenpaw.tool_calls._context import CancelReason, ToolCallContext
+
+    loop = asyncio.get_running_loop()
+    ctx = ToolCallContext(
+        tool_call_id="tc-win-cancel",
+        tool_name="execute_shell_command",
+        session_id="s",
+        agent_id="a",
+        root_session_id="r",
+        started_at=loop.time(),
+        offload_deadline=None,
+        cancel_event=asyncio.Event(),
+    )
+    token = set_call_context(ctx)
+    seen: dict[str, object] = {}
+
+    def _fake_sync(
+        _cmd,
+        _cwd,
+        _timeout,
+        _env=None,
+        _shell_executable=None,
+        stop_event=None,
+    ):
+        seen["has_stop"] = stop_event is not None
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            if stop_event is not None and stop_event.is_set():
+                seen["stopped"] = True
+                return -1, "", ""
+            time.sleep(0.02)
+        return 0, "too-late", ""
+
+    try:
+        with patch(
+            "qwenpaw.agents.tools.shell._execute_subprocess_sync",
+            side_effect=_fake_sync,
+        ):
+            task = asyncio.create_task(
+                _execute_windows_host(
+                    "sleep 99",
+                    "/tmp",
+                    30.0,
+                    {"PATH": "/bin"},
+                    None,
+                ),
+            )
+            await asyncio.sleep(0.05)
+            assert ctx.kill_deadline is not None
+            ctx.cancel_reason = CancelReason.USER
+            ctx.cancel_event.set()
+            code, _out, err = await asyncio.wait_for(task, timeout=2)
+        # Thread may observe stop_event slightly after CancelledError returns.
+        for _ in range(50):
+            if seen.get("stopped"):
+                break
+            await asyncio.sleep(0.02)
+        assert seen.get("has_stop") is True
+        assert seen.get("stopped") is True
+        assert code == -1
+        assert "Command execution was cancelled." in err
+        assert "TimeoutError" not in err
+    finally:
+        reset_call_context(token)
+
+
+@pytest.mark.asyncio
+async def test_windows_host_ctx_passes_no_sync_timeout():
+    """Under ToolCallContext, sync must not get a frozen command timeout."""
+    import asyncio
+    import time
+
+    from qwenpaw.tool_calls import reset_call_context, set_call_context
+    from qwenpaw.tool_calls._context import ToolCallContext
+
+    loop = asyncio.get_running_loop()
+    ctx = ToolCallContext(
+        tool_call_id="tc-win-sync-to",
+        tool_name="execute_shell_command",
+        session_id="s",
+        agent_id="a",
+        root_session_id="r",
+        started_at=loop.time(),
+        offload_deadline=None,
+        cancel_event=asyncio.Event(),
+    )
+    token = set_call_context(ctx)
+    seen: dict[str, object] = {}
+
+    def _fake_sync(
+        _cmd,
+        _cwd,
+        timeout,
+        _env=None,
+        _shell_executable=None,
+        stop_event=None,
+    ):
+        seen["timeout"] = timeout
+        start = time.monotonic()
+        # Survive past the original command timeout (0.08s).
+        while time.monotonic() - start < 0.2:
+            if stop_event is not None and stop_event.is_set():
+                return -1, "", f"sync-timeout-{timeout}"
+            time.sleep(0.02)
+        return 0, "survived", ""
+
+    try:
+        with patch(
+            "qwenpaw.agents.tools.shell._execute_subprocess_sync",
+            side_effect=_fake_sync,
+        ):
+            code, out, _err = await asyncio.wait_for(
+                _execute_windows_host(
+                    "sleep 99",
+                    "/tmp",
+                    0.08,
+                    {"PATH": "/bin"},
+                    None,
+                ),
+                timeout=2,
+            )
+        assert seen.get("timeout") is None
+        assert code == 0
+        assert out == "survived"
+    finally:
+        reset_call_context(token)
+
+
+@pytest.mark.asyncio
+async def test_windows_host_extend_kill_and_no_deadline_ignore_sync_timeout():
+    """extend_kill / no_deadline must not be overridden by sync timeout."""
+    import asyncio
+    import time
+
+    from qwenpaw.tool_calls import reset_call_context, set_call_context
+    from qwenpaw.tool_calls._context import CancelReason, ToolCallContext
+
+    loop = asyncio.get_running_loop()
+    ctx = ToolCallContext(
+        tool_call_id="tc-win-extend",
+        tool_name="execute_shell_command",
+        session_id="s",
+        agent_id="a",
+        root_session_id="r",
+        started_at=loop.time(),
+        offload_deadline=None,
+        cancel_event=asyncio.Event(),
+    )
+    token = set_call_context(ctx)
+    seen: dict[str, object] = {}
+
+    def _fake_sync(
+        _cmd,
+        _cwd,
+        timeout,
+        _env=None,
+        _shell_executable=None,
+        stop_event=None,
+    ):
+        seen["timeout"] = timeout
+        start = time.monotonic()
+        while time.monotonic() - start < 1.5:
+            if stop_event is not None and stop_event.is_set():
+                seen["stopped"] = True
+                return -1, "", "stopped-by-event"
+            if timeout is not None and time.monotonic() - start >= timeout:
+                return -1, "", f"sync-timeout-{timeout}"
+            time.sleep(0.02)
+        return 0, "still-running", ""
+
+    try:
+        with patch(
+            "qwenpaw.agents.tools.shell._execute_subprocess_sync",
+            side_effect=_fake_sync,
+        ):
+            task = asyncio.create_task(
+                _execute_windows_host(
+                    "sleep 99",
+                    "/tmp",
+                    0.1,
+                    {"PATH": "/bin"},
+                    None,
+                ),
+            )
+            await asyncio.sleep(0.05)
+            assert ctx.kill_deadline is not None
+            # Mimic extend_kill(+10s) then no_deadline clear.
+            ctx.kill_deadline = loop.time() + 10.0
+            ctx.deadline_changed_event.set()
+            await asyncio.sleep(0.2)
+            assert not task.done()
+            ctx.kill_deadline = None
+            ctx.deadline_changed_event.set()
+            await asyncio.sleep(0.2)
+            assert not task.done()
+            # Cancel still terminates promptly via stop_event.
+            ctx.cancel_reason = CancelReason.USER
+            ctx.cancel_event.set()
+            code, _out, err = await asyncio.wait_for(task, timeout=2)
+
+        assert seen.get("timeout") is None
+        assert "sync-timeout-" not in str(seen)
+        assert seen.get("stopped") is True
+        assert code == -1
+        assert "Command execution was cancelled." in err
+    finally:
+        reset_call_context(token)
+
+
+@pytest.mark.asyncio
+async def test_windows_host_without_ctx_keeps_sync_timeout():
+    """Direct/SDK calls (no ctx) still use the command timeout in sync."""
+    seen: dict[str, object] = {}
+
+    def _fake_sync(
+        _cmd,
+        _cwd,
+        timeout,
+        _env=None,
+        _shell_executable=None,
+        stop_event=None,
+    ):
+        seen["timeout"] = timeout
+        return 0, "ok", ""
+
+    with patch(
+        "qwenpaw.agents.tools.shell._execute_subprocess_sync",
+        side_effect=_fake_sync,
+    ):
+        code, out, _err = await _execute_windows_host(
+            "echo ok",
+            "/tmp",
+            4.25,
+            {"PATH": "/bin"},
+            None,
+        )
+    assert code == 0
+    assert out == "ok"
+    assert seen.get("timeout") == 4.25
+
+
+@pytest.mark.asyncio
+async def test_windows_host_task_cancel_still_sets_stop_event():
+    """force/task cancel without relying on bridge must still stop sync."""
+    import asyncio
+    import time
+
+    from qwenpaw.tool_calls import reset_call_context, set_call_context
+    from qwenpaw.tool_calls._context import ToolCallContext
+
+    loop = asyncio.get_running_loop()
+    ctx = ToolCallContext(
+        tool_call_id="tc-win-force-stop",
+        tool_name="execute_shell_command",
+        session_id="s",
+        agent_id="a",
+        root_session_id="r",
+        started_at=loop.time(),
+        offload_deadline=None,
+        cancel_event=asyncio.Event(),
+    )
+    token = set_call_context(ctx)
+    seen: dict[str, object] = {}
+
+    def _fake_sync(
+        _cmd,
+        _cwd,
+        timeout,
+        _env=None,
+        _shell_executable=None,
+        stop_event=None,
+    ):
+        seen["timeout"] = timeout
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            if stop_event is not None and stop_event.is_set():
+                seen["stopped"] = True
+                return -1, "", ""
+            time.sleep(0.02)
+        return 0, "leaked", ""
+
+    try:
+        with patch(
+            "qwenpaw.agents.tools.shell._execute_subprocess_sync",
+            side_effect=_fake_sync,
+        ):
+            task = asyncio.create_task(
+                _execute_windows_host(
+                    "sleep 99",
+                    "/tmp",
+                    30.0,
+                    {"PATH": "/bin"},
+                    None,
+                ),
+            )
+            await asyncio.sleep(0.05)
+            # Equivalence of force cancel: cancel the awaitable without
+            # first setting cancel_event (bridge alone would not fire).
+            assert not ctx.cancel_event.is_set()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        for _ in range(50):
+            if seen.get("stopped"):
+                break
+            await asyncio.sleep(0.02)
+        assert seen.get("timeout") is None
+        assert seen.get("stopped") is True
+    finally:
+        reset_call_context(token)
+
+
+@pytest.mark.asyncio
+async def test_execute_shell_command_win32_uses_windows_host():
+    """Host shell on win32 must go through the dual-deadline helper."""
+    from qwenpaw.agents.tools.shell import execute_shell_command
+
+    with (
+        patch("qwenpaw.agents.tools.shell.sys.platform", "win32"),
+        patch(
+            "qwenpaw.agents.tools.shell._execute_windows_host",
+            AsyncMock(return_value=(0, "win-ok", "")),
+        ) as mock_win,
+        patch(
+            "qwenpaw.agents.tools.shell.get_current_shell_command_timeout",
+            return_value=None,
+        ),
+        patch(
+            "qwenpaw.agents.tools.shell.get_current_workspace_dir",
+            return_value=None,
+        ),
+        patch(
+            "qwenpaw.agents.tools.shell.get_current_shell_command_executable",
+            return_value=None,
+        ),
+    ):
+        result = await execute_shell_command(
+            "echo hi",
+            timeout=9.0,
+            sandbox_config=None,
+        )
+
+    mock_win.assert_awaited_once()
+    assert "win-ok" in result.content[0].text

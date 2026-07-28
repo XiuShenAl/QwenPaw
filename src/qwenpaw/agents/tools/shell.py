@@ -11,6 +11,8 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional
@@ -222,9 +224,10 @@ def _extract_powershell_command(cmd: str) -> tuple[str | None, str]:
 def _execute_subprocess_sync(
     cmd: str,
     cwd: str,
-    timeout: float,
+    timeout: float | None,
     env: dict | None = None,
     shell_executable: str | None = None,
+    stop_event: threading.Event | None = None,
 ) -> tuple[int, str, str]:
     """Execute subprocess synchronously in a thread.
 
@@ -239,6 +242,14 @@ def _execute_subprocess_sync(
     only waits for the direct child (``cmd.exe``) to exit, so commands
     that spawn background processes return immediately.
 
+    When *stop_event* is set (bridged from ``cancel_event`` / kill
+    deadline), the process tree is killed via
+    :func:`_kill_process_tree_win32` so host cancel is not ignored.
+
+    When *timeout* is ``None``, only *stop_event* or natural process exit
+    ends the wait — used under ``ToolCallContext`` so ``extend_kill`` /
+    ``no_deadline`` can update lifetime without a frozen sync ceiling.
+
     .. note::
 
        Callers must pre-process *cmd* through
@@ -251,13 +262,15 @@ def _execute_subprocess_sync(
             newlines — see note above).
         cwd (`str`):
             The working directory for the command execution.
-        timeout (`float`):
-            The maximum time (in seconds) allowed for the command to run.
+        timeout (`float | None`):
+            Hard wall-clock limit, or ``None`` to wait until stop/exit.
         env (`dict | None`):
             Environment variables for the subprocess.
         shell_executable (`str | None`):
             Path to the shell executable. When ``None``, defaults to
             ``cmd.exe``.
+        stop_event (`threading.Event | None`):
+            Optional cooperative stop signal from the asyncio side.
 
     Returns:
         `tuple[int, str, str]`:
@@ -315,10 +328,30 @@ def _execute_subprocess_sync(
         stderr_file = None
 
         timed_out = False
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
+        stopped = False
+        deadline = (
+            None if timeout is None else time.monotonic() + max(0.0, timeout)
+        )
+        poll_secs = 0.2
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                stopped = True
+                break
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                wait_for = min(poll_secs, remaining)
+            else:
+                wait_for = poll_secs
+            try:
+                proc.wait(timeout=wait_for)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+
+        if timed_out or stopped:
             _kill_process_tree_win32(proc.pid)
             try:
                 proc.wait(timeout=5)
@@ -331,6 +364,9 @@ def _execute_subprocess_sync(
         stdout_str = _read_temp_file(stdout_path)
         stderr_str = _read_temp_file(stderr_path)
 
+        if stopped:
+            # Async side replaces with cancel/timeout stderr via cancel_reason.
+            return -1, stdout_str, stderr_str
         if timed_out:
             timeout_msg = (
                 f"Command execution exceeded the timeout of {timeout} seconds."
@@ -385,6 +421,69 @@ def _cancel_stderr_message(timeout: float) -> str:
             f"command requires more time to complete."
         )
     return "⚠️ Command execution was cancelled."
+
+
+async def _execute_windows_host(
+    cmd: str,
+    cwd: str,
+    timeout: float,
+    env: dict[str, str],
+    shell_executable: str | None,
+) -> tuple[int, str, str]:
+    """Windows host shell with kill_deadline + cancel_event process kill.
+
+    ``asyncio.to_thread`` alone ignores cancel, and wrapping it in
+    ``cancellable_wait`` can cancel the awaitable before the worker thread
+    observes stop. Instead: arm ``kill_deadline``, bridge ``cancel_event`` to
+    a ``threading.Event``, and let the sync helper kill the process tree.
+
+    Under ``ToolCallContext``, the sync helper gets ``timeout=None`` so
+    lifetime follows ``kill_deadline`` (extend / ``no_deadline`` / cancel)
+    rather than a frozen copy of the original command timeout.
+    """
+    from ...tool_calls import get_call_context
+
+    stop_event = threading.Event()
+    ctx = get_call_context()
+    if ctx is not None and ctx.kill_deadline is None:
+        loop = asyncio.get_running_loop()
+        ctx.kill_deadline = loop.time() + timeout
+        ctx.deadline_changed_event.set()
+
+    # Context present: coordinator owns kill via cancel_event → stop_event.
+    # No context (SDK/direct): keep a local sync wall-clock timeout.
+    sync_timeout: float | None = None if ctx is not None else timeout
+
+    async def _bridge_cancel() -> None:
+        if ctx is None:
+            return
+        await ctx.cancel_event.wait()
+        stop_event.set()
+
+    bridge = asyncio.create_task(_bridge_cancel())
+    try:
+        returncode, stdout_str, stderr_str = await asyncio.to_thread(
+            _execute_subprocess_sync,
+            cmd,
+            cwd,
+            sync_timeout,
+            env,
+            shell_executable,
+            stop_event,
+        )
+        if ctx is not None and ctx.cancel_event.is_set():
+            return -1, stdout_str, _cancel_stderr_message(timeout)
+        return returncode, stdout_str, stderr_str
+    finally:
+        # Always arm stop: if the awaiting task is cancelled (force cancel)
+        # without cancel_event, the worker thread must still kill the tree.
+        stop_event.set()
+        if not bridge.done():
+            bridge.cancel()
+            try:
+                await bridge
+            except asyncio.CancelledError:
+                pass
 
 
 async def _execute_in_sandbox(
@@ -759,9 +858,11 @@ async def execute_shell_command(
 
     try:
         if sys.platform == "win32":
-            # Windows: use thread pool to avoid asyncio subprocess limitations
-            returncode, stdout_str, stderr_str = await asyncio.to_thread(
-                _execute_subprocess_sync,
+            (
+                returncode,
+                stdout_str,
+                stderr_str,
+            ) = await _execute_windows_host(
                 cmd,
                 str(working_dir),
                 timeout,

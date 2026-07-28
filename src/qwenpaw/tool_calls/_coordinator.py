@@ -140,25 +140,26 @@ class ToolCoordinator:
                         self._handle_deadline_reached(ctx)
                         terminal = "offload"
                         break
-                    ctx.offload_deadline = None
-                    ctx.deadline_changed_event.set()
+                    # keep_foreground: clear offload only when kill still
+                    # bounds execution. Without kill_deadline this is the
+                    # #6245 hang (clear deadline, wait forever).
+                    if ctx.kill_deadline is not None:
+                        ctx.offload_deadline = None
+                        ctx.deadline_changed_event.set()
+                    else:
+                        ctx.cancel_event.set()
+                        ctx.cancel_reason = CancelReason.TIMEOUT
+                        await self._await_grace_or_force_cancel(entry)
+                        terminal = "completed"
+                        break
                 elif event.type == "kill_deadline_reached":
                     ctx.cancel_event.set()
                     ctx.cancel_reason = CancelReason.TIMEOUT
-                    if (
-                        entry.background_task
-                        and not entry.background_task.done()
-                    ):
-                        try:
-                            await asyncio.wait_for(
-                                asyncio.shield(entry.background_task),
-                                timeout=self._cancel_grace,
-                            )
-                        except asyncio.TimeoutError:
-                            await self._apply_force_cancel(entry)
+                    await self._await_grace_or_force_cancel(entry)
                     terminal = "completed"
                     break
                 elif event.type == "cancelled":
+                    await self._await_grace_or_force_cancel(entry)
                     terminal = "completed"
                     break
         finally:
@@ -363,11 +364,14 @@ class ToolCoordinator:
         entry = self._entries.get(tool_call_id)
         if entry is None:
             return False
+        entry.ctx.cancel_reason = reason
         if force:
+            # Always signal cancel_event before task.cancel() so platforms
+            # that bridge cancel → process kill (e.g. Windows host shell)
+            # can stop the subprocess even when sync_timeout is None.
             await self._apply_force_cancel(entry)
             return True
         entry.ctx.cancel_event.set()
-        entry.ctx.cancel_reason = reason
         return True
 
     async def extend_offload_deadline(
@@ -783,11 +787,15 @@ class ToolCoordinator:
 
             event = event_task.result()
             if event.type in (
-                "cancelled",
                 "deadline_changed",
                 "deadline_reached",
             ):
                 continue
+            if event.type == "cancelled":
+                # Non-cooperative tools ignore cancel_event; without grace
+                # + force this busy-loops on cancelled forever.
+                await self._await_grace_or_force_cancel(entry)
+                break
             if event.type in (
                 "kill_deadline_reached",
                 "stream_closed",
@@ -799,16 +807,32 @@ class ToolCoordinator:
                     entry.ctx.cancel_event.set()
                     entry.ctx.cancel_reason = CancelReason.TIMEOUT
                 if event.type != "stream_closed":
-                    try:
-                        await asyncio.wait_for(
-                            asyncio.shield(bg),
-                            timeout=self._cancel_grace,
-                        )
-                    except asyncio.TimeoutError:
-                        await self._apply_force_cancel(entry)
+                    await self._await_grace_or_force_cancel(entry)
                 break
 
+    async def _await_grace_or_force_cancel(
+        self,
+        entry: ToolCallEntry,
+    ) -> None:
+        """Wait briefly for cooperative stop, then cancel the bg task."""
+        bg = entry.background_task
+        if bg is None or bg.done():
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(bg),
+                timeout=self._cancel_grace,
+            )
+        except asyncio.TimeoutError:
+            await self._apply_force_cancel(entry)
+
     async def _apply_force_cancel(self, entry: ToolCallEntry) -> None:
+        # Signal cooperative stop first. Windows host shell (and similar
+        # bridges) rely on cancel_event → stop_event to kill the process
+        # tree; task.cancel() alone leaves sync_timeout=None workers running.
+        if entry.ctx.cancel_reason is None:
+            entry.ctx.cancel_reason = CancelReason.USER
+        entry.ctx.cancel_event.set()
         if entry.background_task is None or entry.background_task.done():
             return
         entry.force_cancelled = True
