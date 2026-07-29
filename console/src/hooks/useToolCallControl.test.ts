@@ -18,8 +18,11 @@ vi.mock("../utils/resolveBackendSessionId", () => ({
     resolvePreferred(preferred),
 }));
 
+const registerBackgroundTask = vi.fn();
+
 vi.mock("./useBackgroundTaskWatcher", () => ({
-  registerBackgroundTask: vi.fn(),
+  registerBackgroundTask: (...args: unknown[]) =>
+    registerBackgroundTask(...args),
 }));
 
 vi.mock("../stores/backgroundTasksStore", () => ({
@@ -35,6 +38,7 @@ describe("useToolCallControl", () => {
     vi.useFakeTimers();
     getInfo.mockReset();
     getOffloadPolicy.mockReset();
+    registerBackgroundTask.mockReset();
     getOffloadPolicy.mockResolvedValue({ default_action: "keep_foreground" });
     resolvePreferred = (preferred?: string | null) =>
       preferred || "backend-sid";
@@ -146,5 +150,101 @@ describe("useToolCallControl", () => {
     expect(getInfo).toHaveBeenCalledWith("backend-ready", "tc-retry");
     expect(result.current.offloadRemaining).toBe(12);
     expect(result.current.killRemaining).toBe(40);
+  });
+
+  it("does not register foreground completions into the bg task panel", async () => {
+    getInfo.mockResolvedValue({
+      status: "completed",
+      offload_remaining: null,
+      kill_remaining: null,
+      offload_reason: null,
+    });
+
+    const { rerender } = renderHook(
+      ({ status }: { status: string }) =>
+        useToolCallControl("backend-sid", "tc-fg", status, "shell"),
+      { initialProps: { status: "calling" } },
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      rerender({ status: "success" });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(registerBackgroundTask).not.toHaveBeenCalled();
+  });
+
+  it("does not auto-open the control panel before min foreground runtime", async () => {
+    let nowMs = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => nowMs);
+
+    getInfo.mockResolvedValue({
+      status: "running",
+      offload_remaining: 30,
+      kill_remaining: 60,
+      elapsed: 0,
+    });
+
+    const { result } = renderHook(() =>
+      useToolCallControl("backend-sid", "tc-popup", "calling", "shell"),
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // First second: offload already ≤ 30, but elapsed < 15 → stay closed.
+    await act(async () => {
+      nowMs += 1000;
+      vi.advanceTimersByTime(1000);
+    });
+    expect(result.current.bannerVisible).toBe(false);
+
+    // After minWait (min(15, 30*0.5)=15s) the panel may auto-open.
+    await act(async () => {
+      nowMs += 14000;
+      vi.advanceTimersByTime(14000);
+    });
+    expect(result.current.bannerVisible).toBe(true);
+  });
+
+  it("registers alreadyCompleted only when offload_reason is set", async () => {
+    getInfo.mockResolvedValue({
+      status: "completed",
+      offload_remaining: null,
+      kill_remaining: null,
+      offload_reason: "timeout",
+    });
+
+    const { rerender } = renderHook(
+      ({ status }: { status: string }) =>
+        useToolCallControl("backend-sid", "tc-bg-fast", status, "shell"),
+      { initialProps: { status: "calling" } },
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      rerender({ status: "success" });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(registerBackgroundTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolCallId: "tc-bg-fast",
+        alreadyCompleted: true,
+      }),
+    );
   });
 });

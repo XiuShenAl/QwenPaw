@@ -17,6 +17,8 @@ export interface ToolCallInfo {
   extra?: Record<string, unknown>;
   /** Hook hard cap from start; extend-kill must stay below this. */
   max_internal_timeout_secs?: number | null;
+  /** Present when the call was backgrounded (user or timeout). */
+  offload_reason?: string | null;
 }
 
 export interface ToolCallListResponse {

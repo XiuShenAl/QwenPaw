@@ -31,6 +31,8 @@ class ToolCallInfo(BaseModel):
     end_state: str | None
     force_cancelled: bool
     max_internal_timeout_secs: float | None
+    # Present after backgrounding; console uses this to skip fg completions.
+    offload_reason: str | None = None
 
 
 class ListResponse(BaseModel):
@@ -130,6 +132,11 @@ def _entry_to_info(entry: Any, coordinator: Any = None) -> ToolCallInfo:
         end_state=entry.end_state,
         force_cancelled=entry.force_cancelled,
         max_internal_timeout_secs=max_internal,
+        offload_reason=(
+            ctx.offload_reason.value
+            if ctx.offload_reason is not None
+            else None
+        ),
     )
 
 

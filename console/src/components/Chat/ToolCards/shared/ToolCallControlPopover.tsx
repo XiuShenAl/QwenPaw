@@ -110,28 +110,8 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
     maxInternalTimeoutSecs == null ||
     elapsed + (killRemaining ?? 0) + EXTEND_KILL_SECS <=
       maxInternalTimeoutSecs + 0.01;
-
-  useEffect(() => {
-    if (offloadRemaining === null || offloadRemaining <= 0) return;
-    startTimeRef.current = performance.now();
-    startSecsRef.current = Math.ceil(offloadRemaining);
-    setDisplaySecs(startSecsRef.current);
-
-    timerRef.current = setInterval(() => {
-      const elapsed = (performance.now() - startTimeRef.current) / 1000;
-      const remaining = Math.max(0, startSecsRef.current - elapsed);
-      setDisplaySecs(Math.ceil(remaining));
-      if (remaining <= 0) {
-        clearInterval(timerRef.current);
-        dismiss(true);
-      }
-    }, 1000);
-
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [offloadRemaining]);
+  const prevOffloadRemainingRef = useRef(offloadRemaining);
+  const dismissRef = useRef<(showToast?: boolean) => void>(() => {});
 
   const dismiss = (showToast = false) => {
     if (timerRef.current) clearInterval(timerRef.current);
@@ -142,24 +122,29 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
         void toolCallsApi
           .getInfo(sessionId, toolCallId)
           .then((info) => {
-            // Fast bg finish may already be "completed" in the cache —
-            // still register so the watcher can hydrate /output.
-            if (info.status !== "offloaded" && info.status !== "completed") {
-              return;
-            }
-            registerBackgroundTask({
-              sessionId,
-              toolCallId,
-              toolName: toolName || toolCallId,
-              alreadyCompleted: info.status === "completed",
-            });
+            // Fast bg finish may already be "completed" — only register when
+            // the call was actually backgrounded (offload_reason set).
             if (info.status === "offloaded") {
+              registerBackgroundTask({
+                sessionId,
+                toolCallId,
+                toolName: toolName || toolCallId,
+              });
               message.info(
                 t(
                   "tool.control.offloadMode.toastAuto",
                   "Moved to background automatically",
                 ),
               );
+              return;
+            }
+            if (info.status === "completed" && info.offload_reason != null) {
+              registerBackgroundTask({
+                sessionId,
+                toolCallId,
+                toolName: toolName || toolCallId,
+                alreadyCompleted: true,
+              });
             }
           })
           .catch(() => {
@@ -177,6 +162,45 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
     setCollapsing(true);
     setTimeout(() => onClose(), 250);
   };
+  dismissRef.current = dismiss;
+
+  useEffect(() => {
+    const prev = prevOffloadRemainingRef.current;
+    prevOffloadRemainingRef.current = offloadRemaining;
+
+    // keep_foreground: panel countdown is the offload window. When the
+    // server clears that deadline (null) or it hits 0, auto-dismiss — do
+    // not leave a countdown-less sticky panel. (offload policy + prevent
+    // offload also clears the deadline but must keep the panel open.)
+    if (
+      !isOffloadPolicy &&
+      prev != null &&
+      prev > 0 &&
+      (offloadRemaining === null || offloadRemaining <= 0)
+    ) {
+      dismissRef.current(true);
+      return;
+    }
+
+    if (offloadRemaining === null || offloadRemaining <= 0) return;
+    startTimeRef.current = performance.now();
+    startSecsRef.current = Math.ceil(offloadRemaining);
+    setDisplaySecs(startSecsRef.current);
+
+    timerRef.current = setInterval(() => {
+      const tickElapsed = (performance.now() - startTimeRef.current) / 1000;
+      const remaining = Math.max(0, startSecsRef.current - tickElapsed);
+      setDisplaySecs(Math.ceil(remaining));
+      if (remaining <= 0) {
+        clearInterval(timerRef.current);
+        dismissRef.current(true);
+      }
+    }, 1000);
+
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [offloadRemaining, isOffloadPolicy]);
 
   const withGuard = async (action: string, fn: () => Promise<void>) => {
     if (busy) return;

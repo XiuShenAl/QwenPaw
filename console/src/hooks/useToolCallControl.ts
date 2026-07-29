@@ -5,6 +5,8 @@ import { registerBackgroundTask } from "./useBackgroundTaskWatcher";
 import { useBackgroundTasksStore } from "../stores/backgroundTasksStore";
 
 const AUTO_POPUP_SECS = 30;
+/** Minimum foreground runtime before auto-opening the control panel. */
+const MIN_FOREGROUND_SECS = 15;
 const OFFLOAD_POLL_MS = 2000;
 
 export interface ToolCallControlState {
@@ -51,6 +53,8 @@ export function useToolCallControl(
   const fetchedRef = useRef(false);
   const autoTriggeredRef = useRef(false);
   const autoOffloadRegisteredRef = useRef(false);
+  /** First positive offload_remaining seen for this call (popup gating). */
+  const initialOffloadRef = useRef<number | null>(null);
   const defaultPolicyRef = useRef<"offload" | "keep_foreground">(
     "keep_foreground",
   );
@@ -113,10 +117,19 @@ export function useToolCallControl(
           : null;
 
       setState((s) => {
+        const totalElapsed = serverElapsedRef.current + elapsed;
+        const initial = initialOffloadRef.current;
+        const minWait =
+          initial == null
+            ? MIN_FOREGROUND_SECS
+            : Math.min(MIN_FOREGROUND_SECS, initial * 0.5);
+        // Require real foreground runtime so short tools (curl) do not flash
+        // the panel when the whole offload window is already ≤ AUTO_POPUP_SECS.
         const shouldAutoPopup =
           offR !== null &&
           offR <= AUTO_POPUP_SECS &&
           offR > 0 &&
+          totalElapsed >= minWait &&
           !s.bannerVisible &&
           !autoTriggeredRef.current;
 
@@ -128,16 +141,22 @@ export function useToolCallControl(
           ...s,
           offloadRemaining: offR,
           killRemaining: killR,
-          elapsed: serverElapsedRef.current + elapsed,
+          elapsed: totalElapsed,
           bannerVisible: shouldAutoPopup ? true : s.bannerVisible,
           autoTriggered: shouldAutoPopup ? true : s.autoTriggered,
         };
       });
 
       if (offR !== null && offR <= 0) {
-        // Do not register a background task from the local countdown alone —
-        // wait for poll/getInfo to confirm status === "offloaded".
-        setState((s) => (s.bannerVisible ? { ...s, bannerVisible: false } : s));
+        // Offload policy: hide the banner locally; registration still waits
+        // for backend "offloaded". keep_foreground: leave the banner mounted
+        // so OffloadBanner can dismiss itself (toast + collapse) when the
+        // countdown / server-cleared deadline ends.
+        if (defaultPolicyRef.current === "offload") {
+          setState((s) =>
+            s.bannerVisible ? { ...s, bannerVisible: false } : s,
+          );
+        }
         // Stop only when kill countdown is also done/absent.
         if (killR === null || killR <= 0) {
           if (timerRef.current) {
@@ -165,6 +184,9 @@ export function useToolCallControl(
     ) => {
       serverOffloadRef.current = offload;
       serverKillRef.current = kill;
+      if (offload != null && offload > 0 && initialOffloadRef.current == null) {
+        initialOffloadRef.current = offload;
+      }
       if (opts?.elapsed != null) {
         serverElapsedRef.current = opts.elapsed;
       }
@@ -192,6 +214,8 @@ export function useToolCallControl(
 
     fetchedRef.current = false;
     autoOffloadRegisteredRef.current = false;
+    initialOffloadRef.current = null;
+    autoTriggeredRef.current = false;
     let cancelled = false;
     let attempts = 0;
     let policyLoaded = false;
@@ -321,6 +345,7 @@ export function useToolCallControl(
     if (!wasCalling || !toolCallId || autoOffloadRegisteredRef.current) {
       fetchedRef.current = false;
       autoTriggeredRef.current = false;
+      initialOffloadRef.current = null;
       return;
     }
 
@@ -331,11 +356,16 @@ export function useToolCallControl(
       void toolCallsApi
         .getInfo(sid, toolCallId)
         .then((info) => {
-          // Offloaded, or already completed after a fast background finish —
-          // register so the watcher can still hydrate from /output.
+          // Only background-queue registrations belong here. Foreground
+          // success/cancel must not appear in the bg task panel.
           if (info.status === "offloaded") {
             tryRegisterBackground("leave-calling-getInfo");
-          } else if (info.status === "completed") {
+          } else if (
+            info.status === "completed" &&
+            info.offload_reason != null
+          ) {
+            // Fast bg finish race: offloaded then completed before poll saw
+            // "offloaded" — still hydrate /output into the bg panel.
             if (autoOffloadRegisteredRef.current) return;
             autoOffloadRegisteredRef.current = true;
             registerBackgroundTask({
@@ -358,6 +388,7 @@ export function useToolCallControl(
 
     fetchedRef.current = false;
     autoTriggeredRef.current = false;
+    initialOffloadRef.current = null;
   }, [isCalling, sessionId, toolCallId, tryRegisterBackground]);
 
   // Cleanup on unmount
