@@ -2491,7 +2491,12 @@ export default function ChatPage() {
     // LoopModeSelector; include them in the slash menu when the QwenPaw
     // backend is active. Empty slash_command (default mode) is skipped.
     const loopSuggestions: CommandSuggestion[] = usesQwenPawBackend
-      ? buildLoopSlashSuggestions(loopAvailableModes, reservedCommands, t)
+      ? buildLoopSlashSuggestions(
+          loopAvailableModes,
+          reservedCommands,
+          t,
+          i18n.language,
+        )
       : [];
     const skillSuggestions: CommandSuggestion[] = consoleSkills
       .filter(

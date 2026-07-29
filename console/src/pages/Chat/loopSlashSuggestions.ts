@@ -12,6 +12,7 @@ export function buildLoopSlashSuggestions(
   modes: LoopModeInfo[],
   reservedCommands: ReadonlySet<string>,
   t: (key: string) => string,
+  lang: string = "en",
 ): LoopSlashSuggestion[] {
   return modes
     .filter(
@@ -22,6 +23,6 @@ export function buildLoopSlashSuggestions(
     .map((mode) => ({
       command: `/${mode.slash_command}`,
       value: mode.slash_command,
-      description: resolveLoopModeDescriptionMarkdown(mode, t),
+      description: resolveLoopModeDescriptionMarkdown(mode, t, lang),
     }));
 }

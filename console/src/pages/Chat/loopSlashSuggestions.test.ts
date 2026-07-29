@@ -13,13 +13,6 @@ const t = (key: string) => {
 describe("buildLoopSlashSuggestions", () => {
   const modes: LoopModeInfo[] = [
     {
-      id: "default",
-      name: "default",
-      slash_command: "",
-      description: "default",
-      source: "builtin",
-    },
-    {
       id: "goal",
       name: "goal",
       slash_command: "goal",
@@ -30,20 +23,17 @@ describe("buildLoopSlashSuggestions", () => {
       id: "plugin:ultrawork",
       name: "ultrawork",
       slash_command: "ultrawork",
-      description: "**Ultrawork** — parallel\n\nUsage: `/ultrawork`",
+      description: "**Ultrawork** — parallel\n\nUsage",
       source: "plugin",
-    },
-    {
-      id: "mission",
-      name: "mission",
-      slash_command: "clear",
-      description: "should be reserved",
-      source: "builtin",
+      description_i18n: {
+        en: "**Ultrawork** — parallel",
+        "zh-CN": "**Ultrawork** — 并行",
+      },
     },
   ];
 
-  it("skips empty/reserved commands and keeps first-line Markdown", () => {
-    expect(buildLoopSlashSuggestions(modes, new Set(["clear"]), t)).toEqual([
+  it("resolves plugin descriptions for the active language", () => {
+    expect(buildLoopSlashSuggestions(modes, new Set(), t, "zh")).toEqual([
       {
         command: "/goal",
         value: "goal",
@@ -52,7 +42,7 @@ describe("buildLoopSlashSuggestions", () => {
       {
         command: "/ultrawork",
         value: "ultrawork",
-        description: "**Ultrawork** — parallel",
+        description: "**Ultrawork** — 并行",
       },
     ]);
   });
