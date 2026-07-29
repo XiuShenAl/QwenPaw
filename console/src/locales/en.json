@@ -2427,9 +2427,7 @@
       "keepForegroundDesc": "After the countdown expires, the tool continues running in the foreground without auto-offloading. Suitable for scenarios requiring real-time output monitoring.",
       "offload": "Auto Offload to Background",
       "offloadDesc": "After the countdown expires, the tool is automatically moved to background execution, allowing the Agent to continue processing other tasks. Suitable for long-running tools.",
-      "saveFailed": "Failed to save policy",
-      "movedMessage": "Tool offload policy is a global setting. Manage it under Settings → Tool Offload.",
-      "openSettings": "Open in Settings"
+      "saveFailed": "Failed to save policy"
     },
     "maxContextLength": "Max Context Length",
     "maxContextLengthTooltip": "Maximum token count for the model context window, determining how much history fits in each request",

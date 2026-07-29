@@ -2286,9 +2286,7 @@
       "keepForegroundDesc": "倒计时结束后工具继续在前台运行，不自动转入后台。适合需要实时查看输出的场景。",
       "offload": "自动转入后台",
       "offloadDesc": "倒计时结束后工具自动转入后台执行，Agent 可继续处理其他任务。适合长时间运行的工具。",
-      "saveFailed": "保存策略失败",
-      "movedMessage": "工具后台执行策略是全局设置，请前往「设置 → 工具后台策略」管理。",
-      "openSettings": "前往设置"
+      "saveFailed": "保存策略失败"
     },
     "maxContextLength": "最大上下文长度",
     "maxContextLengthTooltip": "模型上下文窗口的最大 token 数，决定每次请求能携带的最大历史长度",
