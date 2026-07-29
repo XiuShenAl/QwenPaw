@@ -187,7 +187,11 @@ async def offload_call(
     _get_entry(coordinator, tool_call_id, session_id)
     ok = await coordinator.request_offload(tool_call_id)
     if not ok:
-        raise HTTPException(409, "Cannot offload (not running)")
+        raise HTTPException(
+            409,
+            "Cannot offload (not running, or kill window too short; "
+            "extend timeout first)",
+        )
     return {"status": "accepted", "tool_call_id": tool_call_id}
 
 

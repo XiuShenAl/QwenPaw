@@ -953,10 +953,10 @@ class ToolCoordinator:
             remaining = ctx.kill_deadline - now
             if remaining >= MIN_BACKGROUND_WINDOW_SECS:
                 return True
-            if remaining > 0 and (bound is None or bound <= 0):
-                return True
+            # No seedable Coordinator bound: refuse near-zero windows so
+            # UI cannot claim "backgrounded" right before an immediate kill.
             if bound is None or bound <= 0:
-                return remaining > 0
+                return False
             seed = max(MIN_BACKGROUND_WINDOW_SECS, bound)
             ctx.kill_deadline = now + seed
             ctx.deadline_changed_event.set()

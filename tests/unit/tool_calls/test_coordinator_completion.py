@@ -1171,3 +1171,118 @@ async def test_offloaded_rejects_clearing_kill_deadline():
         _wait_for_hint(coordinator, "session-no-clear-kill"),
         timeout=2,
     )
+
+
+@pytest.mark.asyncio
+async def test_extend_kill_refuses_past_max_internal_and_no_deadline():
+    """API must not promise more than a tool's internal executor ceiling."""
+    from qwenpaw.tool_calls import COORDINATOR_OWNED_EXEC_TIMEOUT_SECS
+
+    coordinator = ToolCoordinator(offload_on_deadline=False)
+    coordinator.hooks.register(
+        "execute_shell_command",
+        max_internal_timeout_secs=float(COORDINATOR_OWNED_EXEC_TIMEOUT_SECS),
+    )
+    tool_call = _ToolCall(id="call-cap", name="execute_shell_command")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        from qwenpaw.tool_calls import cancellable_wait
+
+        started.set()
+        await cancellable_wait(
+            release.wait(),
+            fallback_secs=30.0,
+            as_kill_deadline=True,
+        )
+        yield _text_response(tool_call.id, "done")
+
+    task = asyncio.create_task(
+        _collect(
+            coordinator.execute(
+                tool_call=tool_call,
+                next_handler=next_handler,
+                session_id="session-cap",
+                agent_id="agent-1",
+                root_session_id="root-1",
+            ),
+        ),
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    entry = coordinator.get("call-cap")
+    assert entry is not None
+
+    # Jump kill near the ceiling, then refuse another +30 days.
+    loop = asyncio.get_running_loop()
+    entry.ctx.kill_deadline = (
+        entry.ctx.started_at + float(COORDINATOR_OWNED_EXEC_TIMEOUT_SECS) - 1.0
+    )
+    ok = await coordinator.extend_kill_deadline("call-cap", seconds=86400.0)
+    assert ok is False
+    ok_clear = await coordinator.extend_kill_deadline(
+        "call-cap",
+        no_deadline=True,
+    )
+    assert ok_clear is False
+    assert entry.ctx.kill_deadline is not None
+
+    # Small extend still under the ceiling succeeds.
+    ok_small = await coordinator.extend_kill_deadline("call-cap", seconds=0.5)
+    assert ok_small is True
+    assert entry.ctx.kill_deadline <= (
+        entry.ctx.started_at
+        + float(COORDINATOR_OWNED_EXEC_TIMEOUT_SECS)
+        + 1e-6
+    )
+    assert entry.ctx.kill_deadline > loop.time()
+
+    await coordinator.cancel("call-cap", force=True)
+    release.set()
+    await asyncio.wait_for(task, timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_request_offload_rejects_short_kill_without_bound():
+    """Refuse offload when kill remaining is tiny and cannot be topped up."""
+    coordinator = ToolCoordinator(
+        default_timeout_secs=None,
+        offload_on_deadline=False,
+    )
+    tool_call = _ToolCall(id="call-short-kill", name="delegate_external_agent")
+    started = asyncio.Event()
+
+    async def next_handler(
+        tool_call: _ToolCall,
+    ) -> AsyncGenerator[Any, None]:
+        started.set()
+        await asyncio.sleep(10)
+        yield _text_response(tool_call.id, "done")
+
+    task = asyncio.create_task(
+        _collect(
+            coordinator.execute(
+                tool_call=tool_call,
+                next_handler=next_handler,
+                session_id="session-short-kill",
+                agent_id="agent-1",
+                root_session_id="root-1",
+            ),
+        ),
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    entry = coordinator.get("call-short-kill")
+    assert entry is not None
+    entry.ctx.kill_deadline = asyncio.get_running_loop().time() + 0.01
+
+    ok = await coordinator.request_offload("call-short-kill")
+    assert ok is False
+
+    await coordinator.cancel(
+        "call-short-kill",
+        reason=CancelReason.USER,
+        force=True,
+    )
+    await asyncio.wait_for(task, timeout=2)

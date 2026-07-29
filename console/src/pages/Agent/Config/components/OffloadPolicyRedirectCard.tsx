@@ -28,10 +28,7 @@ export function OffloadPolicyRedirectCard() {
         action={
           <Link to="/offload-policy">
             <Button type="primary" size="small">
-              {t(
-                "agentConfig.offloadPolicy.openSettings",
-                "Open in Settings",
-              )}
+              {t("agentConfig.offloadPolicy.openSettings", "Open in Settings")}
             </Button>
           </Link>
         }

@@ -21,6 +21,9 @@ MIN_BACKGROUND_WINDOW_SECS = 30.0
 # When ToolCallContext owns the hard kill, sandbox/HTTP layers use this
 # large ceiling so ``extend_kill_deadline`` is not defeated by a frozen
 # copy of the original timeout. Coordinator cancel remains the real stop.
+# Tools that use this ceiling (shell / chat_with_agent) must also register
+# the same value as ``max_internal_timeout_secs`` so the deadline API cannot
+# accept ``no_deadline`` or extends past what the executor will honor.
 COORDINATOR_OWNED_EXEC_TIMEOUT_SECS = 24 * 3600
 
 

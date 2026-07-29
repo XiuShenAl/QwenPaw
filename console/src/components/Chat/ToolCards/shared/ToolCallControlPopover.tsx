@@ -11,13 +11,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { message } from "antd";
-import {
-  Clock3,
-  Hourglass,
-  Moon,
-  RefreshCw,
-  X,
-} from "lucide-react";
+import { Clock3, Hourglass, Moon, RefreshCw, X } from "lucide-react";
 import { toolCallsApi } from "../../../../api/modules/toolCalls";
 import { registerBackgroundTask } from "../../../../hooks/useBackgroundTaskWatcher";
 import styles from "./offloadBanner.module.less";
@@ -150,10 +144,7 @@ export const OffloadBanner: React.FC<OffloadBannerProps> = ({
           .then((info) => {
             // Fast bg finish may already be "completed" in the cache —
             // still register so the watcher can hydrate /output.
-            if (
-              info.status !== "offloaded" &&
-              info.status !== "completed"
-            ) {
+            if (info.status !== "offloaded" && info.status !== "completed") {
               return;
             }
             registerBackgroundTask({

@@ -173,8 +173,7 @@ export function useToolCallControl(
         ...s,
         offloadRemaining: offload,
         killRemaining: kill,
-        elapsed:
-          opts?.elapsed != null ? opts.elapsed : s.elapsed,
+        elapsed: opts?.elapsed != null ? opts.elapsed : s.elapsed,
         maxInternalTimeoutSecs:
           opts?.maxInternalTimeoutSecs !== undefined
             ? opts.maxInternalTimeoutSecs

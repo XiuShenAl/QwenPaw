@@ -733,11 +733,22 @@ class QwenPawAgent(CodingModeMixin, Agent):
         if mgr is None:
             return
 
+        from ..tool_calls import COORDINATOR_OWNED_EXEC_TIMEOUT_SECS
+
+        # Sandbox / A2A HTTP still use a 24h coordinator-owned ceiling; expose
+        # the same cap so extend/no_deadline cannot promise more than the
+        # executor will actually allow.
+        _owned_cap = float(COORDINATOR_OWNED_EXEC_TIMEOUT_SECS)
         mgr.hooks.register(
             "execute_shell_command",
             default_timeout_secs=60.0,
+            max_internal_timeout_secs=_owned_cap,
         )
-        mgr.hooks.register("chat_with_agent", default_timeout_secs=300.0)
+        mgr.hooks.register(
+            "chat_with_agent",
+            default_timeout_secs=300.0,
+            max_internal_timeout_secs=_owned_cap,
+        )
         mgr.hooks.register("check_agent_task", default_timeout_secs=30.0)
         mgr.hooks.register("grep_search", default_timeout_secs=30.0)
         mgr.hooks.register("glob_search", default_timeout_secs=15.0)
