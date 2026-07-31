@@ -23,6 +23,8 @@ export interface MarketPluginEntry {
   is_featured?: boolean;
 }
 
+export type MarketPluginSortBy = "downloads" | "updated_time" | "fauvarate";
+
 interface MarketPluginListResponse {
   success: boolean;
   message: string;
@@ -35,12 +37,14 @@ interface MarketPluginListResponse {
 export interface FetchMarketPluginsParams {
   search?: string;
   category?: string;
+  sort_by?: MarketPluginSortBy;
   page_number: number;
   page_size: number;
 }
 
 export async function fetchMarketPlugins(
   params: FetchMarketPluginsParams,
+  options: { signal?: AbortSignal } = {},
 ): Promise<{ total: number; plugins: MarketPluginEntry[] }> {
   const url = new URL(
     getApiUrl("/plugins/market/search"),
@@ -50,9 +54,11 @@ export async function fetchMarketPlugins(
   url.searchParams.set("page_size", String(params.page_size));
   if (params.search) url.searchParams.set("search", params.search);
   if (params.category) url.searchParams.set("category", params.category);
+  if (params.sort_by) url.searchParams.set("sort_by", params.sort_by);
 
   const response = await fetch(url.toString(), {
     headers: buildAuthHeaders(),
+    signal: options.signal,
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));

@@ -92,6 +92,17 @@ class TaskTracker:
                     return True
             return False
 
+    async def has_active_tasks_excluding(
+        self,
+        excluded_task: asyncio.Future | None,
+    ) -> bool:
+        """Check for active tasks other than ``excluded_task``."""
+        async with self._lock:
+            return any(
+                not state.task.done() and state.task is not excluded_task
+                for state in self._runs.values()
+            )
+
     async def list_active_tasks(self) -> list[str]:
         """List all currently running task keys.
 
@@ -180,9 +191,14 @@ class TaskTracker:
                 "[STOP] Calling task.cancel() for run_key=%s",
                 run_key,
             )
-            state.task.cancel()
+            task = state.task
+            task.cancel()
             logger.debug("[STOP] task.cancel() called for run_key=%s", run_key)
-            return True
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return True
 
     async def attach_or_start(
         self,
