@@ -614,7 +614,10 @@ def test_coerce_timeout_accepts_numeric_and_rejects_non_positive():
         try:
             agent_management._coerce_timeout(bad, field_name="timeout")
         except ValueError as exc:
-            assert "timeout" in str(exc)
+            message = str(exc)
+            assert "timeout" in message
+            assert "got" in message
+            assert repr(bad) in message
         else:
             raise AssertionError(f"expected ValueError for {bad!r}")
 
@@ -626,7 +629,9 @@ def test_parse_positive_timeout_seconds_rejects_none():
             field_name="task_timeout",
         )
     except ValueError as exc:
-        assert "task_timeout" in str(exc)
+        message = str(exc)
+        assert "task_timeout" in message
+        assert "got None" in message
     else:
         raise AssertionError("expected ValueError for None")
 
@@ -739,6 +744,7 @@ async def test_submit_to_agent_invalid_timeout_returns_error(monkeypatch):
     text = response.content[0].text
     assert text.startswith("ERROR:")
     assert "task_timeout" in text
+    assert "got 'abc'" in text
 
 
 async def test_submit_to_agent_omitted_timeout_passes_none(monkeypatch):

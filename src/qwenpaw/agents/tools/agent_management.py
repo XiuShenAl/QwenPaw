@@ -963,39 +963,31 @@ def _parse_positive_timeout_seconds(
     Rejects ``None``, bools, non-numeric values, and non-positive timeouts.
     Does not apply a default — callers decide what ``None`` means.
     """
+    err = (
+        f"'{field_name}' must be a positive number (seconds), "
+        f"got {value!r}"
+    )
     # bool is an int subclass — do not treat True/False as 1/0 seconds.
     if isinstance(value, bool):
-        raise ValueError(
-            f"'{field_name}' must be a positive number (seconds)",
-        )
+        raise ValueError(err)
     if isinstance(value, (int, float)):
         as_float = float(value)
     elif isinstance(value, str):
         text = value.strip()
         if not text:
-            raise ValueError(
-                f"'{field_name}' must be a positive number (seconds)",
-            )
+            raise ValueError(err)
         try:
             as_float = float(text)
         except ValueError as exc:
-            raise ValueError(
-                f"'{field_name}' must be a positive number (seconds)",
-            ) from exc
+            raise ValueError(err) from exc
     else:
-        raise ValueError(
-            f"'{field_name}' must be a positive number (seconds)",
-        )
+        raise ValueError(err)
     if not math.isfinite(as_float):
-        raise ValueError(
-            f"'{field_name}' must be a positive number (seconds)",
-        )
+        raise ValueError(err)
     # Truncation can turn (0, 1) into 0 — reject after int(), not before.
     as_int = int(as_float)
     if as_int <= 0:
-        raise ValueError(
-            f"'{field_name}' must be a positive number (seconds)",
-        )
+        raise ValueError(err)
     return as_int
 
 

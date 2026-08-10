@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 import time
 import uuid
@@ -64,6 +65,59 @@ class MarkInboxReadRequest(BaseModel):
 
 
 MAX_DEBUG_LOG_LINES = 1000
+
+
+def _resolve_effective_stream_task_timeout(
+    raw_timeout: Any,
+) -> int:
+    """Resolve background chat-task timeout in seconds.
+
+    ``None`` (omitted / null) uses ``DEFAULT_STREAM_TASK_TIMEOUT_SECONDS``.
+    Positive numbers and numeric strings are accepted. Non-numeric values
+    and non-positive numbers raise ``ValueError`` (callers map to HTTP 400).
+    Unbounded execution is not supported.
+    """
+    if raw_timeout is None:
+        return int(DEFAULT_STREAM_TASK_TIMEOUT_SECONDS)
+    # bool is an int subclass — reject True/False as 1/0 seconds.
+    if isinstance(raw_timeout, bool):
+        raise ValueError(
+            f"'timeout' must be a positive number (seconds), "
+            f"got {raw_timeout!r}",
+        )
+    try:
+        as_float = float(raw_timeout)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"'timeout' must be a positive number (seconds), "
+            f"got {raw_timeout!r}",
+        ) from exc
+    if not math.isfinite(as_float):
+        raise ValueError(
+            f"'timeout' must be a positive number (seconds), "
+            f"got {raw_timeout!r}",
+        )
+    as_int = int(as_float)
+    if as_int <= 0:
+        raise ValueError(
+            f"'timeout' must be a positive number (seconds), "
+            f"got {raw_timeout!r}",
+        )
+    return as_int
+
+
+def _background_task_cancel_error(
+    *,
+    timed_out: bool,
+    timeout_seconds: int,
+) -> Dict[str, Any]:
+    """Build the error payload for a cancelled background chat task."""
+    if timed_out:
+        return {
+            "message": f"Task timed out after {timeout_seconds}s",
+            "code": "timeout",
+        }
+    return {"message": "Task cancelled"}
 
 
 def _safe_filename(name: str) -> str:
@@ -722,6 +776,17 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
             detail="Channel Console not found",
         )
 
+    if isinstance(request_data, dict):
+        raw_timeout = request_data.get("timeout")
+    else:
+        raw_timeout = getattr(request_data, "timeout", None)
+    try:
+        effective_timeout = _resolve_effective_stream_task_timeout(
+            raw_timeout,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     task_id = f"task-{uuid.uuid4().hex[:12]}"
     native_payload = _extract_session_and_payload(request_data)
     session_id = console_channel.resolve_session_id(
@@ -741,12 +806,10 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
         native_payload,
     )
 
-    task_timeout: Optional[float] = None
     fork_project_dir = ""
     fork_worktree_branch = ""
     fork_scope_id = ""
     if isinstance(request_data, dict):
-        task_timeout = request_data.get("timeout")
         rc = request_data.get("request_context")
         if isinstance(rc, dict):
             fork_project_dir = str(rc.get("fork_project_dir") or "")
@@ -754,8 +817,7 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
                 rc.get("fork_worktree_branch") or "",
             )
             fork_scope_id = str(rc.get("fork_scope_id") or "")
-    elif hasattr(request_data, "timeout"):
-        task_timeout = getattr(request_data, "timeout", None)
+    else:
         rc = getattr(request_data, "request_context", None)
         if isinstance(rc, dict):
             fork_project_dir = str(rc.get("fork_project_dir") or "")
@@ -794,6 +856,7 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
         status="running",
         started_at=time.time(),
     )
+    timed_out = False
 
     async def _run() -> None:
         last_response: Optional[Dict[str, Any]] = None
@@ -840,17 +903,21 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
                     }
                     return
         except asyncio.CancelledError:
+            cancel_error = _background_task_cancel_error(
+                timed_out=timed_out,
+                timeout_seconds=effective_timeout,
+            )
             bg.status = "finished"
             bg.finished_at = time.time()
             bg.result = {
                 "status": "failed",
-                "error": {"message": "Task cancelled"},
+                "error": cancel_error,
             }
             await _mark_background_fork_failed(
                 fork_project_dir,
                 fork_worktree_branch,
                 scope_id=fork_scope_id,
-                reason="Task cancelled",
+                reason=str(cancel_error["message"]),
                 context="cancel",
             )
             return
@@ -888,23 +955,23 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
     atask = asyncio.create_task(_run())
     bg.asyncio_task = atask
 
-    try:
-        requested_timeout = (
-            float(task_timeout) if task_timeout is not None else None
-        )
-    except (TypeError, ValueError):
-        requested_timeout = None
-    if requested_timeout is not None and requested_timeout > 0:
-        effective_timeout = requested_timeout
-    else:
-        effective_timeout = float(DEFAULT_STREAM_TASK_TIMEOUT_SECONDS)
-
     async def _timeout_guard() -> None:
-        await asyncio.sleep(effective_timeout)
+        nonlocal timed_out
+        try:
+            await asyncio.sleep(effective_timeout)
+        except asyncio.CancelledError:
+            return
         if not atask.done():
+            timed_out = True
             atask.cancel()
 
-    asyncio.create_task(_timeout_guard())
+    guard_task = asyncio.create_task(_timeout_guard())
+
+    def _stop_timeout_guard(_task: asyncio.Task) -> None:
+        if not guard_task.done():
+            guard_task.cancel()
+
+    atask.add_done_callback(_stop_timeout_guard)
 
     async with _bg_lock:
         _bg_tasks[task_id] = bg
