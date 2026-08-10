@@ -23,6 +23,7 @@ from fastapi import (
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
+from qwenpaw.constant import DEFAULT_STREAM_TASK_TIMEOUT_SECONDS
 from qwenpaw.schemas import (
     AgentRequest,
     _coerce_content_item,
@@ -887,19 +888,28 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
     atask = asyncio.create_task(_run())
     bg.asyncio_task = atask
 
-    if task_timeout is not None and task_timeout > 0:
+    try:
+        requested_timeout = (
+            float(task_timeout) if task_timeout is not None else None
+        )
+    except (TypeError, ValueError):
+        requested_timeout = None
+    if requested_timeout is not None and requested_timeout > 0:
+        effective_timeout = requested_timeout
+    else:
+        effective_timeout = float(DEFAULT_STREAM_TASK_TIMEOUT_SECONDS)
 
-        async def _timeout_guard() -> None:
-            await asyncio.sleep(task_timeout)
-            if not atask.done():
-                atask.cancel()
+    async def _timeout_guard() -> None:
+        await asyncio.sleep(effective_timeout)
+        if not atask.done():
+            atask.cancel()
 
-        asyncio.create_task(_timeout_guard())
+    asyncio.create_task(_timeout_guard())
 
     async with _bg_lock:
         _bg_tasks[task_id] = bg
 
-    return {"task_id": task_id}
+    return {"task_id": task_id, "timeout": effective_timeout}
 
 
 @router.get(

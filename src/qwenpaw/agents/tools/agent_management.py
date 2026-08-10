@@ -414,10 +414,15 @@ def format_background_submission_text(
     if not task_id:
         return "ERROR: No task_id returned from server"
 
-    return "\n".join(
+    lines = [
+        f"[TASK_ID: {task_id}]",
+        f"[SESSION: {session_id}]",
+    ]
+    timeout = task_result.get("timeout")
+    if timeout is not None:
+        lines.append(f"[TIMEOUT: {timeout}s]")
+    lines.extend(
         [
-            f"[TASK_ID: {task_id}]",
-            f"[SESSION: {session_id}]",
             "",
             "Task submitted successfully.",
             "The subagent is working autonomously"
@@ -426,6 +431,7 @@ def format_background_submission_text(
             f"  check_agent_task(task_id='{task_id}')",
         ],
     )
+    return "\n".join(lines)
 
 
 def format_background_status_text(
@@ -629,7 +635,7 @@ async def submit_to_agent(
     to_agent: str,
     text: str,
     session_id: Optional[str] = None,
-    task_timeout: Optional[float] = None,
+    task_timeout: float | int | str | None = None,
 ) -> ToolChunk:
     """Submit a background message to another configured agent.
 
@@ -646,9 +652,11 @@ async def submit_to_agent(
         session_id (`str`, optional):
             Existing session ID to continue a previous conversation in the
             background. If not provided, a new session ID is generated.
-        task_timeout (`float`, optional):
-            Task execution timeout in seconds. Overrides the server-side
-            default stream_task_timeout for this specific task.
+        task_timeout (`float | int | str`, optional):
+            Task execution timeout in seconds. Numeric strings (e.g.
+            ``"1800"``) are accepted for LLM mis-serialization. When
+            omitted, the backend ``POST /console/chat/task`` applies
+            ``DEFAULT_STREAM_TASK_TIMEOUT_SECONDS``.
 
     Returns:
         `ToolChunk`:
@@ -666,6 +674,16 @@ async def submit_to_agent(
         return _tool_text_response(
             "ERROR: 'text' is required for submission",
         )
+
+    parsed_timeout: Optional[int] = None
+    if task_timeout is not None:
+        try:
+            parsed_timeout = _parse_positive_timeout_seconds(
+                task_timeout,
+                field_name="task_timeout",
+            )
+        except ValueError as exc:
+            return _tool_text_response(f"ERROR: {exc}")
 
     target_exists = await asyncio.to_thread(
         agent_exists,
@@ -701,7 +719,7 @@ async def submit_to_agent(
         request_payload,
         normalized_to_agent,
         int(DEFAULT_AGENT_API_TIMEOUT),
-        task_timeout,
+        parsed_timeout,
     )
     return _tool_text_response(
         format_background_submission_text(result, final_session_id),
@@ -934,19 +952,17 @@ def _coerce_bool(
     )
 
 
-def _coerce_timeout(
+def _parse_positive_timeout_seconds(
     value: Any,
-    default: int = 600,
     *,
     field_name: str = "timeout",
 ) -> int:
-    """Parse a timeout tool field to ``int`` seconds.
+    """Parse a required timeout value to positive ``int`` seconds.
 
     Accepts ``int`` / ``float`` / numeric strings (LLM mis-serialization).
-    Rejects bools, non-numeric values, and non-positive timeouts.
+    Rejects ``None``, bools, non-numeric values, and non-positive timeouts.
+    Does not apply a default — callers decide what ``None`` means.
     """
-    if value is None:
-        return default
     # bool is an int subclass — do not treat True/False as 1/0 seconds.
     if isinstance(value, bool):
         raise ValueError(
@@ -981,6 +997,22 @@ def _coerce_timeout(
             f"'{field_name}' must be a positive number (seconds)",
         )
     return as_int
+
+
+def _coerce_timeout(
+    value: Any,
+    default: int = 600,
+    *,
+    field_name: str = "timeout",
+) -> int:
+    """Resolve a spawn-style timeout field to ``int`` seconds.
+
+    ``None`` becomes ``default`` (foreground wait budget). Non-``None``
+    values are parsed by :func:`_parse_positive_timeout_seconds`.
+    """
+    if value is None:
+        return default
+    return _parse_positive_timeout_seconds(value, field_name=field_name)
 
 
 def _normalize_batch(
