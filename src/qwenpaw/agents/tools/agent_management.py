@@ -4,7 +4,6 @@
 import asyncio
 import json
 import logging
-import math
 import re
 import time
 from typing import Any, Callable, Dict, Optional
@@ -656,7 +655,9 @@ async def submit_to_agent(
             Task execution timeout in seconds. Numeric strings (e.g.
             ``"1800"``) are accepted for LLM mis-serialization. When
             omitted, the backend ``POST /console/chat/task`` applies
-            ``DEFAULT_STREAM_TASK_TIMEOUT_SECONDS``.
+            ``DEFAULT_STREAM_TASK_TIMEOUT_SECONDS`` (3600). Must be a
+            positive value when provided; pass a larger explicit value for
+            long-running tasks.
 
     Returns:
         `ToolChunk`:
@@ -959,36 +960,12 @@ def _parse_positive_timeout_seconds(
 ) -> int:
     """Parse a required timeout value to positive ``int`` seconds.
 
-    Accepts ``int`` / ``float`` / numeric strings (LLM mis-serialization).
-    Rejects ``None``, bools, non-numeric values, and non-positive timeouts.
-    Does not apply a default — callers decide what ``None`` means.
+    Delegates to :func:`qwenpaw.utils.timeout.parse_positive_timeout_seconds`
+    so tool and console HTTP paths share one contract.
     """
-    err = (
-        f"'{field_name}' must be a positive number (seconds), "
-        f"got {value!r}"
-    )
-    # bool is an int subclass — do not treat True/False as 1/0 seconds.
-    if isinstance(value, bool):
-        raise ValueError(err)
-    if isinstance(value, (int, float)):
-        as_float = float(value)
-    elif isinstance(value, str):
-        text = value.strip()
-        if not text:
-            raise ValueError(err)
-        try:
-            as_float = float(text)
-        except ValueError as exc:
-            raise ValueError(err) from exc
-    else:
-        raise ValueError(err)
-    if not math.isfinite(as_float):
-        raise ValueError(err)
-    # Truncation can turn (0, 1) into 0 — reject after int(), not before.
-    as_int = int(as_float)
-    if as_int <= 0:
-        raise ValueError(err)
-    return as_int
+    from ...utils.timeout import parse_positive_timeout_seconds
+
+    return parse_positive_timeout_seconds(value, field_name=field_name)
 
 
 def _coerce_timeout(

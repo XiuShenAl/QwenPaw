@@ -792,7 +792,8 @@ def delete_cmd(
     help=(
         "Task execution timeout in seconds for background tasks. "
         "Overrides the server-side default "
-        f"({DEFAULT_STREAM_TASK_TIMEOUT_SECONDS}s)."
+        f"({DEFAULT_STREAM_TASK_TIMEOUT_SECONDS}s). "
+        "Must be a positive number when set."
     ),
 )
 @click.option(

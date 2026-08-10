@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import re
 import time
 import uuid
@@ -24,11 +23,11 @@ from fastapi import (
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
-from qwenpaw.constant import DEFAULT_STREAM_TASK_TIMEOUT_SECONDS
 from qwenpaw.schemas import (
     AgentRequest,
     _coerce_content_item,
 )
+from qwenpaw.utils.timeout import resolve_stream_task_timeout
 from ...utils.logging import LOG_FILE_PATH, sanitize_log_value
 from ..agent_context import get_agent_for_request
 from ..approvals.display import approval_display_fields
@@ -72,38 +71,10 @@ def _resolve_effective_stream_task_timeout(
 ) -> int:
     """Resolve background chat-task timeout in seconds.
 
-    ``None`` (omitted / null) uses ``DEFAULT_STREAM_TASK_TIMEOUT_SECONDS``.
-    Positive numbers and numeric strings are accepted. Non-numeric values
-    and non-positive numbers raise ``ValueError`` (callers map to HTTP 400).
-    Unbounded execution is not supported.
+    Thin wrapper over :func:`qwenpaw.utils.timeout.resolve_stream_task_timeout`
+    so console routes share one parse/default contract with tools.
     """
-    if raw_timeout is None:
-        return int(DEFAULT_STREAM_TASK_TIMEOUT_SECONDS)
-    # bool is an int subclass — reject True/False as 1/0 seconds.
-    if isinstance(raw_timeout, bool):
-        raise ValueError(
-            f"'timeout' must be a positive number (seconds), "
-            f"got {raw_timeout!r}",
-        )
-    try:
-        as_float = float(raw_timeout)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"'timeout' must be a positive number (seconds), "
-            f"got {raw_timeout!r}",
-        ) from exc
-    if not math.isfinite(as_float):
-        raise ValueError(
-            f"'timeout' must be a positive number (seconds), "
-            f"got {raw_timeout!r}",
-        )
-    as_int = int(as_float)
-    if as_int <= 0:
-        raise ValueError(
-            f"'timeout' must be a positive number (seconds), "
-            f"got {raw_timeout!r}",
-        )
-    return as_int
+    return resolve_stream_task_timeout(raw_timeout, field_name="timeout")
 
 
 def _background_task_cancel_error(

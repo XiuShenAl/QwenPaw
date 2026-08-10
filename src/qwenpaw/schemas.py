@@ -260,6 +260,29 @@ class AgentRequest(BaseModel):
     user_id: Optional[str] = None
     stream: bool = True
     metadata: Optional[Dict[str, Any]] = None
+    # Used by POST /console/chat/task (and forwarded by submit_to_agent).
+    # Omitted/null → server default; must be a positive number of seconds
+    # when provided.
+    timeout: Optional[Union[int, float, str]] = Field(
+        default=None,
+        description=(
+            "Background task execution timeout in seconds for "
+            "POST /console/chat/task. Omit or null for the server default "
+            "(DEFAULT_STREAM_TASK_TIMEOUT_SECONDS). Must be a positive "
+            "number (int/float/numeric string) when provided."
+        ),
+    )
+
+    @field_validator("timeout", mode="before")
+    @classmethod
+    def _reject_bool_timeout(cls, value: Any) -> Any:
+        # bool is an int subclass; without this, True would coerce to 1s.
+        if isinstance(value, bool):
+            raise ValueError(
+                f"'timeout' must be a positive number (seconds), "
+                f"got {value!r}",
+            )
+        return value
 
 
 class AgentResponse(BaseModel):
