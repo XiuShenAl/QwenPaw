@@ -731,10 +731,15 @@ async def _mark_background_fork_failed(
     summary="Submit a background chat task",
 )
 async def post_console_chat_task(  # pylint: disable=too-many-statements
-    request_data: Union[AgentRequest, dict],
+    request_data: dict,
     request: Request,
 ) -> dict:
     """Run an agent chat as a background task.
+
+    Accepts a raw JSON object (not the shared ``AgentRequest`` model) so
+    task-only fields such as ``timeout`` are not validated on the common
+    chat envelope. ``timeout`` is resolved in-handler: omitted/null uses
+    the server default; invalid values raise HTTP 400.
 
     Returns a ``task_id`` immediately. Poll status via
     ``GET /console/chat/task/{task_id}``.
@@ -747,13 +752,10 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
             detail="Channel Console not found",
         )
 
-    if isinstance(request_data, dict):
-        raw_timeout = request_data.get("timeout")
-    else:
-        raw_timeout = getattr(request_data, "timeout", None)
+    # Single validation path for task timeout — always HTTP 400 on error.
     try:
         effective_timeout = _resolve_effective_stream_task_timeout(
-            raw_timeout,
+            request_data.get("timeout"),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -780,22 +782,13 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
     fork_project_dir = ""
     fork_worktree_branch = ""
     fork_scope_id = ""
-    if isinstance(request_data, dict):
-        rc = request_data.get("request_context")
-        if isinstance(rc, dict):
-            fork_project_dir = str(rc.get("fork_project_dir") or "")
-            fork_worktree_branch = str(
-                rc.get("fork_worktree_branch") or "",
-            )
-            fork_scope_id = str(rc.get("fork_scope_id") or "")
-    else:
-        rc = getattr(request_data, "request_context", None)
-        if isinstance(rc, dict):
-            fork_project_dir = str(rc.get("fork_project_dir") or "")
-            fork_worktree_branch = str(
-                rc.get("fork_worktree_branch") or "",
-            )
-            fork_scope_id = str(rc.get("fork_scope_id") or "")
+    rc = request_data.get("request_context")
+    if isinstance(rc, dict):
+        fork_project_dir = str(rc.get("fork_project_dir") or "")
+        fork_worktree_branch = str(
+            rc.get("fork_worktree_branch") or "",
+        )
+        fork_scope_id = str(rc.get("fork_scope_id") or "")
 
     from ...config.config import load_agent_config
     from ...services.project_directory import (

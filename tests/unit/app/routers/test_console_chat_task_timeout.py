@@ -195,19 +195,38 @@ def test_chat_task_explicit_timeout_echoed(
 
 @pytest.mark.parametrize(
     "bad_timeout",
-    ["abc", 0, -1, True],
+    [
+        "abc",
+        0,
+        -1,
+        True,
+        False,
+        {},
+        [],
+        {"seconds": 30},
+    ],
 )
 def test_chat_task_invalid_timeout_returns_400(
     client,
     console_workspace,
     bad_timeout,
 ):
+    """All illegal timeout values must be HTTP 400 (not FastAPI 422)."""
     response = client.post(
         "/api/console/chat/task",
         json=_chat_task_body(timeout=bad_timeout),
     )
     assert response.status_code == 400, response.text
     assert "timeout" in response.json()["detail"]
+
+
+def test_agent_request_does_not_declare_task_timeout() -> None:
+    """Shared AgentRequest must not own the background-task timeout field."""
+    from qwenpaw.schemas import AgentRequest
+
+    assert "timeout" not in AgentRequest.model_fields
+    dumped = AgentRequest().model_dump()
+    assert "timeout" not in dumped
 
 
 async def test_chat_task_timeout_on_production_path(
