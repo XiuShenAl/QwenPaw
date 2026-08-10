@@ -1,10 +1,15 @@
-import React from "react";
+import React, { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { SearchOutlined } from "@ant-design/icons";
 import type { ToolCallContent } from "../shared/types";
 import { ToolCardShell, DefaultBlock } from "../shared";
 import { countLines, stringifyResult } from "../shared/utils";
 import styles from "../shared/toolCards.module.less";
+import GrepSearchOutput from "./GrepSearchOutput";
+import {
+  hasOpenableGrepPaths,
+  parseGrepResultLines,
+} from "./grepSearchResult";
 
 export interface GrepSearchCardProps {
   content: ToolCallContent;
@@ -22,6 +27,15 @@ const GrepSearchCard: React.FC<GrepSearchCardProps> = ({
     ? t("tool.grepSearch", { pattern })
     : t("tool.grepSearchDefault");
 
+  const resultText =
+    content.status === "error" ? "" : stringifyResult(content.result);
+  const lineCount = countLines(resultText);
+  const parsedLines = useMemo(
+    () => (resultText ? parseGrepResultLines(resultText) : []),
+    [resultText],
+  );
+  const linkable = hasOpenableGrepPaths(parsedLines);
+
   if (content.status === "error") {
     return (
       <ToolCardShell
@@ -32,9 +46,6 @@ const GrepSearchCard: React.FC<GrepSearchCardProps> = ({
       />
     );
   }
-
-  const resultText = stringifyResult(content.result);
-  const lineCount = countLines(resultText);
 
   const badge =
     content.status === "done" && lineCount > 0 ? (
@@ -51,7 +62,12 @@ const GrepSearchCard: React.FC<GrepSearchCardProps> = ({
       title={title}
       badges={badge}
     >
-      {resultText && <DefaultBlock title="Output" content={resultText} />}
+      {resultText &&
+        (linkable ? (
+          <GrepSearchOutput content={resultText} lines={parsedLines} />
+        ) : (
+          <DefaultBlock title="Output" content={resultText} />
+        ))}
     </ToolCardShell>
   );
 };

@@ -331,6 +331,78 @@
   }
 }
 
+// grep_search output with clickable file paths
+.grepResultBody {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  max-height: 300px;
+  overflow: auto;
+  color: var(--ant-color-text, #000);
+}
+
+.grepResultRow,
+.grepResultRowHit,
+.grepResultRowContext,
+.grepResultPlain,
+.grepResultSeparator {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.grepResultRowHit {
+  background: rgba(250, 173, 20, 0.08);
+}
+
+.grepResultSeparator {
+  color: var(--ant-color-text-quaternary, #bbb);
+  margin: 4px 0;
+}
+
+.grepResultPath,
+.grepResultLineRef {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ant-color-link, #1677ff);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+
+  &:hover {
+    color: var(--ant-color-link-hover, #69b1ff);
+    text-decoration: underline;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--ant-color-primary-border, #91caff);
+    outline-offset: 1px;
+    border-radius: 2px;
+  }
+}
+
+.grepResultMeta {
+  color: var(--ant-color-text-secondary, #8c8c8c);
+}
+
+.grepResultContent {
+  color: inherit;
+}
+
+:global(.dark-mode) {
+  .grepResultPath,
+  .grepResultLineRef {
+    color: var(--ant-blue-4, #69b1ff);
+  }
+
+  .grepResultRowHit {
+    background: rgba(250, 173, 20, 0.14);
+  }
+}
+
 // Inline result (next to tool label)
 .toolCallInlineResult {
   font-size: 12px;
