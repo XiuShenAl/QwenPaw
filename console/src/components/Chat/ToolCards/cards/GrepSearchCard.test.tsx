@@ -36,8 +36,9 @@ vi.mock("../shared", () => ({
 }));
 
 vi.mock("../shared/utils", async () => {
-  const actual =
-    await vi.importActual<typeof import("../shared/utils")>("../shared/utils");
+  const actual = await vi.importActual<typeof import("../shared/utils")>(
+    "../shared/utils",
+  );
   return {
     ...actual,
   };
@@ -72,10 +73,9 @@ describe("GrepSearchCard", () => {
     expect(
       screen.queryByRole("button", { name: "src/main.py" }),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "files.preview" })).toHaveAttribute(
-      "aria-expanded",
-      "false",
-    );
+    expect(
+      screen.getByRole("button", { name: "files.preview" }),
+    ).toHaveAttribute("aria-expanded", "false");
   });
 
   it("toggles an isolated clickable result panel from the preview action", () => {
@@ -96,10 +96,9 @@ describe("GrepSearchCard", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "files.preview" }));
-    expect(screen.getByRole("button", { name: "files.preview" })).toHaveAttribute(
-      "aria-expanded",
-      "true",
-    );
+    expect(
+      screen.getByRole("button", { name: "files.preview" }),
+    ).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByTestId("default-block")).toBeInTheDocument();
 
     const mainRow = screen.getByRole("button", { name: "src/main.py" });
@@ -148,9 +147,9 @@ describe("GrepSearchCard", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "files.preview" }));
-    expect(screen.getByRole("button", { name: "src/main.py" })).toHaveTextContent(
-      "2",
-    );
+    expect(
+      screen.getByRole("button", { name: "src/main.py" }),
+    ).toHaveTextContent("2");
 
     fireEvent.click(screen.getByRole("button", { name: "Expand src/main.py" }));
     fireEvent.click(screen.getByRole("button", { name: "src/main.py:40" }));

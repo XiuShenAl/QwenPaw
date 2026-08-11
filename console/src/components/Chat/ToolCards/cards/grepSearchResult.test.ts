@@ -142,9 +142,14 @@ describe("groupGrepFileHits", () => {
 
   it("groups show_file=False headers and match lines", () => {
     const lines = parseGrepResultLines(
-      ["pkg/a.txt", "1:> match_a", "2:> match_a2", "---", "pkg/b.txt", "1:> match_b"].join(
-        "\n",
-      ),
+      [
+        "pkg/a.txt",
+        "1:> match_a",
+        "2:> match_a2",
+        "---",
+        "pkg/b.txt",
+        "1:> match_b",
+      ].join("\n"),
     );
     expect(groupGrepFileHits(lines)).toEqual([
       {

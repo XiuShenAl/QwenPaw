@@ -1231,9 +1231,7 @@ export default function ChatPage() {
         workspace?: boolean;
       }>;
       dispatchFilesDrawer({
-        type: customEvent.detail.workspace
-          ? "OPEN_WORKSPACE"
-          : "OPEN_PREVIEW",
+        type: customEvent.detail.workspace ? "OPEN_WORKSPACE" : "OPEN_PREVIEW",
         target: customEvent.detail.target,
         trigger: customEvent.detail.trigger ?? null,
       });

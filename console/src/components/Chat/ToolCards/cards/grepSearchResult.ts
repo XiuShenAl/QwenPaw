@@ -28,7 +28,10 @@ export type GrepResultLine =
   | { kind: "text"; raw: string };
 
 function normalizeDisplayPath(rawPath: string): string {
-  return rawPath.trim().replace(/\\/g, "/").replace(/^(?:\.\/)+/, "");
+  return rawPath
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^(?:\.\/)+/, "");
 }
 
 /** Paths the workspace preview API can open (project-relative, no `..`). */
