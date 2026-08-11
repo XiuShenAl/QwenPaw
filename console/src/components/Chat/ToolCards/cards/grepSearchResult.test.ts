@@ -4,6 +4,9 @@ import {
   groupGrepFileHits,
   hasOpenableGrepPaths,
   parseGrepResultLines,
+  parseGrepResultLinesForOpen,
+  resolveGrepOpenPath,
+  resolveGrepSearchRoot,
   toOpenableFileTarget,
 } from "./grepSearchResult";
 
@@ -21,6 +24,52 @@ describe("toOpenableFileTarget", () => {
   it("rejects absolute and parent paths", () => {
     expect(toOpenableFileTarget("/tmp/main.py", 1)).toBeNull();
     expect(toOpenableFileTarget("../secret.py", 1)).toBeNull();
+  });
+
+  it("resolves single-file search basename via params.path", () => {
+    expect(
+      toOpenableFileTarget("foo.py", 12, { searchPath: "src/foo.py" }),
+    ).toMatchObject({ path: "src/foo.py", line: 12 });
+  });
+
+  it("joins directory search roots with display paths", () => {
+    expect(
+      toOpenableFileTarget("util.py", 3, { searchPath: "src" }),
+    ).toMatchObject({ path: "src/util.py", line: 3 });
+  });
+
+  it("maps absolute params.path through projectDirectory", () => {
+    expect(
+      toOpenableFileTarget("foo.py", 2, {
+        searchPath: "/Users/demo/project/src/foo.py",
+        projectDirectory: "/Users/demo/project",
+      }),
+    ).toMatchObject({ path: "src/foo.py", line: 2 });
+  });
+
+  it("returns null when absolute params.path is outside the project", () => {
+    expect(
+      toOpenableFileTarget("foo.py", 2, {
+        searchPath: "/Users/demo/other/foo.py",
+        projectDirectory: "/Users/demo/project",
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("resolveGrepSearchRoot / resolveGrepOpenPath", () => {
+  it("leaves omitted search path unresolved", () => {
+    expect(resolveGrepSearchRoot(undefined)).toBeUndefined();
+    expect(resolveGrepOpenPath("src/main.py", undefined)).toBe("src/main.py");
+  });
+
+  it("normalizes ./ and trailing slashes on search roots", () => {
+    expect(resolveGrepSearchRoot("./src/")).toBe("src");
+    expect(resolveGrepOpenPath("main.py", "src")).toBe("src/main.py");
+  });
+
+  it("does not double-join when display already includes the root", () => {
+    expect(resolveGrepOpenPath("src/main.py", "src")).toBe("src/main.py");
   });
 });
 
@@ -77,6 +126,23 @@ describe("parseGrepResultLines", () => {
     ]);
   });
 
+  it("uses fallbackPath for single-file show_file=False output", () => {
+    const lines = parseGrepResultLines("2:> line two", {
+      fallbackPath: "src/foo.py",
+    });
+    expect(lines).toEqual([
+      {
+        kind: "match_no_path",
+        path: "src/foo.py",
+        line: 2,
+        hit: true,
+        content: "line two",
+        raw: "2:> line two",
+      },
+    ]);
+    expect(hasOpenableGrepPaths(lines)).toBe(true);
+  });
+
   it("keeps status footers as plain text", () => {
     const lines = parseGrepResultLines(
       "src/app.py:1:> hi\n\n(Results truncated due to size.)",
@@ -91,6 +157,76 @@ describe("parseGrepResultLines", () => {
 
   it("does not treat empty results as linkable", () => {
     const lines = parseGrepResultLines("No matches found for pattern: foo");
+    expect(hasOpenableGrepPaths(lines)).toBe(false);
+  });
+});
+
+describe("parseGrepResultLinesForOpen", () => {
+  it("keeps default-root project-relative paths", () => {
+    const lines = parseGrepResultLinesForOpen(
+      "src/main.py:12:> def main():",
+      {},
+    );
+    expect(lines[0]).toMatchObject({
+      kind: "match",
+      path: "src/main.py",
+      line: 12,
+    });
+    expect(
+      toOpenableFileTarget((lines[0] as { path: string }).path, 12),
+    ).toMatchObject({ path: "src/main.py" });
+  });
+
+  it("rewrites single-file basename display paths", () => {
+    const lines = parseGrepResultLinesForOpen("foo.py:12:> hit", {
+      searchPath: "src/foo.py",
+    });
+    expect(lines[0]).toMatchObject({ path: "src/foo.py", line: 12 });
+  });
+
+  it("rewrites directory-relative display paths", () => {
+    const lines = parseGrepResultLinesForOpen("util.py:3:> helper", {
+      searchPath: "src",
+    });
+    expect(lines[0]).toMatchObject({ path: "src/util.py", line: 3 });
+  });
+
+  it("opens single-file show_file=False via params.path", () => {
+    const lines = parseGrepResultLinesForOpen("2:> line two", {
+      searchPath: "src/foo.py",
+    });
+    expect(hasOpenableGrepPaths(lines)).toBe(true);
+    expect(lines[0]).toMatchObject({
+      kind: "match_no_path",
+      path: "src/foo.py",
+      line: 2,
+    });
+    expect(groupGrepFileHits(lines)).toEqual([
+      {
+        path: "src/foo.py",
+        line: 2,
+        hitCount: 1,
+        matches: [{ line: 2, content: "line two" }],
+      },
+    ]);
+  });
+
+  it("rewrites show_file=False directory headers under params.path", () => {
+    const lines = parseGrepResultLinesForOpen(
+      ["util.py", "3:> helper", "---", "pkg/a.py", "1:> a"].join("\n"),
+      { searchPath: "src" },
+    );
+    expect(groupGrepFileHits(lines).map((hit) => hit.path)).toEqual([
+      "src/util.py",
+      "src/pkg/a.py",
+    ]);
+  });
+
+  it("drops openable paths when absolute searchPath cannot be mapped", () => {
+    const lines = parseGrepResultLinesForOpen("foo.py:2:> hit", {
+      searchPath: "/Users/demo/other/foo.py",
+      projectDirectory: "/Users/demo/project",
+    });
     expect(hasOpenableGrepPaths(lines)).toBe(false);
   });
 });

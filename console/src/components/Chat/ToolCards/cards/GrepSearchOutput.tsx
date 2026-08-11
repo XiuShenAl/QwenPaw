@@ -51,6 +51,7 @@ const GrepMatchRow: React.FC<{
 );
 
 const GrepFileGroup: React.FC<{ hit: GrepFileHit }> = ({ hit }) => {
+  const { t } = useTranslation();
   const { name, directory } = displayPartsForGrepPath(hit.path);
   const canExpand = hit.matches.length > 0;
   const [expanded, setExpanded] = useState(false);
@@ -64,7 +65,9 @@ const GrepFileGroup: React.FC<{ hit: GrepFileHit }> = ({ hit }) => {
             className={styles.grepFileChevron}
             aria-expanded={expanded}
             aria-label={
-              expanded ? `Collapse ${hit.path}` : `Expand ${hit.path}`
+              expanded
+                ? t("tool.grepCollapseFile", { path: hit.path })
+                : t("tool.grepExpandFile", { path: hit.path })
             }
             onClick={(event) => {
               event.preventDefault();

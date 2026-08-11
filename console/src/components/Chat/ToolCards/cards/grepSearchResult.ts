@@ -1,4 +1,7 @@
-import { parseInternalFileLink } from "../../../../features/files-workspace/internalFileLinks";
+import {
+  parseInternalFileLink,
+  toProjectRelativePath,
+} from "../../../../features/files-workspace/internalFileLinks";
 import type { FileTarget } from "../../../../features/files-workspace/types";
 
 /** `path:line:> content` / `path:line:  content` (show_file=True). */
@@ -27,19 +30,89 @@ export type GrepResultLine =
   | { kind: "separator"; raw: string }
   | { kind: "text"; raw: string };
 
+export type GrepPathContext = {
+  /** Tool param `path` (file or directory search root). */
+  searchPath?: string | null;
+  /** Active project directory; required to map absolute `searchPath`. */
+  projectDirectory?: string | null;
+};
+
 function normalizeDisplayPath(rawPath: string): string {
   return rawPath
     .trim()
     .replace(/\\/g, "/")
-    .replace(/^(?:\.\/)+/, "");
+    .replace(/^(?:\.\/)+/, "")
+    .replace(/\/+$/, "");
+}
+
+function basename(path: string): string {
+  const normalized = normalizeDisplayPath(path);
+  const slash = normalized.lastIndexOf("/");
+  return slash < 0 ? normalized : normalized.slice(slash + 1);
+}
+
+function isAbsoluteFilesystemPath(path: string): boolean {
+  const normalized = path.trim().replace(/\\/g, "/");
+  return normalized.startsWith("/") || /^[a-z]:\//i.test(normalized);
+}
+
+/**
+ * Project-relative form of grep's `path` param (backend search_root).
+ * - omitted / empty → `undefined` (search defaulted to project/workspace root)
+ * - present but not openable (e.g. absolute outside project) → `null`
+ */
+export function resolveGrepSearchRoot(
+  searchPath?: string | null,
+  projectDirectory?: string | null,
+): string | null | undefined {
+  if (searchPath == null || !String(searchPath).trim()) return undefined;
+  const normalized = normalizeDisplayPath(String(searchPath));
+  if (!normalized) return undefined;
+  return toProjectRelativePath(normalized, projectDirectory ?? undefined);
+}
+
+/**
+ * Map a backend display path onto a project-relative open path.
+ *
+ * Backend emits basename for single-file searches and paths relative to
+ * `search_root` for directory searches — not always project-relative.
+ */
+export function resolveGrepOpenPath(
+  displayPath: string | null | undefined,
+  searchRoot: string | null | undefined,
+): string | null {
+  if (searchRoot === null) return null;
+  if (searchRoot === undefined) {
+    if (displayPath == null || !String(displayPath).trim()) return null;
+    return normalizeDisplayPath(String(displayPath)) || null;
+  }
+
+  if (displayPath == null || !String(displayPath).trim()) {
+    return searchRoot;
+  }
+
+  const display = normalizeDisplayPath(String(displayPath));
+  if (!display) return searchRoot;
+  if (display === searchRoot) return searchRoot;
+  if (display.startsWith(`${searchRoot}/`)) return display;
+  // Single-file mode: backend prints only the basename.
+  if (display === basename(searchRoot)) return searchRoot;
+  return normalizeDisplayPath(`${searchRoot}/${display}`);
 }
 
 /** Paths the workspace preview API can open (project-relative, no `..`). */
 export function toOpenableFileTarget(
   rawPath: string,
   line?: number,
+  pathContext?: GrepPathContext,
 ): FileTarget | null {
-  const path = normalizeDisplayPath(rawPath);
+  const searchRoot = pathContext
+    ? resolveGrepSearchRoot(
+        pathContext.searchPath,
+        pathContext.projectDirectory,
+      )
+    : undefined;
+  const path = resolveGrepOpenPath(rawPath, searchRoot);
   if (!path) return null;
   const parsed = parseInternalFileLink(path);
   if (!parsed) return null;
@@ -58,15 +131,59 @@ function looksLikeFileHeader(line: string): boolean {
   }
   if (line.startsWith("(") || line.startsWith("No matches")) return false;
   if (/\s/.test(line)) return false;
-  return toOpenableFileTarget(line) !== null;
+  // Headers are search-root-relative display paths (may be basename-only).
+  const normalized = normalizeDisplayPath(line);
+  if (!normalized || isAbsoluteFilesystemPath(normalized)) return false;
+  return !normalized.split("/").some((segment) => !segment || segment === "..");
 }
 
-export function parseGrepResultLines(text: string): GrepResultLine[] {
+/**
+ * Rewrite parsed grep paths using tool `path` / project directory so UI
+ * clicks open the real project-relative file.
+ */
+export function remapGrepResultPaths(
+  lines: GrepResultLine[],
+  pathContext?: GrepPathContext,
+): GrepResultLine[] {
+  if (!pathContext?.searchPath?.toString().trim()) {
+    return lines;
+  }
+
+  const searchRoot = resolveGrepSearchRoot(
+    pathContext.searchPath,
+    pathContext.projectDirectory,
+  );
+
+  return lines.map((entry) => {
+    if (entry.kind === "match" || entry.kind === "file_header") {
+      const path = resolveGrepOpenPath(entry.path, searchRoot);
+      if (!path) {
+        return { kind: "text", raw: entry.raw };
+      }
+      return { ...entry, path };
+    }
+    if (entry.kind === "match_no_path") {
+      return {
+        ...entry,
+        path: resolveGrepOpenPath(entry.path, searchRoot),
+      };
+    }
+    return entry;
+  });
+}
+
+export function parseGrepResultLines(
+  text: string,
+  options?: { fallbackPath?: string | null },
+): GrepResultLine[] {
   if (!text) return [];
 
   const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
   const parsed: GrepResultLine[] = [];
-  let currentPath: string | null = null;
+  const fallback = options?.fallbackPath
+    ? normalizeDisplayPath(options.fallbackPath) || null
+    : null;
+  let currentPath: string | null = fallback;
 
   for (const raw of lines) {
     if (raw === "---") {
@@ -78,7 +195,13 @@ export function parseGrepResultLines(text: string): GrepResultLine[] {
     if (withPath) {
       const path = normalizeDisplayPath(withPath[1]);
       const line = Number(withPath[2]);
-      if (path && Number.isFinite(line) && toOpenableFileTarget(path, line)) {
+      // Accept search-root-relative display paths here; remap later.
+      if (
+        path &&
+        Number.isFinite(line) &&
+        !isAbsoluteFilesystemPath(path) &&
+        !path.split("/").some((segment) => segment === "..")
+      ) {
         currentPath = path;
         parsed.push({
           kind: "match",
@@ -120,12 +243,31 @@ export function parseGrepResultLines(text: string): GrepResultLine[] {
   return parsed;
 }
 
+/** Parse tool output and resolve display paths for opening. */
+export function parseGrepResultLinesForOpen(
+  text: string,
+  pathContext?: GrepPathContext,
+): GrepResultLine[] {
+  const searchRoot = resolveGrepSearchRoot(
+    pathContext?.searchPath,
+    pathContext?.projectDirectory,
+  );
+  const parsed = parseGrepResultLines(text, {
+    // Single-file + show_file=False emits only `line:> content`.
+    fallbackPath: searchRoot ?? null,
+  });
+  return remapGrepResultPaths(parsed, pathContext);
+}
+
 export function hasOpenableGrepPaths(lines: GrepResultLine[]): boolean {
   return lines.some(
     (line) =>
-      line.kind === "match" ||
-      line.kind === "file_header" ||
-      (line.kind === "match_no_path" && line.path !== null),
+      (line.kind === "match" && toOpenableFileTarget(line.path) !== null) ||
+      (line.kind === "file_header" &&
+        toOpenableFileTarget(line.path) !== null) ||
+      (line.kind === "match_no_path" &&
+        line.path !== null &&
+        toOpenableFileTarget(line.path) !== null),
   );
 }
 

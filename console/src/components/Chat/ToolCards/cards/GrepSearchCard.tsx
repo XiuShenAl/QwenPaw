@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { SearchOutlined } from "@ant-design/icons";
+import { useProjectDir } from "../../../../stores/projectDirectoryStore";
 import type { ToolCallContent } from "../shared/types";
 import { ToolCardShell, DefaultBlock } from "../shared";
 import { stringifyResult } from "../shared/utils";
@@ -9,7 +10,7 @@ import GrepSearchOutput from "./GrepSearchOutput";
 import {
   groupGrepFileHits,
   hasOpenableGrepPaths,
-  parseGrepResultLines,
+  parseGrepResultLinesForOpen,
 } from "./grepSearchResult";
 
 export interface GrepSearchCardProps {
@@ -22,18 +23,28 @@ const GrepSearchCard: React.FC<GrepSearchCardProps> = ({
   isStreaming,
 }) => {
   const { t } = useTranslation();
+  const { projectDir } = useProjectDir();
   const [resultListOpen, setResultListOpen] = useState(false);
   const params = content.params || {};
   const pattern = (params.pattern || "") as string;
+  const searchPath = (params.path || "") as string;
   const title = pattern
     ? t("tool.grepSearch", { pattern })
     : t("tool.grepSearchDefault");
 
   const resultText =
     content.status === "error" ? "" : stringifyResult(content.result);
+  const pathContext = useMemo(
+    () => ({
+      searchPath: searchPath || null,
+      projectDirectory: projectDir ?? null,
+    }),
+    [searchPath, projectDir],
+  );
   const parsedLines = useMemo(
-    () => (resultText ? parseGrepResultLines(resultText) : []),
-    [resultText],
+    () =>
+      resultText ? parseGrepResultLinesForOpen(resultText, pathContext) : [],
+    [resultText, pathContext],
   );
   const linkable = hasOpenableGrepPaths(parsedLines);
   const fileHits = useMemo(
@@ -73,14 +84,14 @@ const GrepSearchCard: React.FC<GrepSearchCardProps> = ({
       type="button"
       className={styles.filePreviewLink}
       aria-expanded={resultListOpen}
-      aria-label={t("files.preview")}
+      aria-label={t("tool.grepResults")}
       onClick={(event) => {
         event.preventDefault();
         event.stopPropagation();
         setResultListOpen((open) => !open);
       }}
     >
-      {t("files.preview")}
+      {t("tool.grepResults")}
     </button>
   ) : null;
 
