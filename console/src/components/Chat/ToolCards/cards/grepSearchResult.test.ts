@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  displayPartsForGrepPath,
+  groupGrepFileHits,
   hasOpenableGrepPaths,
   parseGrepResultLines,
   toOpenableFileTarget,
@@ -90,5 +92,89 @@ describe("parseGrepResultLines", () => {
   it("does not treat empty results as linkable", () => {
     const lines = parseGrepResultLines("No matches found for pattern: foo");
     expect(hasOpenableGrepPaths(lines)).toBe(false);
+  });
+});
+
+describe("groupGrepFileHits", () => {
+  it("collapses matches to one row per file with first hit line", () => {
+    const lines = parseGrepResultLines(
+      [
+        "src/main.py:12:> def main():",
+        "src/main.py:13:  pass",
+        "src/util.py:3:> def main_helper():",
+      ].join("\n"),
+    );
+    expect(groupGrepFileHits(lines)).toEqual([
+      {
+        path: "src/main.py",
+        line: 12,
+        hitCount: 1,
+        matches: [{ line: 12, content: "def main():" }],
+      },
+      {
+        path: "src/util.py",
+        line: 3,
+        hitCount: 1,
+        matches: [{ line: 3, content: "def main_helper():" }],
+      },
+    ]);
+  });
+
+  it("keeps multiple hit lines under the same file for expand", () => {
+    const lines = parseGrepResultLines(
+      [
+        "src/main.py:12:> def main():",
+        "src/main.py:40:> def main_helper():",
+      ].join("\n"),
+    );
+    expect(groupGrepFileHits(lines)).toEqual([
+      {
+        path: "src/main.py",
+        line: 12,
+        hitCount: 2,
+        matches: [
+          { line: 12, content: "def main():" },
+          { line: 40, content: "def main_helper():" },
+        ],
+      },
+    ]);
+  });
+
+  it("groups show_file=False headers and match lines", () => {
+    const lines = parseGrepResultLines(
+      ["pkg/a.txt", "1:> match_a", "2:> match_a2", "---", "pkg/b.txt", "1:> match_b"].join(
+        "\n",
+      ),
+    );
+    expect(groupGrepFileHits(lines)).toEqual([
+      {
+        path: "pkg/a.txt",
+        line: 1,
+        hitCount: 2,
+        matches: [
+          { line: 1, content: "match_a" },
+          { line: 2, content: "match_a2" },
+        ],
+      },
+      {
+        path: "pkg/b.txt",
+        line: 1,
+        hitCount: 1,
+        matches: [{ line: 1, content: "match_b" }],
+      },
+    ]);
+  });
+});
+
+describe("displayPartsForGrepPath", () => {
+  it("splits basename and directory", () => {
+    expect(displayPartsForGrepPath("hello_omp/hello_omp/__main__.py")).toEqual({
+      name: "__main__.py",
+      directory: "hello_omp/hello_omp",
+    });
+    expect(displayPartsForGrepPath("readme.md")).toEqual({
+      name: "readme.md",
+      directory: "",
+    });
   });
 });

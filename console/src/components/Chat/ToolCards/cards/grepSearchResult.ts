@@ -126,6 +126,89 @@ export function hasOpenableGrepPaths(lines: GrepResultLine[]): boolean {
   );
 }
 
+/** A single hit line under a file group. */
+export interface GrepMatchHit {
+  line: number;
+  content: string;
+}
+
+/** One row per file for the Cursor-style result list. */
+export interface GrepFileHit {
+  path: string;
+  /** First hit line (preferred) or first context/header line. */
+  line?: number;
+  hitCount: number;
+  /** Hit rows only (excludes context lines), in appearance order. */
+  matches: GrepMatchHit[];
+}
+
+function splitDisplayPath(path: string): { name: string; directory: string } {
+  const normalized = normalizeDisplayPath(path);
+  const slash = normalized.lastIndexOf("/");
+  if (slash < 0) return { name: normalized, directory: "" };
+  return {
+    name: normalized.slice(slash + 1) || normalized,
+    directory: normalized.slice(0, slash),
+  };
+}
+
+export function displayPartsForGrepPath(path: string): {
+  name: string;
+  directory: string;
+} {
+  return splitDisplayPath(path);
+}
+
+function appendHit(
+  hit: GrepFileHit,
+  line: number,
+  content: string,
+  isHit: boolean,
+): void {
+  if (isHit) {
+    hit.hitCount += 1;
+    hit.matches.push({ line, content });
+    if (hit.line === undefined) hit.line = line;
+    return;
+  }
+  if (hit.line === undefined) hit.line = line;
+}
+
+/**
+ * Collapse parsed grep lines into one clickable file entry each.
+ * Prefers the first hit line for navigation; keeps all hit rows for expand.
+ */
+export function groupGrepFileHits(lines: GrepResultLine[]): GrepFileHit[] {
+  const order: string[] = [];
+  const byPath = new Map<string, GrepFileHit>();
+
+  const ensure = (path: string): GrepFileHit => {
+    let hit = byPath.get(path);
+    if (!hit) {
+      hit = { path, hitCount: 0, matches: [] };
+      byPath.set(path, hit);
+      order.push(path);
+    }
+    return hit;
+  };
+
+  for (const entry of lines) {
+    if (entry.kind === "match") {
+      appendHit(ensure(entry.path), entry.line, entry.content, entry.hit);
+      continue;
+    }
+    if (entry.kind === "match_no_path" && entry.path) {
+      appendHit(ensure(entry.path), entry.line, entry.content, entry.hit);
+      continue;
+    }
+    if (entry.kind === "file_header") {
+      ensure(entry.path);
+    }
+  }
+
+  return order.map((path) => byPath.get(path)!);
+}
+
 export function dispatchOpenFilePreview(
   target: FileTarget,
   trigger: HTMLElement | null,

@@ -1,16 +1,22 @@
-import React, { useCallback, useRef, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { CheckOutlined, CopyOutlined } from "@ant-design/icons";
-import { copyText } from "@/utils/clipboard";
+import {
+  DownOutlined,
+  FileTextOutlined,
+  RightOutlined,
+} from "@ant-design/icons";
 import styles from "../shared/toolCards.module.less";
 import {
   dispatchOpenFilePreview,
+  displayPartsForGrepPath,
+  groupGrepFileHits,
   toOpenableFileTarget,
+  type GrepFileHit,
+  type GrepMatchHit,
   type GrepResultLine,
 } from "./grepSearchResult";
 
 export interface GrepSearchOutputProps {
-  content: string;
   lines: GrepResultLine[];
 }
 
@@ -24,125 +30,107 @@ function openPath(
   dispatchOpenFilePreview(target, trigger, { workspace: true });
 }
 
-const GrepResultRow: React.FC<{ entry: GrepResultLine }> = ({ entry }) => {
-  if (entry.kind === "separator") {
-    return <div className={styles.grepResultSeparator}>---</div>;
-  }
+const GrepMatchRow: React.FC<{
+  path: string;
+  match: GrepMatchHit;
+}> = ({ path, match }) => (
+  <button
+    type="button"
+    className={styles.grepMatchRow}
+    title={`${path}:${match.line}`}
+    aria-label={`${path}:${match.line}`}
+    onClick={(event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openPath(path, match.line, event.currentTarget);
+    }}
+  >
+    <span className={styles.grepMatchLine}>L{match.line}</span>
+    <span className={styles.grepMatchContent}>{match.content}</span>
+  </button>
+);
 
-  if (entry.kind === "text") {
-    return <div className={styles.grepResultPlain}>{entry.raw || "\u00a0"}</div>;
-  }
+const GrepFileGroup: React.FC<{ hit: GrepFileHit }> = ({ hit }) => {
+  const { name, directory } = displayPartsForGrepPath(hit.path);
+  const canExpand = hit.matches.length > 0;
+  const [expanded, setExpanded] = useState(false);
 
-  if (entry.kind === "file_header") {
-    return (
-      <div className={styles.grepResultRow}>
-        <button
-          type="button"
-          className={styles.grepResultPath}
-          onClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            openPath(entry.path, undefined, event.currentTarget);
-          }}
-        >
-          {entry.path}
-        </button>
-      </div>
-    );
-  }
-
-  if (entry.kind === "match") {
-    return (
-      <div
-        className={
-          entry.hit ? styles.grepResultRowHit : styles.grepResultRowContext
-        }
-      >
-        <button
-          type="button"
-          className={styles.grepResultPath}
-          onClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            openPath(entry.path, entry.line, event.currentTarget);
-          }}
-        >
-          {entry.path}
-        </button>
-        <span className={styles.grepResultMeta}>
-          :{entry.line}:{entry.hit ? ">" : " "}{" "}
-        </span>
-        <span className={styles.grepResultContent}>{entry.content}</span>
-      </div>
-    );
-  }
-
-  // match_no_path
-  const path = entry.path;
   return (
-    <div
-      className={
-        entry.hit ? styles.grepResultRowHit : styles.grepResultRowContext
-      }
-    >
-      {path ? (
+    <div className={styles.grepFileGroup}>
+      <div className={styles.grepFileRowWrap}>
+        {canExpand ? (
+          <button
+            type="button"
+            className={styles.grepFileChevron}
+            aria-expanded={expanded}
+            aria-label={
+              expanded ? `Collapse ${hit.path}` : `Expand ${hit.path}`
+            }
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              setExpanded((value) => !value);
+            }}
+          >
+            {expanded ? (
+              <DownOutlined aria-hidden />
+            ) : (
+              <RightOutlined aria-hidden />
+            )}
+          </button>
+        ) : (
+          <span className={styles.grepFileChevronSpacer} aria-hidden />
+        )}
         <button
           type="button"
-          className={styles.grepResultLineRef}
+          className={styles.grepFileRow}
+          title={hit.line ? `${hit.path}:${hit.line}` : hit.path}
+          aria-label={hit.path}
           onClick={(event) => {
             event.preventDefault();
             event.stopPropagation();
-            openPath(path, entry.line, event.currentTarget);
+            openPath(hit.path, hit.line, event.currentTarget);
           }}
-          title={`${path}:${entry.line}`}
         >
-          {entry.line}
+          <FileTextOutlined className={styles.grepFileIcon} aria-hidden />
+          <span className={styles.grepFileName}>{name}</span>
+          {directory ? (
+            <span className={styles.grepFileDir}>{directory}</span>
+          ) : null}
+          {hit.hitCount > 1 ? (
+            <span className={styles.grepFileHitCount}>{hit.hitCount}</span>
+          ) : null}
         </button>
-      ) : (
-        <span className={styles.grepResultMeta}>{entry.line}</span>
-      )}
-      <span className={styles.grepResultMeta}>
-        :{entry.hit ? ">" : " "}{" "}
-      </span>
-      <span className={styles.grepResultContent}>{entry.content}</span>
+      </div>
+      {canExpand && expanded ? (
+        <div className={styles.grepMatchList}>
+          {hit.matches.map((match) => (
+            <GrepMatchRow
+              key={`${hit.path}:${match.line}:${match.content}`}
+              path={hit.path}
+              match={match}
+            />
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 };
 
-const GrepSearchOutput: React.FC<GrepSearchOutputProps> = ({
-  content,
-  lines,
-}) => {
+const GrepSearchOutput: React.FC<GrepSearchOutputProps> = ({ lines }) => {
   const { t } = useTranslation();
-  const [copied, setCopied] = useState(false);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const handleCopy = useCallback(() => {
-    void copyText(content)
-      .then(() => {
-        if (timerRef.current) clearTimeout(timerRef.current);
-        setCopied(true);
-        timerRef.current = setTimeout(() => setCopied(false), 2000);
-      })
-      .catch(() => {});
-  }, [content]);
+  const fileHits = useMemo(() => groupGrepFileHits(lines), [lines]);
 
   return (
-    <div className={styles.defaultBlock}>
-      <div className={styles.defaultBlockHeader}>
-        <span className={styles.defaultBlockTitle}>Output</span>
-        <button
-          type="button"
-          className={styles.defaultBlockCopy}
-          onClick={handleCopy}
-          title={t("tool.copy", { defaultValue: "Copy" })}
-        >
-          {copied ? <CheckOutlined /> : <CopyOutlined />}
-        </button>
+    <div className={styles.grepFileListBlock}>
+      <div className={styles.grepFileListHeader}>
+        <span className={styles.grepFileListTitle}>
+          {t("tool.lineBadge.files", { count: fileHits.length })}
+        </span>
       </div>
-      <div className={styles.grepResultBody}>
-        {lines.map((entry, index) => (
-          <GrepResultRow key={`${index}:${entry.raw}`} entry={entry} />
+      <div className={styles.grepFileListBody}>
+        {fileHits.map((hit) => (
+          <GrepFileGroup key={hit.path} hit={hit} />
         ))}
       </div>
     </div>
