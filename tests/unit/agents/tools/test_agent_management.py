@@ -608,6 +608,7 @@ def test_parse_positive_timeout_seconds_accepts_numeric_and_rejects_invalid():
         True,
         False,
         "",
+        10**1000,
     ):
         try:
             agent_management._parse_positive_timeout_seconds(
@@ -779,6 +780,36 @@ async def test_submit_to_agent_invalid_timeout_returns_error(monkeypatch):
     assert text.startswith("ERROR:")
     assert "task_timeout" in text
     assert "got 'abc'" in text
+
+
+async def test_submit_to_agent_huge_int_timeout_returns_error(monkeypatch):
+    """Values that overflow asyncio.sleep must be tool ERROR, not a submit."""
+    called = {"submit": False}
+
+    def fake_submit(*_args, **_kwargs):
+        called["submit"] = True
+        return {"task_id": "task-should-not"}
+
+    monkeypatch.setattr(
+        agent_management,
+        "submit_agent_chat_task",
+        fake_submit,
+    )
+    monkeypatch.setattr(
+        agent_management,
+        "agent_exists",
+        lambda *_a, **_k: True,
+    )
+
+    response = await agent_management.submit_to_agent(
+        to_agent="worker",
+        text="do work",
+        task_timeout=10**1000,
+    )
+    assert called["submit"] is False
+    text = response.content[0].text
+    assert text.startswith("ERROR:")
+    assert "task_timeout" in text
 
 
 async def test_submit_to_agent_omitted_timeout_passes_none(monkeypatch):

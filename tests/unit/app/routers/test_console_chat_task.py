@@ -191,14 +191,6 @@ async def _wait_for_task_to_finish(task_id: str) -> dict[str, Any]:
     raise TimeoutError(f"background task did not finish: {task_id}")
 
 
-async def _wait_for_task_cancellation(task: asyncio.Task[Any]) -> None:
-    for _ in range(200):
-        if task.cancelling() > 0:
-            return
-        await asyncio.sleep(0.05)
-    raise TimeoutError("background task was not cancelled")
-
-
 @pytest.mark.asyncio
 async def test_forked_task_reports_failed_when_worktree_cannot_be_finalized(
     tmp_path: Path,
@@ -273,11 +265,15 @@ async def test_forked_task_reports_failed_when_worktree_finalization_raises(
 
 
 @pytest.mark.asyncio
-async def test_forked_task_timeout_during_finalization_waits_for_commit(
+async def test_forked_task_timeout_during_finalization_stays_failed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Once a Git commit starts, timeout waits for its authoritative result."""
+    """Timeout during Git finalize must publish failed/timeout immediately.
+
+    The in-flight commit may still finish as bookkeeping, but it must not
+    rewrite the task API result back to completed.
+    """
     fork = _create_fork(tmp_path, "finalize-timeout")
     _install_hook(
         fork,
@@ -294,24 +290,20 @@ async def test_forked_task_timeout_during_finalization_waits_for_commit(
     )
     try:
         await _wait_for_file(fork.worktree / ".hook-started")
-        await _wait_for_task_cancellation(background_task)
-        before_release = await console.get_console_chat_task(task_id)
+        timed_out = await _wait_for_task_to_finish(task_id)
+        error = (timed_out.get("result") or {}).get("error") or {}
+        assert timed_out["status"] == "finished"
+        assert timed_out["result"]["status"] == "failed"
+        assert error.get("code") == "timeout"
 
         (fork.worktree / ".hook-release").touch()
         await asyncio.wait_for(background_task, timeout=10)
-        completed = await console.get_console_chat_task(task_id)
-        registry = json.loads(
-            (fork.project / REGISTRY_REL).read_text(encoding="utf-8"),
-        )
-        fork_head = _git(fork.worktree, "rev-parse", "HEAD").stdout.strip()
-
-        assert (
-            before_release["status"],
-            completed["status"],
-            completed["result"]["status"],
-            registry["forks"][fork.branch]["status"],
-            fork_head != fork.base_head,
-        ) == ("running", "finished", "completed", "finalized", True)
+        # Detached Git may still commit; the task result must stay timeout.
+        after_release = await console.get_console_chat_task(task_id)
+        after_error = (after_release.get("result") or {}).get("error") or {}
+        assert after_release["status"] == "finished"
+        assert after_release["result"]["status"] == "failed"
+        assert after_error.get("code") == "timeout"
     finally:
         (fork.worktree / ".hook-release").touch(exist_ok=True)
         await asyncio.gather(background_task, return_exceptions=True)

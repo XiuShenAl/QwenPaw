@@ -670,11 +670,13 @@ async def _finalize_background_fork(
     *,
     scope_id: str,
 ) -> bool:
-    """Finish an in-flight fork commit before publishing task state.
+    """Finish an in-flight fork commit before publishing a *success* result.
 
-    Cancelling an ``asyncio.to_thread`` await cannot stop its worker thread.
-    Once finalization starts, keep waiting for its authoritative result so the
-    task API, fork registry, and branch HEAD cannot report conflicting states.
+    Cancelling ``asyncio.to_thread`` cannot stop the Git worker. If the
+    parent task is cancelled (timeout or manual cancel), re-raise immediately
+    so the task API can publish a terminal failure. The Git worker keeps
+    running as detached bookkeeping and must not rewrite that failure into
+    ``completed``.
     """
     from qwenpaw.agents.fork_project import finalize_fork_worktree_or_fail
 
@@ -687,12 +689,23 @@ async def _finalize_background_fork(
             expected_scope=scope_id or None,
         ),
     )
-    while True:
+
+    def _log_detached(task: asyncio.Task) -> None:
         try:
-            return await asyncio.shield(finalizer)
-        except asyncio.CancelledError:
-            if finalizer.done():
-                return finalizer.result()
+            task.result()
+        except Exception:
+            logger.warning(
+                "Detached fork finalize failed for %s",
+                sanitize_log_value(branch),
+                exc_info=True,
+            )
+
+    try:
+        return await asyncio.shield(finalizer)
+    except asyncio.CancelledError:
+        if not finalizer.done():
+            finalizer.add_done_callback(_log_detached)
+        raise
 
 
 async def _mark_background_fork_failed(
@@ -757,7 +770,7 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
         effective_timeout = _resolve_effective_stream_task_timeout(
             request_data.get("timeout"),
         )
-    except ValueError as exc:
+    except (ValueError, OverflowError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     task_id = f"task-{uuid.uuid4().hex[:12]}"
@@ -824,6 +837,7 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
 
     async def _run() -> None:
         last_response: Optional[Dict[str, Any]] = None
+        finalize_started = False
         try:
             async for sse_line in console_channel.stream_one(
                 native_payload,
@@ -835,6 +849,7 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
             # Fork subagents: commit dirty worktree so branch tips are
             # mergeable before exposing a completed task result.
             if fork_project_dir and fork_worktree_branch:
+                finalize_started = True
                 try:
                     finalized = await _finalize_background_fork(
                         fork_project_dir,
@@ -877,13 +892,16 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
                 "status": "failed",
                 "error": cancel_error,
             }
-            await _mark_background_fork_failed(
-                fork_project_dir,
-                fork_worktree_branch,
-                scope_id=fork_scope_id,
-                reason=str(cancel_error["message"]),
-                context="cancel",
-            )
+            # In-flight Git finalize is detached bookkeeping; do not race
+            # it with mark_fork_failed or let it flip this result later.
+            if not finalize_started:
+                await _mark_background_fork_failed(
+                    fork_project_dir,
+                    fork_worktree_branch,
+                    scope_id=fork_scope_id,
+                    reason=str(cancel_error["message"]),
+                    context="cancel",
+                )
             return
         except Exception as exc:
             bg.status = "finished"

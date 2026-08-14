@@ -21,6 +21,9 @@ from ...constant import (
 )
 from ...runtime.tool_registry import tool_descriptor
 from ...utils.http import trust_env_for_url
+from ...utils.timeout import (
+    parse_positive_timeout_seconds as _parse_positive_timeout_seconds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -955,21 +958,6 @@ def _coerce_bool(
         f"'{field_name}' must be a boolean "
         f"(or 0/1 / true/false / yes/no / on/off)",
     )
-
-
-def _parse_positive_timeout_seconds(
-    value: Any,
-    *,
-    field_name: str = "timeout",
-) -> int:
-    """Parse a required timeout value to positive ``int`` seconds.
-
-    Delegates to :func:`qwenpaw.utils.timeout.parse_positive_timeout_seconds`
-    so tool and console HTTP paths share one contract.
-    """
-    from ...utils.timeout import parse_positive_timeout_seconds
-
-    return parse_positive_timeout_seconds(value, field_name=field_name)
 
 
 def _foreground_wait_seconds(parsed_timeout: Optional[int]) -> int:

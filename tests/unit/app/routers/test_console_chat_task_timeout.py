@@ -34,6 +34,8 @@ def test_resolve_timeout_accepts_positive_number_and_string() -> None:
     assert _resolve_effective_stream_task_timeout(30.9) == 30
     assert _resolve_effective_stream_task_timeout("1800") == 1800
     assert _resolve_effective_stream_task_timeout(10**15) == 10**15
+    assert _resolve_effective_stream_task_timeout(2**53 + 1) == 2**53 + 1
+    assert _resolve_effective_stream_task_timeout("1e20") == int(1e20)
 
 
 @pytest.mark.parametrize(
@@ -50,6 +52,9 @@ def test_resolve_timeout_accepts_positive_number_and_string() -> None:
         "0",
         "-3",
         float("nan"),
+        float("inf"),
+        "1e400",
+        10**1000,
     ],
 )
 def test_resolve_timeout_rejects_invalid(bad) -> None:
@@ -65,6 +70,7 @@ def test_shared_parse_used_by_tool_and_console() -> None:
     assert parse_positive_timeout_seconds("30") == 30
     assert _resolve_effective_stream_task_timeout("30") == 30
     assert parse_positive_timeout_seconds(10**15) == 10**15
+    assert parse_positive_timeout_seconds(2**53 + 1) == 2**53 + 1
 
 
 def test_background_cancel_error_distinguishes_timeout() -> None:
@@ -193,6 +199,20 @@ def test_chat_task_explicit_timeout_echoed(
     assert response.json()["timeout"] == 30
 
 
+def test_chat_task_large_int_timeout_echoed_exactly(
+    client,
+    console_workspace,
+):
+    """Ints must not be coerced through float (2**53+1 stays exact)."""
+    huge = 2**53 + 1
+    response = client.post(
+        "/api/console/chat/task",
+        json=_chat_task_body(timeout=huge),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["timeout"] == huge
+
+
 @pytest.mark.parametrize(
     "bad_timeout",
     [
@@ -204,6 +224,8 @@ def test_chat_task_explicit_timeout_echoed(
         {},
         [],
         {"seconds": 30},
+        "1e400",
+        10**1000,
     ],
 )
 def test_chat_task_invalid_timeout_returns_400(
