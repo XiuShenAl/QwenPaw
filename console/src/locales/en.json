@@ -3770,6 +3770,7 @@
         "clearAllDone": "Cleared completed tasks",
         "showFinished": "Show completed",
         "emptyRunning": "No running tasks",
+        "emptyHiddenFinished": "{{count}} completed (hidden)",
         "scrollMore": "Scroll to view more",
         "noOutput": "No output yet"
       }

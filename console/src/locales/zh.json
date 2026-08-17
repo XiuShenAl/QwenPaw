@@ -3788,6 +3788,7 @@
         "clearAllDone": "已清除已完成任务",
         "showFinished": "显示已完成",
         "emptyRunning": "暂无运行中任务",
+        "emptyHiddenFinished": "{{count}} 个已完成（已隐藏）",
         "scrollMore": "可滑动查看",
         "noOutput": "暂无输出"
       }

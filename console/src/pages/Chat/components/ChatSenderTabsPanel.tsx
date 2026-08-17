@@ -181,10 +181,16 @@ export default function ChatSenderTabsPanel({
     alignItems: "center" as const,
   };
 
+  const bgBadgeCount = hasRunningBg
+    ? runningTasks.length
+    : showFinished && finishedTasks.length > 0
+    ? finishedTasks.length
+    : null;
+
   const renderTab = (
     key: TabKey,
     label: string,
-    count: number,
+    count: number | null,
     badgeBg: string,
     badgeColor: string,
   ) => {
@@ -216,18 +222,20 @@ export default function ChatSenderTabsPanel({
         }}
       >
         <span>{label}</span>
-        <span
-          style={{
-            fontSize: 11,
-            padding: "0 6px",
-            borderRadius: 10,
-            background: badgeBg,
-            color: badgeColor,
-            lineHeight: "16px",
-          }}
-        >
-          {count}
-        </span>
+        {count != null && (
+          <span
+            style={{
+              fontSize: 11,
+              padding: "0 6px",
+              borderRadius: 10,
+              background: badgeBg,
+              color: badgeColor,
+              lineHeight: "16px",
+            }}
+          >
+            {count}
+          </span>
+        )}
       </button>
     );
   };
@@ -393,7 +401,7 @@ export default function ChatSenderTabsPanel({
             renderTab(
               "bg",
               t("tool.control.bgQueue.title", "Background tasks"),
-              hasRunningBg ? runningTasks.length : finishedTasks.length,
+              bgBadgeCount,
               bgBadgeBg,
               bgBadgeColor,
             )}

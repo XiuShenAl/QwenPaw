@@ -21,8 +21,8 @@ import {
 } from "../../../hooks/useBackgroundTaskWatcher";
 import { message } from "antd";
 
-/** ~3 collapsed rows (32px row + 6px gaps) so the list cannot grow the chat. */
-const LIST_MAX_HEIGHT_PX = 108;
+/** ~3 collapsed rows (bordered ~36px + 6px gaps) so 1–3 items do not overflow. */
+const LIST_MAX_HEIGHT_PX = 120;
 const SCROLL_EDGE_PX = 1;
 
 function measureListOverflow(el: HTMLElement): {
@@ -113,6 +113,13 @@ export default function BackgroundTaskPanel({
     [sessionTasks],
   );
   const visibleTasks = showFinished ? sessionTasks : runningTasks;
+  const expandedTask = visibleTasks.find(
+    (task) => task.toolCallId === expandedId,
+  );
+
+  useEffect(() => {
+    if (expandedId && !expandedTask) setExpandedId(null);
+  }, [expandedId, expandedTask]);
 
   useLayoutEffect(() => {
     if (!showBody) return;
@@ -125,7 +132,7 @@ export default function BackgroundTaskPanel({
       observer.observe(child);
     }
     return () => observer.disconnect();
-  }, [showBody, visibleTasks, expandedId, showFinished, syncListOverflow]);
+  }, [showBody, visibleTasks, showFinished, syncListOverflow]);
 
   const handleClose = useCallback(
     async (task: BackgroundTask) => {
@@ -189,7 +196,11 @@ export default function BackgroundTaskPanel({
     ? "rgba(114,46,209,0.25)"
     : "rgba(114,46,209,0.12)";
   const badgeColor = hasRunning ? "#d48806" : "#722ed1";
-  const badgeCount = hasRunning ? runningTasks.length : finishedTasks.length;
+  const badgeCount = hasRunning
+    ? runningTasks.length
+    : showFinished
+    ? finishedTasks.length
+    : 0;
   const listMask =
     listOverflow.canScrollUp && listOverflow.canScrollDown
       ? "linear-gradient(to bottom, transparent, #000 20px, #000 calc(100% - 28px), transparent)"
@@ -317,17 +328,19 @@ export default function BackgroundTaskPanel({
             }}
           >
             <span>{t("tool.control.bgQueue.title", "Background tasks")}</span>
-            <span
-              style={{
-                fontSize: 11,
-                padding: "0 6px",
-                borderRadius: 10,
-                background: badgeBg,
-                color: badgeColor,
-              }}
-            >
-              {badgeCount}
-            </span>
+            {badgeCount > 0 && (
+              <span
+                style={{
+                  fontSize: 11,
+                  padding: "0 6px",
+                  borderRadius: 10,
+                  background: badgeBg,
+                  color: badgeColor,
+                }}
+              >
+                {badgeCount}
+              </span>
+            )}
             <span
               style={{
                 marginLeft: "auto",
@@ -348,56 +361,64 @@ export default function BackgroundTaskPanel({
       )}
 
       {showBody && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <div
-            ref={listRef}
-            onScroll={syncListOverflow}
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: 6,
-              maxHeight: LIST_MAX_HEIGHT_PX,
-              overflowY: "auto",
-              WebkitMaskImage: listMask,
-              maskImage: listMask,
-            }}
-          >
-            {visibleTasks.length === 0 && (
-              <div
-                style={{
-                  fontSize: 12,
-                  color: isDark ? "#888" : "#999",
-                  padding: "6px 8px",
-                }}
-              >
-                {t("tool.control.bgQueue.emptyRunning", "No running tasks")}
-              </div>
-            )}
-            {visibleTasks.map((task) => {
-              const body =
-                task.status === "running"
-                  ? task.liveOutput
-                  : task.result || task.liveOutput;
-              const isExpanded = expandedId === task.toolCallId;
-              const isRunning = task.status === "running";
-              const duration = formatDuration(task.startTime, task.endTime);
-              const statusText = isRunning
-                ? `${t("tool.control.bgQueue.running", "Running")} ${duration}`
-                : task.status === "cancelled"
-                ? `${t("tool.control.bgQueue.cancelled", "Cancelled")} · ${t(
-                    "tool.control.bgQueue.totalDuration",
-                    "Total",
-                  )} ${duration}`
-                : `${t(
-                    "tool.control.bgQueue.doneLabel",
-                    "Task completed",
-                  )} · ${t(
-                    "tool.control.bgQueue.totalDuration",
-                    "Total",
-                  )} ${duration}`;
-              return (
-                <div key={task.toolCallId}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ position: "relative" }}>
+            <div
+              ref={listRef}
+              onScroll={syncListOverflow}
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+                maxHeight: LIST_MAX_HEIGHT_PX,
+                overflowY: "auto",
+                WebkitMaskImage: listMask,
+                maskImage: listMask,
+              }}
+            >
+              {visibleTasks.length === 0 && (
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: isDark ? "#888" : "#999",
+                    padding: "6px 8px",
+                  }}
+                >
+                  {!showFinished && finishedTasks.length > 0
+                    ? t("tool.control.bgQueue.emptyHiddenFinished", {
+                        count: finishedTasks.length,
+                        defaultValue: "{{count}} completed (hidden)",
+                      })
+                    : t(
+                        "tool.control.bgQueue.emptyRunning",
+                        "No running tasks",
+                      )}
+                </div>
+              )}
+              {visibleTasks.map((task) => {
+                const isExpanded = expandedId === task.toolCallId;
+                const isRunning = task.status === "running";
+                const duration = formatDuration(task.startTime, task.endTime);
+                const statusText = isRunning
+                  ? `${t(
+                      "tool.control.bgQueue.running",
+                      "Running",
+                    )} ${duration}`
+                  : task.status === "cancelled"
+                  ? `${t("tool.control.bgQueue.cancelled", "Cancelled")} · ${t(
+                      "tool.control.bgQueue.totalDuration",
+                      "Total",
+                    )} ${duration}`
+                  : `${t(
+                      "tool.control.bgQueue.doneLabel",
+                      "Task completed",
+                    )} · ${t(
+                      "tool.control.bgQueue.totalDuration",
+                      "Total",
+                    )} ${duration}`;
+                return (
                   <div
+                    key={task.toolCallId}
                     role="button"
                     tabIndex={0}
                     onClick={() =>
@@ -419,7 +440,18 @@ export default function BackgroundTaskPanel({
                       gap: 8,
                       padding: "6px 8px",
                       borderRadius: 6,
-                      background: isDark
+                      border: `2px solid ${
+                        isExpanded
+                          ? isDark
+                            ? "rgba(179,127,235,0.7)"
+                            : "rgba(179,127,235,0.85)"
+                          : "transparent"
+                      }`,
+                      background: isExpanded
+                        ? isDark
+                          ? "rgba(114,46,209,0.16)"
+                          : "rgba(114,46,209,0.06)"
+                        : isDark
                         ? "rgba(255,255,255,0.04)"
                         : "rgba(0,0,0,0.02)",
                       cursor: "pointer",
@@ -494,47 +526,56 @@ export default function BackgroundTaskPanel({
                         : t("tool.control.bgQueue.remove", "Remove")}
                     </button>
                   </div>
-                  {isExpanded && (
-                    <pre
-                      style={{
-                        margin: "4px 0 0",
-                        padding: 8,
-                        maxHeight: 160,
-                        overflow: "auto",
-                        fontSize: 11,
-                        fontFamily:
-                          "ui-monospace, SFMono-Regular, Menlo, monospace",
-                        whiteSpace: "pre-wrap",
-                        wordBreak: "break-word",
-                        background: isDark ? "#141414" : "#fafafa",
-                        border: `1px solid ${borderColor}`,
-                        borderRadius: 6,
-                        color: isDark ? "#ccc" : "#333",
-                      }}
-                    >
-                      {body ||
-                        t("tool.control.bgQueue.noOutput", "No output yet")}
-                    </pre>
-                  )}
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
+            {listOverflow.canScrollDown && (
+              <div
+                style={{
+                  position: "absolute",
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 4,
+                  height: 28,
+                  fontSize: 11,
+                  color: isDark ? "#bbb" : "#666",
+                  pointerEvents: "none",
+                  background: isDark
+                    ? "linear-gradient(to top, rgba(20,20,20,0.92), rgba(20,20,20,0.45), transparent)"
+                    : "linear-gradient(to top, rgba(255,255,255,0.96), rgba(255,255,255,0.55), transparent)",
+                }}
+              >
+                <ChevronDown size={12} aria-hidden />
+                {t("tool.control.bgQueue.scrollMore", "Scroll to view more")}
+              </div>
+            )}
           </div>
-          {listOverflow.canScrollDown && (
-            <div
+          {expandedTask && (
+            <pre
               style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 4,
+                margin: 0,
+                padding: 8,
+                maxHeight: 160,
+                overflow: "auto",
                 fontSize: 11,
-                color: isDark ? "#888" : "#999",
-                padding: "0 8px 2px",
+                fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                background: isDark ? "#141414" : "#fafafa",
+                border: `1px solid ${borderColor}`,
+                borderRadius: 6,
+                color: isDark ? "#ccc" : "#333",
               }}
             >
-              <ChevronDown size={12} aria-hidden />
-              {t("tool.control.bgQueue.scrollMore", "Scroll to view more")}
-            </div>
+              {(expandedTask.status === "running"
+                ? expandedTask.liveOutput
+                : expandedTask.result || expandedTask.liveOutput) ||
+                t("tool.control.bgQueue.noOutput", "No output yet")}
+            </pre>
           )}
         </div>
       )}
