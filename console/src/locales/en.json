@@ -3759,14 +3759,18 @@
         "title": "Background tasks",
         "running": "Running",
         "done": "Done",
+        "doneLabel": "Task completed",
         "cancelled": "Cancelled",
         "totalDuration": "Total",
         "cancel": "Cancel",
         "remove": "Remove",
         "cancelAll": "Cancel all",
-        "clearAll": "Clear all",
+        "clearAll": "Clear completed",
         "cancelAllDone": "Cancelled all running tasks",
-        "clearAllDone": "Cleared background task list",
+        "clearAllDone": "Cleared completed tasks",
+        "showFinished": "Show completed",
+        "emptyRunning": "No running tasks",
+        "scrollMore": "Scroll to view more",
         "noOutput": "No output yet"
       }
     }
