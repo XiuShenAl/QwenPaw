@@ -4,13 +4,14 @@
 
 Strict models served through DashScope (e.g. kimi-k3) reject nullable
 ``anyOf`` / empty JSON Schema branches that AgentScope generates from
-``Optional[...]`` annotations.  OpenAI / Gemini already run
-``_sanitize_tool_schemas``; this file guards the DashScope native path
-that previously forwarded the raw toolkit schemas.
+``Optional[...]`` annotations.  The native DashScope path applies only
+that nullable pass; OpenAI uses the broader ``_sanitize_tool_schemas``
+pipeline, and Gemini has its own normalizer.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 from agentscope.tool import Toolkit
@@ -173,3 +174,54 @@ def test_format_tools_passes_through_missing_tools() -> None:
     )
     assert formatted is None
     assert tool_choice is None
+
+
+def _shared_ref_parameters(depth: int) -> dict[str, Any]:
+    """Build a linearly sized schema whose shared refs form a binary tree.
+
+    Inlining every ``$ref`` would duplicate both children at each level
+    and grow exponentially with *depth*.  DashScope must keep the shared
+    references instead.
+    """
+    defs: dict[str, Any] = {"N0": {"type": "string"}}
+    for index in range(1, depth + 1):
+        previous = f"N{index - 1}"
+        defs[f"N{index}"] = {
+            "type": "object",
+            "properties": {
+                "left": {"$ref": f"#/$defs/{previous}"},
+                "right": {"$ref": f"#/$defs/{previous}"},
+            },
+        }
+    return {
+        "type": "object",
+        "properties": {"root": {"$ref": f"#/$defs/N{depth}"}},
+        "$defs": defs,
+    }
+
+
+def test_format_tools_keeps_shared_refs_bounded() -> None:
+    depth = 16
+    parameters = _shared_ref_parameters(depth)
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "demo",
+                "description": "Shared-ref schema",
+                "parameters": parameters,
+            },
+        },
+    ]
+
+    formatted, _ = _make_dashscope_model()._format_tools(tools, None)
+
+    assert formatted is not None
+    formatted_params = formatted[0]["function"]["parameters"]
+    assert formatted_params["properties"]["root"] == {
+        "$ref": f"#/$defs/N{depth}",
+    }
+    assert set(formatted_params["$defs"]) == set(parameters["$defs"])
+    assert len(json.dumps(formatted_params, sort_keys=True)) <= 2 * len(
+        json.dumps(parameters, sort_keys=True),
+    )
