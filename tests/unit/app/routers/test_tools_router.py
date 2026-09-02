@@ -9,6 +9,7 @@ import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from fastapi import HTTPException
 import pytest
 
 import qwenpaw.app.agent_context as agent_context_module
@@ -215,3 +216,39 @@ async def test_get_tool_config_reads_off_event_loop(monkeypatch) -> None:
     assert read_task.done() is False
     assert await read_task == {"region": "test"}
     assert read_threads and read_threads[0] != loop_thread
+
+
+@pytest.mark.asyncio
+async def test_update_tool_config_unknown_tool_returns_404(
+    monkeypatch,
+) -> None:
+    """A missing tool name is a client 404, not an internal 500."""
+    _patch_workspace(monkeypatch)
+    agent_config = _agent_config("read_file", {})
+    registry = SimpleNamespace(
+        get_plugin_id_for_tool=lambda _tool_name: None,
+    )
+
+    async def update_config(_agent_id, updater):
+        def update_sync():
+            updater(agent_config)
+            return agent_config
+
+        return await run_sync_io(update_sync)
+
+    monkeypatch.setattr(registry_module, "PluginRegistry", lambda: registry)
+    monkeypatch.setattr(
+        tools_router_module,
+        "update_agent_config_async",
+        update_config,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await update_tool_config(
+            tool_name="integ-unknown-xyz",
+            body=ToolConfigUpdate(config={}),
+            request=SimpleNamespace(),
+        )
+
+    assert exc_info.value.status_code == 404
+    assert "integ-unknown-xyz" in str(exc_info.value.detail)

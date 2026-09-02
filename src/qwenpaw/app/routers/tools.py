@@ -459,7 +459,8 @@ async def update_tool_config(
         Success response
 
     Raises:
-        HTTPException: If update fails
+        HTTPException: 404 if the tool is not found, 500 if the
+            update fails for an unexpected reason
     """
     from ...plugins.registry import PluginRegistry
     from ..agent_context import get_agent_for_request
@@ -565,6 +566,8 @@ async def update_tool_config(
         persisted_config = dict(
             agent_config.tools.builtin_tools[tool_name].config,
         )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(
             status_code=500,
