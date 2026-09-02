@@ -542,7 +542,10 @@ async def update_tool_config(
             not agent_config.tools
             or tool_name not in agent_config.tools.builtin_tools
         ):
-            raise ValueError(f"Tool '{tool_name}' not found in agent")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Tool '{tool_name}' not found",
+            )
 
         tool_config = agent_config.tools.builtin_tools[tool_name]
         existing_config = tool_config.config or {}
@@ -566,8 +569,8 @@ async def update_tool_config(
         persisted_config = dict(
             agent_config.tools.builtin_tools[tool_name].config,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,

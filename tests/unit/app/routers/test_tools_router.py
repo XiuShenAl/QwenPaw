@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from fastapi import HTTPException
+from pydantic import BaseModel, ValidationError
 import pytest
 
 import qwenpaw.app.agent_context as agent_context_module
@@ -251,4 +252,74 @@ async def test_update_tool_config_unknown_tool_returns_404(
         )
 
     assert exc_info.value.status_code == 404
-    assert "integ-unknown-xyz" in str(exc_info.value.detail)
+    assert exc_info.value.detail == "Tool 'integ-unknown-xyz' not found"
+
+
+@pytest.mark.asyncio
+async def test_update_tool_config_transaction_value_error_stays_500(
+    monkeypatch,
+) -> None:
+    """Load/save ValueError is an internal failure, not a missing tool."""
+    _patch_workspace(monkeypatch)
+    registry = SimpleNamespace(
+        get_plugin_id_for_tool=lambda _tool_name: None,
+    )
+
+    async def update_config(_agent_id, _updater):
+        raise ValueError("invalid cron expression")
+
+    monkeypatch.setattr(registry_module, "PluginRegistry", lambda: registry)
+    monkeypatch.setattr(
+        tools_router_module,
+        "update_agent_config_async",
+        update_config,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await update_tool_config(
+            tool_name="read_file",
+            body=ToolConfigUpdate(config={}),
+            request=SimpleNamespace(),
+        )
+
+    assert exc_info.value.status_code == 500
+    assert "invalid cron expression" in str(exc_info.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_update_tool_config_validation_error_stays_500(
+    monkeypatch,
+) -> None:
+    """Pydantic ValidationError subclasses ValueError and must stay 500."""
+
+    class _ProfileStub(BaseModel):
+        timeout: int
+
+    with pytest.raises(ValidationError) as verr:
+        _ProfileStub.model_validate({"timeout": "broken"})
+    validation_error = verr.value
+
+    _patch_workspace(monkeypatch)
+    registry = SimpleNamespace(
+        get_plugin_id_for_tool=lambda _tool_name: None,
+    )
+
+    async def update_config(_agent_id, _updater):
+        raise validation_error
+
+    monkeypatch.setattr(registry_module, "PluginRegistry", lambda: registry)
+    monkeypatch.setattr(
+        tools_router_module,
+        "update_agent_config_async",
+        update_config,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await update_tool_config(
+            tool_name="read_file",
+            body=ToolConfigUpdate(config={}),
+            request=SimpleNamespace(),
+        )
+
+    assert exc_info.value.status_code == 500
+    assert isinstance(validation_error, ValueError)
