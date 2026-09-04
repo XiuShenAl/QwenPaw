@@ -5,7 +5,12 @@ from .loader import PluginLoader
 from .registry import PluginRegistry
 from .api import PluginApi, get_tool_config
 from .architecture import PluginManifest, PluginRecord
-from .lifecycle import PluginLifecycle, ReloadReport, UnloadMode
+from .lifecycle import (
+    ConfigUpdateReport,
+    PluginLifecycle,
+    ReloadReport,
+    UnloadMode,
+)
 
 __all__ = [
     "PluginLoader",
@@ -14,6 +19,7 @@ __all__ = [
     "PluginManifest",
     "PluginRecord",
     "PluginLifecycle",
+    "ConfigUpdateReport",
     "ReloadReport",
     "UnloadMode",
     "get_tool_config",

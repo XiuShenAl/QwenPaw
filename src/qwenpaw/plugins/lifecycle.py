@@ -68,6 +68,18 @@ class ReloadReport:
 
 
 @dataclass
+class ConfigUpdateReport:
+    """Result of ``PluginLifecycle.update_config``."""
+
+    plugin_id: str
+    ok: bool = True
+    unchanged: bool = False
+    errors: list[str] = field(default_factory=list)
+    requires_confirmation: bool = False
+    legacy_hooks: list[str] = field(default_factory=list)
+
+
+@dataclass
 class LedgerEntry:
     """One recorded registration and how to undo it."""
 
@@ -115,6 +127,14 @@ class PluginInstance:
         self._runtime: list[LedgerEntry] = []
         self._install: list[LedgerEntry] = []
         self._dispose_task: asyncio.Task[UnloadReport] | None = None
+
+    def legacy_uninstall_descs(self) -> list[str]:
+        """Return runtime rows recorded as legacy uninstall hooks."""
+        return [
+            entry.desc
+            for entry in self._runtime
+            if entry.kind == "legacy_uninstall"
+        ]
 
     def guard_register(self) -> None:
         """Refuse new long-lived registrations while unloading."""
@@ -169,6 +189,46 @@ class PluginInstance:
     def add_diagnostic(self, message: str) -> None:
         if message and message not in self.diagnostics:
             self.diagnostics.append(message)
+
+    async def teardown_runtime(self) -> UnloadReport:
+        """Undo runtime ledger rows; keep modules and this instance.
+
+        Does not run the install layer, does not mark the instance
+        disposed, and does not touch ``sys.modules``.
+        """
+        report = UnloadReport(
+            plugin_id=self.plugin_id,
+            mode=UnloadMode.UNLOAD,
+        )
+        previous = self.state
+        self.state = PluginState.UNLOADING
+        entries = list(self._runtime)
+        self._runtime.clear()
+        try:
+            for entry in reversed(entries):
+                if entry.teardown is None:
+                    continue
+                try:
+                    result = entry.teardown()
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception as exc:  # noqa: BLE001
+                    report.clean = False
+                    report.errors.append(f"{entry.desc}: {exc}")
+                    logger.error(
+                        "Runtime teardown '%s' failed for plugin '%s': %s",
+                        entry.desc,
+                        self.plugin_id,
+                        exc,
+                        exc_info=True,
+                    )
+        finally:
+            if previous is PluginState.FAILED:
+                self.state = PluginState.FAILED
+            else:
+                self.state = PluginState.ACTIVE
+            self._dispose_task = None
+        return report
 
     async def dispose(self, mode: UnloadMode) -> UnloadReport:
         """Run the ledger for *mode*. Waitable and idempotent."""
@@ -239,7 +299,7 @@ def _entries_for_mode(
 
 
 class PluginLifecycle:
-    """Facade for load / unload. Uses the loader's per-plugin lock."""
+    """Facade for load / unload / reload / update_config."""
 
     def __init__(self, loader: Any) -> None:
         self._loader = loader
@@ -354,6 +414,113 @@ class PluginLifecycle:
                     plugin_id,
                 ),
             )
+
+    async def update_config(
+        self,
+        plugin_id: str,
+        new_config: dict[str, Any],
+        *,
+        confirm_legacy: bool = False,
+    ) -> ConfigUpdateReport:
+        """Rebuild contributions from *new_config* without reimporting."""
+        async with self._loader.plugin_lifecycle(plugin_id):
+            return await self._update_config_unlocked(
+                plugin_id,
+                new_config,
+                confirm_legacy=confirm_legacy,
+            )
+
+    async def _update_config_unlocked(
+        self,
+        plugin_id: str,
+        new_config: dict[str, Any],
+        *,
+        confirm_legacy: bool,
+    ) -> ConfigUpdateReport:
+        from .settings import persist_plugin_settings, runtime_config
+
+        if not isinstance(new_config, dict):
+            return ConfigUpdateReport(
+                plugin_id=plugin_id,
+                ok=False,
+                unchanged=True,
+                errors=["config must be an object"],
+            )
+        inst = self._instances.get(plugin_id)
+        record = self._loader.get_loaded_plugin(plugin_id)
+        if inst is None or record is None or record.instance is None:
+            return ConfigUpdateReport(
+                plugin_id=plugin_id,
+                ok=False,
+                unchanged=True,
+                errors=[f"Plugin '{plugin_id}' is not loaded"],
+            )
+        legacy = inst.legacy_uninstall_descs()
+        if legacy and not confirm_legacy:
+            return ConfigUpdateReport(
+                plugin_id=plugin_id,
+                ok=False,
+                unchanged=True,
+                requires_confirmation=True,
+                legacy_hooks=legacy,
+                errors=[
+                    "plugin uses a legacy uninstall hook; "
+                    "confirm to continue",
+                ],
+            )
+        incoming = runtime_config(new_config)
+        previous = dict(inst.config or {})
+        await inst.teardown_runtime()
+        self._loader.registry.unregister_plugin(plugin_id)
+        try:
+            await self._loader.reregister_unlocked(plugin_id, incoming)
+            await self._loader.run_plugin_startup_hooks(plugin_id)
+        except Exception as exc:  # noqa: BLE001
+            await inst.teardown_runtime()
+            self._loader.registry.unregister_plugin(plugin_id)
+            restore_error = ""
+            try:
+                await self._loader.reregister_unlocked(plugin_id, previous)
+                await self._loader.run_plugin_startup_hooks(plugin_id)
+                inst.config = previous
+            except Exception as restore_exc:  # noqa: BLE001
+                restore_error = str(restore_exc)
+                logger.exception(
+                    "Failed to restore config for plugin '%s'",
+                    plugin_id,
+                )
+            errors = [str(exc)]
+            if restore_error:
+                errors.append(f"restore failed: {restore_error}")
+            return ConfigUpdateReport(
+                plugin_id=plugin_id,
+                ok=False,
+                errors=errors,
+            )
+        inst.config = incoming
+        persist_plugin_settings(plugin_id, config=incoming)
+        return ConfigUpdateReport(plugin_id=plugin_id, ok=True)
+
+    async def set_enabled(
+        self,
+        plugin_id: str,
+        enabled: bool,
+    ) -> Any:
+        """Persist ``enabled`` and load or unload the instance."""
+        from .settings import persist_plugin_settings
+
+        persist_plugin_settings(plugin_id, enabled=enabled)
+        async with self._loader.plugin_lifecycle(plugin_id):
+            loaded = plugin_id in self._loader.get_all_loaded_plugins()
+            if not enabled and loaded:
+                return await self._unload_unlocked(
+                    plugin_id,
+                    UnloadMode.UNLOAD,
+                    delete_files=False,
+                )
+            if enabled and not loaded:
+                return await self._loader.load_installed_unlocked(plugin_id)
+        return self._loader.get_loaded_plugin(plugin_id)
 
     async def unload_all(self, mode: UnloadMode) -> list[UnloadReport]:
         """Unload every known instance (used at process shutdown)."""

@@ -690,7 +690,9 @@ class PluginLoader:
         manifest_dict: Dict[str, Any],
     ) -> None:
         """Bind the current instance and run ``plugin_def.register``."""
-        api = PluginApi(plugin_id, config or {}, manifest_dict)
+        from .settings import runtime_config
+
+        api = PluginApi(plugin_id, runtime_config(config), manifest_dict)
         api.set_registry(self.registry)
         instance = self.lifecycle.ensure_instance(plugin_id)
         api.bind_instance(instance)
@@ -819,7 +821,9 @@ class PluginLoader:
 
         instance = self.lifecycle.ensure_instance(plugin_id)
         instance.source_path = source_path
-        instance.config = dict(config or {})
+        from .settings import runtime_config
+
+        instance.config = runtime_config(config)
 
         compatible, compat_msg = self._check_version_compatibility(manifest)
         if not compatible:
@@ -952,10 +956,22 @@ class PluginLoader:
         for manifest, plugin_dir in discovered:
             if types is not None and manifest.plugin_type not in types:
                 continue
+            from .settings import is_plugin_enabled, runtime_config
+
             config = configs.get(manifest.id) if configs else None
+            if not is_plugin_enabled(config):
+                logger.info(
+                    "Skipping disabled plugin '%s'",
+                    manifest.id,
+                )
+                continue
 
             try:
-                await self.load_plugin(manifest, plugin_dir, config)
+                await self.load_plugin(
+                    manifest,
+                    plugin_dir,
+                    runtime_config(config),
+                )
             except Exception as e:
                 logger.error(f"Failed to load plugin '{manifest.id}': {e}")
 
@@ -1976,3 +1992,117 @@ class PluginLoader:
             Dictionary of plugin_id -> PluginRecord
         """
         return self._loaded_plugins.copy()
+
+    async def reregister_unlocked(
+        self,
+        plugin_id: str,
+        config: Optional[Dict] = None,
+    ) -> None:
+        """Call ``register()`` again on the already-imported plugin object."""
+        record = self._loaded_plugins.get(plugin_id)
+        if record is None or record.instance is None:
+            raise RuntimeError(f"Plugin '{plugin_id}' is not loaded")
+        await self._reregister_body(
+            plugin_id,
+            record.instance,
+            config,
+            _manifest_as_dict(record.manifest),
+        )
+
+    async def _reregister_body(
+        self,
+        plugin_id: str,
+        plugin_def: Any,
+        config: Optional[Dict],
+        manifest_dict: Dict[str, Any],
+    ) -> None:
+        """Bind a fresh API and run ``register()``; do not dispose on error."""
+        from .settings import runtime_config
+
+        api = PluginApi(plugin_id, runtime_config(config), manifest_dict)
+        api.set_registry(self.registry)
+        instance = self.lifecycle.ensure_instance(plugin_id)
+        api.bind_instance(instance)
+        self.registry.register_plugin_manifest(plugin_id, manifest_dict)
+        instance.record_runtime(
+            "plugin_manifest",
+            lambda: self.registry.drop_plugin_manifest(plugin_id),
+            kind="manifest",
+        )
+        if not hasattr(plugin_def, "register"):
+            raise AttributeError(
+                "Plugin must implement 'register(api)' method",
+            )
+        try:
+            result = plugin_def.register(api)
+            await await_with_budget(
+                result,
+                seconds=REGISTER_WALL_CLOCK_SECONDS,
+                what="register()",
+                plugin_id=plugin_id,
+            )
+        except Exception:
+            from .provision import recover_migrating_inventory
+
+            recover_migrating_inventory(plugin_id)
+            raise
+        from .provision import commit_migrations
+
+        commit_migrations(plugin_id)
+
+    async def run_plugin_startup_hooks(self, plugin_id: str) -> None:
+        """Run startup hooks that currently belong to *plugin_id*."""
+        for hook in self.registry.get_startup_hooks():
+            if hook.plugin_id != plugin_id:
+                continue
+            result = hook.callback()
+            await await_with_budget(
+                result,
+                seconds=REGISTER_WALL_CLOCK_SECONDS,
+                what=f"startup hook '{hook.hook_name}'",
+                plugin_id=plugin_id,
+            )
+
+    async def load_installed_unlocked(self, plugin_id: str) -> PluginRecord:
+        """Load an on-disk plugin; caller must hold the lifecycle lock."""
+        source_path = self._find_installed_plugin_dir(plugin_id)
+        if source_path is None:
+            raise KeyError(f"Plugin '{plugin_id}' is not installed")
+        _path, manifest = await asyncio.to_thread(
+            self._read_source_manifest,
+            source_path,
+        )
+        del _path
+        from ..config.utils import load_config
+        from .settings import runtime_config
+
+        raw = (load_config().plugins or {}).get(plugin_id)
+        return await self._load_plugin_unlocked(
+            manifest,
+            source_path,
+            runtime_config(raw),
+            allow_install=False,
+        )
+
+
+def _manifest_as_dict(manifest: PluginManifest) -> Dict[str, Any]:
+    """Project a manifest into the dict ``register()`` historically
+    received."""
+    if manifest.qwenpaw_version is not None:
+        qv_dict = manifest.qwenpaw_version.model_dump()
+    else:
+        qv_dict = {
+            "min": manifest.min_version,
+            "max": manifest.max_version,
+        }
+    return {
+        "id": manifest.id,
+        "name": manifest.name,
+        "version": manifest.version,
+        "description": manifest.description,
+        "description_i18n": manifest.description_i18n,
+        "author": manifest.author,
+        "dependencies": manifest.dependencies,
+        "qwenpaw_version": qv_dict,
+        "meta": manifest.meta,
+    }

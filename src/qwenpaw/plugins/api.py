@@ -383,6 +383,18 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         if self._instance is not None:
             self._instance.guard_register()
 
+    def _drop_hook(self, hook_name: str):
+        """Return a teardown that removes *hook_name* without running it."""
+
+        def _teardown():
+            if self._registry is not None:
+                self._registry.remove_hooks_by_name(
+                    self.plugin_id,
+                    [hook_name],
+                )
+
+        return _teardown
+
     def _note_runtime(
         self,
         desc: str,
@@ -725,7 +737,10 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 f"Plugin '{self.plugin_id}' registered startup hook "
                 f"'{hook_name}' (priority={priority})",
             )
-            self._note_runtime(f"startup_hook:{hook_name}")
+            self._note_runtime(
+                f"startup_hook:{hook_name}",
+                self._drop_hook(hook_name),
+            )
 
     def register_shutdown_hook(
         self,
@@ -760,6 +775,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             )
             self._note_runtime(
                 f"shutdown_hook:{hook_name}",
+                self._drop_hook(hook_name),
                 kind="shutdown_hook",
             )
 
@@ -807,6 +823,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             )
             self._note_runtime(
                 f"uninstall_hook:{hook_name}",
+                self._drop_hook(hook_name),
                 kind="legacy_uninstall",
             )
 
@@ -851,7 +868,10 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 f"workspace_created hook '{hook_name}' "
                 f"(priority={priority})",
             )
-            self._note_runtime(f"workspace_created_hook:{hook_name}")
+            self._note_runtime(
+                f"workspace_created_hook:{hook_name}",
+                self._drop_hook(hook_name),
+            )
 
     def register_http_router(
         self,

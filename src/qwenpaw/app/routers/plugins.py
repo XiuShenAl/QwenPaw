@@ -71,9 +71,10 @@ def _list_plugins_from_disk() -> list[dict]:
         frontend_entry = manifest.get("entry", {}).get("frontend")
 
         from ...plugins.architecture import PluginManifest
+        from ...plugins.settings import is_plugin_enabled
 
         disk_manifest = PluginManifest.from_dict(manifest)
-
+        raw = _plugin_config_row(plugin_id)
         result.append(
             {
                 "id": plugin_id,
@@ -81,13 +82,19 @@ def _list_plugins_from_disk() -> list[dict]:
                 "version": manifest.get("version", "0.0.0"),
                 "description": manifest.get("description", ""),
                 "author": manifest.get("author", ""),
-                "enabled": True,
+                "enabled": is_plugin_enabled(raw),
                 "loaded": False,
                 "plugin_type": disk_manifest.plugin_type,
                 "frontend_entry": frontend_entry,
             },
         )
     return result
+
+
+def _plugin_config_row(plugin_id: str) -> dict:
+    from ...config.utils import load_config
+
+    return dict((load_config().plugins or {}).get(plugin_id) or {})
 
 
 def _safe_extract_zip(
@@ -614,9 +621,12 @@ async def list_plugins(request: Request):
         )
         return _list_plugins_from_disk()
 
+    from ...plugins.settings import is_plugin_enabled
+
     result = []
-    for _plugin_id, record in loader.get_all_loaded_plugins().items():
+    for plugin_id, record in loader.get_all_loaded_plugins().items():
         manifest = record.manifest
+        raw = _plugin_config_row(plugin_id)
         result.append(
             {
                 "id": manifest.id,
@@ -624,7 +634,7 @@ async def list_plugins(request: Request):
                 "version": manifest.version,
                 "description": manifest.description,
                 "author": manifest.author,
-                "enabled": record.enabled,
+                "enabled": is_plugin_enabled(raw),
                 "loaded": True,
                 "status": getattr(record, "status", "active"),
                 "diagnostics": list(record.diagnostics or []),
@@ -986,13 +996,17 @@ async def get_plugin_status(plugin_id: str, request: Request):
     """Return the runtime status of a plugin."""
     loader = getattr(request.app.state, "plugin_loader", None)
 
+    from ...plugins.settings import is_plugin_enabled
+
+    raw = _plugin_config_row(plugin_id)
+    enabled = is_plugin_enabled(raw)
     if loader is not None:
         record = loader.get_loaded_plugin(plugin_id)
         if record is not None:
             return {
                 "id": plugin_id,
                 "loaded": True,
-                "enabled": record.enabled,
+                "enabled": enabled,
                 "status": getattr(record, "status", "active"),
                 "diagnostics": list(record.diagnostics or []),
                 "version": record.manifest.version,
@@ -1003,12 +1017,169 @@ async def get_plugin_status(plugin_id: str, request: Request):
 
     plugin_dir = get_plugins_dir() / plugin_id
     if plugin_dir.is_dir() and (plugin_dir / "plugin.json").exists():
-        return {"id": plugin_id, "loaded": False, "enabled": False}
+        return {
+            "id": plugin_id,
+            "loaded": False,
+            "enabled": enabled,
+        }
 
     raise HTTPException(
         status_code=404,
         detail=f"Plugin '{plugin_id}' not found.",
     )
+
+
+class UpdatePluginConfigRequest(BaseModel):
+    """Replace the plugin-facing config without reimporting the module."""
+
+    config: dict
+    confirm_legacy: bool = False
+
+
+class SetPluginEnabledRequest(BaseModel):
+    """Enable or disable a plugin via ``config.plugins.<id>.enabled``."""
+
+    enabled: bool
+
+
+@router.put(
+    "/{plugin_id}/config",
+    summary="Update plugin configuration",
+    description=(
+        "Rebuild the plugin's runtime contributions from a new config "
+        "without reimporting the module. Legacy uninstall hooks require "
+        "``confirm_legacy=true``."
+    ),
+)
+async def update_plugin_config(
+    plugin_id: str,
+    body: UpdatePluginConfigRequest,
+    request: Request,
+):
+    """Apply a new plugin config, rolling back on a half-finished register."""
+    loader = getattr(request.app.state, "plugin_loader", None)
+    if loader is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Plugin loader is not ready yet.",
+        )
+    report = await loader.lifecycle.update_config(
+        plugin_id,
+        body.config,
+        confirm_legacy=body.confirm_legacy,
+    )
+    if report.requires_confirmation:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "legacy_uninstall_hook",
+                "message": (
+                    report.errors[0]
+                    if report.errors
+                    else "legacy uninstall hook requires confirmation"
+                ),
+                "legacy_hooks": report.legacy_hooks,
+                "requires_confirmation": True,
+            },
+        )
+    if not report.ok:
+        status = 404 if report.unchanged else 400
+        raise HTTPException(
+            status_code=status,
+            detail={
+                "message": (
+                    report.errors[0]
+                    if report.errors
+                    else "config update failed"
+                ),
+                "errors": report.errors,
+                "unchanged": report.unchanged,
+            },
+        )
+    if plugin_id in loader.get_all_loaded_plugins():
+        await _post_load_setup(request, plugin_id)
+    return {
+        "id": plugin_id,
+        "ok": True,
+        "message": f"Plugin '{plugin_id}' config updated.",
+    }
+
+
+@router.post(
+    "/{plugin_id}/enabled",
+    summary="Enable or disable a plugin",
+    description=(
+        "Persist ``enabled`` in config.plugins. Disabling unloads the "
+        "instance without deleting files; enabling loads it from disk."
+    ),
+)
+async def set_plugin_enabled(
+    plugin_id: str,
+    body: SetPluginEnabledRequest,
+    request: Request,
+):
+    """Toggle whether a plugin is loaded on this host."""
+    loader = getattr(request.app.state, "plugin_loader", None)
+    if loader is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Plugin loader is not ready yet.",
+        )
+    from ...config.utils import get_plugins_dir
+
+    plugin_dir = get_plugins_dir() / plugin_id
+    if not (plugin_dir / "plugin.json").is_file():
+        if loader.get_loaded_plugin(plugin_id) is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Plugin '{plugin_id}' not found.",
+            )
+    try:
+        if not body.enabled:
+            async with loader.plugin_lifecycle(plugin_id):
+                provider_ids, command_names = _collect_plugin_runtime_ids(
+                    loader.registry,
+                    plugin_id,
+                )
+            result = await loader.lifecycle.set_enabled(plugin_id, False)
+            _post_unload_cleanup(
+                request,
+                plugin_id,
+                provider_ids,
+                command_names,
+            )
+            clean = getattr(result, "clean", True)
+            return {
+                "id": plugin_id,
+                "enabled": False,
+                "loaded": False,
+                "clean": clean,
+                "message": f"Plugin '{plugin_id}' disabled.",
+            }
+        record = await loader.lifecycle.set_enabled(plugin_id, True)
+        if record is not None:
+            await _post_load_setup(request, plugin_id)
+        return {
+            "id": plugin_id,
+            "enabled": True,
+            "loaded": record is not None,
+            "status": getattr(record, "status", "inactive"),
+            "message": f"Plugin '{plugin_id}' enabled.",
+        }
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error(
+            "Failed to set enabled=%s for plugin '%s': %s",
+            body.enabled,
+            _log_safe(plugin_id),
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update plugin enabled state: {exc}",
+        ) from exc
 
 
 @router.get(
