@@ -459,7 +459,11 @@ class TestRegisterSkillProvider:
         plugin_api,
         fresh_registry,
     ):
-        """register_skill_provider registers startup and uninstall hooks."""
+        """register_skill_provider uses install-layer teardown, not hooks."""
+        from qwenpaw.plugins.lifecycle import PluginInstance
+
+        inst = PluginInstance("test-plugin")
+        plugin_api.bind_instance(inst)
         with tempfile.TemporaryDirectory() as tmpdir:
             skills_dir = Path(tmpdir)
             # Create a fake skill
@@ -481,10 +485,11 @@ class TestRegisterSkillProvider:
         startup_names = [h.hook_name for h in startup_hooks]
         assert "install_skills_test-plugin" in startup_names
 
-        # Check uninstall hook registered
         uninstall_hooks = fresh_registry.get_uninstall_hooks()
-        uninstall_names = [h.hook_name for h in uninstall_hooks]
-        assert "uninstall_skills_test-plugin" in uninstall_names
+        assert uninstall_hooks == []
+        assert any(
+            entry.desc.startswith("skill_provider:") for entry in inst._install
+        )
 
     def test_register_skill_provider_default_channels(
         self,

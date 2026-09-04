@@ -277,7 +277,11 @@ def _copy_one(
         shutil.copy2(src_file, sibling)
 
 
-def recover_migrating_inventory(plugin_id: str | None = None) -> list[str]:
+def recover_migrating_inventory(
+    plugin_id: str | None = None,
+    *,
+    owns_commit=None,
+) -> list[str]:
     """Restore any location still marked migrating. Returns plugin ids."""
     recovered: list[str] = []
     if plugin_id is not None:
@@ -289,6 +293,8 @@ def recover_migrating_inventory(plugin_id: str | None = None) -> list[str]:
             return recovered
         ids = [p.stem for p in provisions_dir().glob("*.json")]
     for item_id in ids:
+        if owns_commit is not None and not owns_commit(item_id):
+            continue
         data = load_inventory(item_id)
         changed = False
         for dest_key, loc in list((data.get("locations") or {}).items()):

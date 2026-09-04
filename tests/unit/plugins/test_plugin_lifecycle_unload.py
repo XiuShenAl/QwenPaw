@@ -217,11 +217,13 @@ class TestPluginInstanceLedger:
             "conn",
             lambda: ran.append("conn"),
             shutdown_critical=True,
+            kind="custody",
         )
         inst.record_runtime(
             "patch",
             lambda: ran.append("patch"),
             shutdown_critical=False,
+            kind="effect",
         )
         inst.record_install("disk", lambda: ran.append("disk"))
 
@@ -320,6 +322,7 @@ async def test_unload_mode_leaves_agent_json_and_removes_manifest(
         mode=UnloadMode.UNLOAD,
     )
     assert report.mode is UnloadMode.UNLOAD
+    assert not report.leftovers
     assert "ok-plugin" not in loader.registry.get_all_plugin_manifests()
     assert agent_json.read_bytes() == before_agent
     assert plugins_cfg.read_bytes() == before_cfg

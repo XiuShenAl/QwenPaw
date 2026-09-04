@@ -193,16 +193,31 @@ def _bridge_to_runtime(
         if tr is None:
             continue
         try:
-            if tool_name in tr and hasattr(tr, "unregister"):
-                tr.unregister(tool_name)
+            if tool_name in tr:
+                existing = tr.get(tool_name) if hasattr(tr, "get") else None
+                owner = getattr(existing, "owner_plugin_id", "") or ""
+                if owner and owner != plugin_id:
+                    from ..runtime.occupancy import occupancy_conflict
+
+                    raise ValueError(
+                        occupancy_conflict("tool", tool_name, owner),
+                    )
+                if hasattr(tr, "unregister"):
+                    tr.unregister(tool_name)
             tr.register(desc)
             logger.info(
                 "Injected '%s' into workspace '%s' ToolRegistry",
                 tool_name,
                 ws.agent_id,
             )
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as exc:
+            logger.error(
+                "Failed to inject tool '%s' into workspace '%s': %s",
+                tool_name,
+                getattr(ws, "agent_id", "?"),
+                exc,
+            )
+            raise
 
     bk = getattr(wm, "_bootstrap_kwargs", None)
     if bk is not None:
@@ -395,6 +410,133 @@ class PluginApi:  # pylint: disable=too-many-public-methods
 
         return _teardown
 
+    def _drop_http_router(self, prefix: str):
+        def _teardown():
+            if self._registry is not None:
+                self._registry.drop_http_router(self.plugin_id, prefix)
+
+        return _teardown
+
+    def _drop_provider(self, provider_id: str):
+        def _teardown():
+            if self._registry is not None:
+                self._registry.drop_provider(provider_id)
+            try:
+                from ..providers.provider_manager import ProviderManager
+
+                ProviderManager.get_instance().unregister_plugin_provider(
+                    provider_id,
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "Live provider '%s' already gone",
+                    provider_id,
+                    exc_info=True,
+                )
+
+        return _teardown
+
+    def _drop_control_command(self, command_name: str):
+        def _teardown():
+            if self._registry is not None:
+                self._registry.drop_control_command(
+                    self.plugin_id,
+                    command_name,
+                )
+            try:
+                from ..runtime.commands.control import (
+                    unregister_command as unregister_handler,
+                )
+                from ..app.channels.command_registry import CommandRegistry
+
+                unregister_handler(command_name)
+                CommandRegistry().unregister_command(f"/{command_name}")
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "Live control command '%s' already gone",
+                    command_name,
+                    exc_info=True,
+                )
+
+        return _teardown
+
+    def _drop_middleware(self, factory: Callable, priority: int):
+        def _teardown():
+            if self._registry is not None:
+                self._registry.drop_middleware(
+                    self.plugin_id,
+                    factory,
+                    priority,
+                )
+
+        return _teardown
+
+    def _project_prompt_section(
+        self,
+        name: str,
+        provider: Callable,
+        *,
+        priority: int,
+        agent_id: Optional[str],
+    ) -> None:
+        """Project a prompt section onto live workspace PromptManagers."""
+        from ..runtime.prompt_manager import SyncPromptContributor
+
+        owner_id = self.plugin_id
+
+        class _Section(SyncPromptContributor):
+            def __init__(self):
+                self.name = name
+                self.priority = priority
+                self.owner_plugin_id = owner_id
+                self._provider = provider
+                self._agent_id = agent_id
+
+            def contribute_sync(self, ctx):
+                agent = getattr(ctx, "agent", None) or ctx
+                if self._agent_id:
+                    current = getattr(agent, "agent_id", None)
+                    if current is not None and current != self._agent_id:
+                        return None
+                return self._provider(agent)
+
+        def extra_teardown():
+            if self._registry is not None:
+                self._registry.drop_prompt_section(name)
+
+        def apply(workspace):
+            self._guard_register()
+            manager = getattr(
+                getattr(workspace, "plugins", None),
+                "prompt_manager",
+                None,
+            )
+            if manager is None:
+                return
+            try:
+                manager.register(_Section())
+            except (TypeError, ValueError) as exc:
+                self._projection_failed("prompt_section", exc)
+
+        def revoke(workspace):
+            manager = getattr(
+                getattr(workspace, "plugins", None),
+                "prompt_manager",
+                None,
+            )
+            if manager is None:
+                return
+            manager.unregister(name)
+
+        self._schedule_workspace_intent(
+            "prompt_section",
+            name,
+            apply,
+            revoke,
+            priority=60,
+            extra_teardown=extra_teardown,
+        )
+
     def _note_runtime(
         self,
         desc: str,
@@ -469,11 +611,19 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         if self._instance is not None:
             self._instance.record_install(desc, teardown, kind=kind)
 
+    def _owns_commit(self) -> bool:
+        inst = self._instance
+        if inst is None:
+            return True
+        return bool(inst.owns_commit())
+
     def provision_files(self, src, dest, version: str) -> str:
         """Copy factory files with three-way merge."""
         from .provision import provision_files as _provision_files
 
         self._guard_register()
+        if not self._owns_commit():
+            return "skipped"
         branch = _provision_files(
             self.plugin_id,
             Path(src),
@@ -491,6 +641,8 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         from .provision import record_escape_provision
 
         self._guard_register()
+        if not self._owns_commit():
+            return
         record_escape_provision(self.plugin_id, desc)
         if setup is not None:
             setup()
@@ -704,7 +856,10 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 f"Plugin '{self.plugin_id}' registered provider "
                 f"'{provider_id}'",
             )
-            self._note_runtime(f"provider:{provider_id}")
+            self._note_runtime(
+                f"provider:{provider_id}",
+                self._drop_provider(provider_id),
+            )
 
     def register_startup_hook(
         self,
@@ -903,7 +1058,10 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 prefix=prefix,
                 tags=tags,
             )
-            self._note_runtime(f"http_router:{prefix}")
+            self._note_runtime(
+                f"http_router:{prefix}",
+                self._drop_http_router(prefix),
+            )
 
     def register_control_command(
         self,
@@ -927,7 +1085,10 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 f"Plugin '{self.plugin_id}' registered control command "
                 f"'{handler.command_name}' (priority={priority_level})",
             )
-            self._note_runtime(f"control_command:{handler.command_name}")
+            self._note_runtime(
+                f"control_command:{handler.command_name}",
+                self._drop_control_command(handler.command_name),
+            )
 
     def register_middleware(
         self,
@@ -963,7 +1124,10 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 f"Plugin '{self.plugin_id}' registered middleware "
                 f"factory (priority={priority})",
             )
-            self._note_runtime(f"middleware:{priority}")
+            self._note_runtime(
+                f"middleware:{priority}",
+                self._drop_middleware(middleware_factory, priority),
+            )
 
     def register_channel(
         self,
@@ -1233,6 +1397,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                     f"governance sync (rolled back): {exc}",
                     exc_info=True,
                 )
+                raise
 
         self.register_startup_hook(
             hook_name=(f"register_tool_{self.plugin_id}_{tool_name}"),
@@ -1509,7 +1674,12 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 f"section '{name}' after '{after}' "
                 f"(priority={priority})",
             )
-            self._note_runtime(f"prompt_section:{name}")
+            self._project_prompt_section(
+                name,
+                provider,
+                priority=priority,
+                agent_id=agent_id,
+            )
 
     # ================================================================
     # Internal helpers for workspace registration
@@ -1635,10 +1805,9 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 resolved_channels,
             )
 
-        def _uninstall_skills(plugin_id: str, delete_files: bool = False):
+        def _uninstall_skills():
             """Remove skills sourced from this plugin on uninstall."""
-            _ = delete_files  # unused but part of uninstall hook contract
-            self._do_uninstall_skills(plugin_id, source_tag)
+            self._do_uninstall_skills(self.plugin_id, source_tag)
 
         def _on_workspace_created(workspace_info: dict):
             """Install plugin skills into a newly created workspace."""
@@ -1664,10 +1833,10 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             priority=80,
         )
 
-        # Register cleanup on uninstall
-        self.register_uninstall_hook(
-            hook_name=f"uninstall_skills_{self.plugin_id}",
-            callback=_uninstall_skills,
+        self._note_install(
+            f"skill_provider:{source_tag}",
+            _uninstall_skills,
+            kind="provision",
         )
 
     def unregister_skill_provider(self) -> None:
@@ -1688,7 +1857,6 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         hook_names = [
             f"install_skills_{self.plugin_id}",
             f"provision_skills_{self.plugin_id}",
-            f"uninstall_skills_{self.plugin_id}",
         ]
 
         # Remove the hooks from registry

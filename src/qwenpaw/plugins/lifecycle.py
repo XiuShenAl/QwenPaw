@@ -54,6 +54,19 @@ class UnloadReport:
     leftovers: list[str] = field(default_factory=list)
     workspace_leaks: list[str] = field(default_factory=list)
     receipt: UnloadReceipt | None = None
+    quiescent: bool = True
+
+    def absorb(self, other: "UnloadReport") -> None:
+        """Merge errors and flags from another report into this one."""
+        if not other.clean:
+            self.clean = False
+        if not other.quiescent:
+            self.quiescent = False
+        self.errors.extend(other.errors)
+        self.leftovers.extend(other.leftovers)
+        self.workspace_leaks.extend(other.workspace_leaks)
+        if other.receipt is not None:
+            self.receipt = other.receipt
 
 
 @dataclass
@@ -119,6 +132,7 @@ class PluginInstance:
 
     def __init__(self, plugin_id: str) -> None:
         self.plugin_id = plugin_id
+        self.delegate: LifecycleDelegate | None = None
         self.state = PluginState.ACTIVE
         self.generation = 0
         self.diagnostics: list[str] = []
@@ -180,6 +194,12 @@ class PluginInstance:
                 kind=kind,
             ),
         )
+
+    def owns_commit(self) -> bool:
+        """Whether provision / directory swap belong to this process."""
+        if self.delegate is None:
+            return True
+        return self.delegate.owns_commit(self.plugin_id)
 
     def mark_failed(self, reason: str) -> None:
         self.state = PluginState.FAILED
@@ -260,6 +280,17 @@ class PluginInstance:
                     result = entry.teardown()
                     if inspect.isawaitable(result):
                         await result
+                except TimeoutError as exc:
+                    report.clean = False
+                    report.quiescent = False
+                    report.errors.append(f"{entry.desc}: {exc}")
+                    logger.error(
+                        "Teardown '%s' did not go quiescent for "
+                        "plugin '%s': %s",
+                        entry.desc,
+                        self.plugin_id,
+                        exc,
+                    )
                 except Exception as exc:  # noqa: BLE001
                     report.clean = False
                     report.errors.append(f"{entry.desc}: {exc}")
@@ -287,8 +318,12 @@ def _entries_for_mode(
     """Project the two-layer ledger onto one unload mode."""
     selected: list[LedgerEntry] = []
     if mode is UnloadMode.SHUTDOWN:
+        # Hosted resources only. Table / intent / hook-row teardowns
+        # are skipped; author shutdown callbacks run separately.
         selected.extend(
-            e for e in runtime if e.shutdown_critical and e.kind != "table"
+            e
+            for e in runtime
+            if e.shutdown_critical and e.kind in {"custody", "effect"}
         )
         return selected
     # unload / uninstall: all runtime, including shutdown_critical=False
@@ -314,6 +349,7 @@ class PluginLifecycle:
         if inst is None or inst.state is PluginState.DISPOSED:
             inst = PluginInstance(plugin_id)
             self._instances[plugin_id] = inst
+        inst.delegate = self.delegate
         return inst
 
     def drop_instance(self, plugin_id: str) -> None:

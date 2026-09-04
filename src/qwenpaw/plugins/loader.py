@@ -948,8 +948,12 @@ class PluginLoader:
         from .provision import recover_migrating_inventory
         from .updates import recover_interrupted_updates
 
-        recover_interrupted_updates()
-        recover_migrating_inventory()
+        recover_interrupted_updates(
+            owns_commit=self.lifecycle.delegate.owns_commit,
+        )
+        recover_migrating_inventory(
+            owns_commit=self.lifecycle.delegate.owns_commit,
+        )
 
         discovered = self.discover_plugins()
 
@@ -1296,15 +1300,28 @@ class PluginLoader:
         snapshot = snapshot_plugin_import_state(plugin_id, old_path)
         swapped: Path | None = None
         try:
-            await self._unload_plugin_unlocked(
+            unload_report = await self._unload_plugin_unlocked(
                 plugin_id,
                 delete_files=False,
                 mode=UnloadMode.UNLOAD,
             )
-            if after_unload is not None:
-                maybe = after_unload(plugin_id)
-                if inspect.isawaitable(maybe):
-                    await maybe
+            if not unload_report.quiescent:
+                await self._rollback_reload(
+                    plugin_id,
+                    old_path,
+                    old_config,
+                    snapshot,
+                    None,
+                    incoming_manifest=record.manifest,
+                )
+                return ReloadReport(
+                    plugin_id=plugin_id,
+                    ok=False,
+                    errors=list(unload_report.errors)
+                    or ["hosted resources did not go quiescent"],
+                    generation=old_generation,
+                )
+            await _invoke_after_unload(after_unload, plugin_id)
             swapped = await self._swap_plugin_dir(
                 plugin_id,
                 old_path,
@@ -1363,6 +1380,8 @@ class PluginLoader:
         incoming: Path,
     ) -> Path | None:
         """Rename *old_path* aside and copy *incoming* in. None if in-place."""
+        if not self.lifecycle.delegate.owns_commit(plugin_id):
+            return None
         if incoming.resolve() == old_path.resolve():
             return None
         from .updates import write_updating_marker
@@ -1411,6 +1430,7 @@ class PluginLoader:
                     plugin_id,
                     delete_files=False,
                     mode=UnloadMode.UNLOAD,
+                    skip_legacy=True,
                 )
             except Exception:  # noqa: BLE001
                 logger.exception(
@@ -1691,6 +1711,7 @@ class PluginLoader:
         *,
         mode: UnloadMode | None = None,
         instance=None,
+        skip_legacy: bool = False,
     ) -> UnloadReport:
         """Unload a plugin; caller must hold :meth:`plugin_lifecycle`."""
         if mode is None:
@@ -1703,18 +1724,26 @@ class PluginLoader:
         if instance is None:
             instance = self.lifecycle.ensure_instance(plugin_id)
 
-        report = await instance.dispose(mode)
-        if mode is not UnloadMode.SHUTDOWN:
-            self._record_workspace_scan(plugin_id, report)
+        # Author hooks must run while they are still in the registry.
+        # Ledger teardowns only drop the rows; they do not invoke them.
+        report = UnloadReport(plugin_id=plugin_id, mode=mode)
         await self._run_shutdown_hooks(plugin_id, report)
         if mode is UnloadMode.SHUTDOWN:
+            report.absorb(await instance.dispose(mode))
             logger.info("Shutdown hooks finished for plugin '%s'", plugin_id)
             return report
-        await self._run_legacy_uninstall_hooks(
-            plugin_id,
-            report,
-            delete_files=delete_files or mode is UnloadMode.UNINSTALL,
-        )
+        if not skip_legacy:
+            await self._run_legacy_uninstall_hooks(
+                plugin_id,
+                report,
+                delete_files=delete_files or mode is UnloadMode.UNINSTALL,
+            )
+        report.absorb(await instance.dispose(mode))
+        self._record_workspace_scan(plugin_id, report)
+        leftovers = self.registry.leftover_registrations(plugin_id)
+        if leftovers:
+            report.clean = False
+            report.leftovers.extend(leftovers)
 
         # Remove Python module and all sub-modules so the next import
         # gets a fresh copy (e.g. plugin_foo.utils must not be reused).
@@ -1793,10 +1822,6 @@ class PluginLoader:
         if scan.saw_unstamped:
             report.workspace_leaks.append("无章、未覆盖")
         if scan.stamped_leaks:
-            report.clean = False
-        leftovers = self.registry.leftover_channel_keys(plugin_id)
-        for key in leftovers:
-            report.leftovers.append(f"channel:{key}")
             report.clean = False
         from .custody import scan_unhosted_tasks
 
@@ -2083,6 +2108,18 @@ class PluginLoader:
             runtime_config(raw),
             allow_install=False,
         )
+
+
+async def _invoke_after_unload(
+    after_unload: Optional[Any],
+    plugin_id: str,
+) -> None:
+    """Run an optional post-unload callback."""
+    if after_unload is None:
+        return
+    maybe = after_unload(plugin_id)
+    if inspect.isawaitable(maybe):
+        await maybe
 
 
 def _manifest_as_dict(manifest: PluginManifest) -> Dict[str, Any]:

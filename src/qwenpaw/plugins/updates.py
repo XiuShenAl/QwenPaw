@@ -52,7 +52,7 @@ def clear_updating_marker(plugin_id: str) -> None:
         path.unlink()
 
 
-def recover_interrupted_updates() -> list[str]:
+def recover_interrupted_updates(owns_commit=None) -> list[str]:
     """Restore plugin dirs still marked updating. Returns restored ids."""
     from ..constant import WORKING_DIR
 
@@ -61,10 +61,25 @@ def recover_interrupted_updates() -> list[str]:
         return []
     restored: list[str] = []
     for path in sorted(root.glob("*.json")):
-        plugin_id = _restore_one_marker(path)
-        if plugin_id:
-            restored.append(plugin_id)
+        plugin_id = _peek_marker_plugin_id(path)
+        if (
+            plugin_id
+            and owns_commit is not None
+            and not owns_commit(plugin_id)
+        ):
+            continue
+        restored_id = _restore_one_marker(path)
+        if restored_id:
+            restored.append(restored_id)
     return restored
+
+
+def _peek_marker_plugin_id(path: Path) -> str | None:
+    try:
+        data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return str(data.get("plugin_id") or path.stem) or None
 
 
 def _restore_one_marker(path: Path) -> str | None:

@@ -700,8 +700,22 @@ class PluginRegistry:  # pylint:disable=too-many-public-methods
         if not normalized_name:
             raise ValueError("Prompt section name must not be empty")
         if normalized_name in self._prompt_section_names:
+            occupant = next(
+                (
+                    item.plugin_id
+                    for item in self._prompt_sections
+                    if item.name == normalized_name
+                ),
+                "",
+            )
+            from ..runtime.occupancy import occupancy_conflict
+
             raise ValueError(
-                f"Prompt section '{normalized_name}' is already registered",
+                occupancy_conflict(
+                    "prompt section",
+                    normalized_name,
+                    occupant,
+                ),
             )
         normalized_after = after.strip() or "workspace"
         from ..agents.prompt_builder import PromptBuilder
@@ -905,6 +919,114 @@ class PluginRegistry:  # pylint:disable=too-many-public-methods
             for key, reg in self._channels.items()
             if reg.plugin_id == plugin_id
         ]
+
+    def drop_http_router(self, plugin_id: str, prefix: str) -> None:
+        """Remove one mounted HTTP prefix for *plugin_id*."""
+        http_app = self._plugin_http_app
+        normalized = prefix.strip()
+        remaining = []
+        for reg in self._http_router_registrations:
+            if reg.plugin_id != plugin_id or reg.prefix != normalized:
+                remaining.append(reg)
+                continue
+            self._http_prefix_to_plugin.pop(reg.prefix, None)
+            if http_app is None:
+                continue
+            routes = http_app.router.routes
+            for route in reg.routes:
+                try:
+                    routes.remove(route)
+                except ValueError:
+                    logger.debug(
+                        "HTTP route %r already gone for '%s'",
+                        getattr(route, "path", route),
+                        plugin_id,
+                    )
+        self._http_router_registrations = remaining
+
+    def drop_provider(self, provider_id: str) -> None:
+        """Remove one provider registration."""
+        self._providers.pop(provider_id, None)
+
+    def drop_control_command(self, plugin_id: str, command_name: str) -> None:
+        """Remove one control-command registration."""
+        self._control_commands = [
+            item
+            for item in self._control_commands
+            if not (
+                item.plugin_id == plugin_id
+                and item.handler.command_name == command_name
+            )
+        ]
+
+    def drop_middleware(
+        self,
+        plugin_id: str,
+        factory: Callable,
+        priority: int,
+    ) -> None:
+        """Remove one middleware factory registration."""
+        self._middleware_registrations = [
+            item
+            for item in self._middleware_registrations
+            if not (
+                item.plugin_id == plugin_id
+                and item.factory is factory
+                and item.priority == priority
+            )
+        ]
+
+    def drop_prompt_section(self, name: str) -> None:
+        """Remove one prompt section by name."""
+        self._prompt_sections = [
+            item for item in self._prompt_sections if item.name != name
+        ]
+        self._prompt_section_names.discard(name)
+
+    def leftover_registrations(self, plugin_id: str) -> List[str]:
+        """Ledgered rows that are still present after teardown."""
+        leftovers: List[str] = []
+        leftovers.extend(
+            f"http:{reg.prefix}"
+            for reg in self._http_router_registrations
+            if reg.plugin_id == plugin_id
+        )
+        leftovers.extend(
+            f"provider:{pid}"
+            for pid, reg in self._providers.items()
+            if reg.plugin_id == plugin_id
+        )
+        leftovers.extend(
+            f"channel:{key}" for key in self.leftover_channel_keys(plugin_id)
+        )
+        leftovers.extend(
+            f"control_command:{item.handler.command_name}"
+            for item in self._control_commands
+            if item.plugin_id == plugin_id
+        )
+        leftovers.extend(
+            f"middleware:{item.priority}"
+            for item in self._middleware_registrations
+            if item.plugin_id == plugin_id
+        )
+        leftovers.extend(
+            f"prompt_section:{item.name}"
+            for item in self._prompt_sections
+            if item.plugin_id == plugin_id
+        )
+        leftovers.extend(
+            f"hook:{item.hook_name}"
+            for item in (
+                self._startup_hooks
+                + self._shutdown_hooks
+                + self._uninstall_hooks
+                + self._workspace_created_hooks
+            )
+            if item.plugin_id == plugin_id
+        )
+        if plugin_id in self._plugin_manifests:
+            leftovers.append("manifest")
+        return leftovers
 
     def _unregister_plugin_channels(self, plugin_id: str) -> None:
         """Report leftover channel registrations; do not delete them.
