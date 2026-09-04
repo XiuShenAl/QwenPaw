@@ -397,6 +397,49 @@ def commit_migrations(plugin_id: str) -> None:
         save_inventory(plugin_id, data)
 
 
+def snapshot_created_dests(plugin_id: str) -> list[str]:
+    """Return dest keys this plugin created (uninstall recheck snapshot)."""
+    data = load_inventory(plugin_id)
+    dests: list[str] = []
+    for dest_key, loc in (data.get("locations") or {}).items():
+        if (loc or {}).get("branch") == "create":
+            dests.append(dest_key)
+    return dests
+
+
+def leftover_dests(dests: list[str]) -> list[str]:
+    """Return snapshot dests that are still on disk."""
+    return [dest for dest in dests if Path(dest).exists()]
+
+
+def declared_provision_dests(manifest: dict[str, Any]) -> list[str]:
+    """Read dest paths declared on ``plugin.json`` (candidate fallback)."""
+    raw = None
+    meta = manifest.get("meta")
+    if isinstance(meta, dict):
+        raw = meta.get("provisions")
+    if raw is None:
+        raw = manifest.get("provisions")
+    if not isinstance(raw, list):
+        return []
+    dests: list[str] = []
+    for item in raw:
+        if isinstance(item, str) and item.strip():
+            dests.append(item.strip())
+            continue
+        if isinstance(item, dict):
+            dest = item.get("dest") or item.get("destination")
+            if isinstance(dest, str) and dest.strip():
+                dests.append(dest.strip())
+    return dests
+
+
+def teardown_paths(dests: list[str]) -> None:
+    """Best-effort delete of declared dests (candidate-level uninstall)."""
+    for dest_key in dests:
+        _remove_path(Path(dest_key))
+
+
 def teardown_created_locations(plugin_id: str) -> None:
     """Remove destinations created by this plugin (uninstall only)."""
     data = load_inventory(plugin_id)

@@ -546,39 +546,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
 
             # ---- Startup Hooks ----
             logger.debug("Executing plugin startup hooks...")
-            startup_hooks = plugin_loader.registry.get_startup_hooks()
-            for hook in startup_hooks:
-                try:
-                    logger.debug(
-                        f"Executing startup hook '{hook.hook_name}' "
-                        f"from plugin '{hook.plugin_id}' "
-                        f"(priority={hook.priority})",
-                    )
-
-                    from ..plugins.lifecycle import (
-                        REGISTER_WALL_CLOCK_SECONDS,
-                        await_with_budget,
-                    )
-
-                    result = hook.callback()
-                    await await_with_budget(
-                        result,
-                        seconds=REGISTER_WALL_CLOCK_SECONDS,
-                        what=f"startup hook '{hook.hook_name}'",
-                        plugin_id=hook.plugin_id,
-                    )
-
-                    logger.debug(
-                        f"Completed startup hook '{hook.hook_name}' "
-                        f"from plugin '{hook.plugin_id}'",
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"✗ Failed to execute startup hook "
-                        f"'{hook.hook_name}' "
-                        f"from plugin '{hook.plugin_id}': {e}",
-                        exc_info=True,
-                    )
+            await plugin_loader.run_all_startup_hooks()
 
             # ---- Approval Service ----
             try:

@@ -1234,13 +1234,20 @@ class PluginLoader:
             target,
         )
 
-    def _read_source_manifest(
+    def read_source_manifest(
         self,
         source_path: Path,
     ) -> Tuple[Path, PluginManifest]:
         """Resolve and load ``plugin.json`` under *source_path* (sync I/O)."""
         manifest_path = resolved_plugin_manifest_path(source_path)
         return manifest_path, self._load_manifest(manifest_path)
+
+    def _read_source_manifest(
+        self,
+        source_path: Path,
+    ) -> Tuple[Path, PluginManifest]:
+        """Resolve and load ``plugin.json`` under *source_path* (sync I/O)."""
+        return self.read_source_manifest(source_path)
 
     async def reload_plugin_unlocked(
         self,
@@ -1718,6 +1725,8 @@ class PluginLoader:
             mode = UnloadMode.UNINSTALL if delete_files else UnloadMode.UNLOAD
         record = self._loaded_plugins.get(plugin_id)
         if record is None:
+            if mode is UnloadMode.UNINSTALL:
+                return await self._uninstall_without_instance(plugin_id)
             raise KeyError(
                 f"Plugin '{plugin_id}' is not loaded",
             )
@@ -1786,9 +1795,7 @@ class PluginLoader:
         del self._loaded_plugins[plugin_id]
 
         if mode is UnloadMode.UNINSTALL:
-            from .provision import teardown_created_locations
-
-            teardown_created_locations(plugin_id)
+            _recheck_created_locations(plugin_id, report)
 
         # Optionally delete files from disk (off the event loop).
         should_delete = delete_files or mode is UnloadMode.UNINSTALL
@@ -1820,7 +1827,7 @@ class PluginLoader:
         scan = scan_owner_rows(plugin_id, default_live_workspaces())
         report.workspace_leaks.extend(scan.stamped_leaks)
         if scan.saw_unstamped:
-            report.workspace_leaks.append("无章、未覆盖")
+            report.workspace_leaks.append("未标注归属、未覆盖")
         if scan.stamped_leaks:
             report.clean = False
         from .custody import scan_unhosted_tasks
@@ -1991,13 +1998,86 @@ class PluginLoader:
                 report.errors.append(f"uninstall:{hook.hook_name}:{exc}")
                 report.clean = False
 
-    def _find_installed_plugin_dir(self, plugin_id: str) -> Optional[Path]:
+    def find_installed_plugin_dir(self, plugin_id: str) -> Optional[Path]:
         """Return the on-disk directory for *plugin_id*, if present."""
         for plugin_dir in self.plugin_dirs:
             candidate = plugin_dir / plugin_id
             if (candidate / "plugin.json").is_file():
                 return candidate
         return None
+
+    def _find_installed_plugin_dir(self, plugin_id: str) -> Optional[Path]:
+        """Return the on-disk directory for *plugin_id*, if present."""
+        return self.find_installed_plugin_dir(plugin_id)
+
+    async def _uninstall_without_instance(
+        self,
+        plugin_id: str,
+    ) -> UnloadReport:
+        """Clear disk provisions and the plugin dir when nothing is loaded."""
+        from .provision import (
+            declared_provision_dests,
+            inventory_path,
+            leftover_dests,
+            snapshot_created_dests,
+            teardown_created_locations,
+            teardown_paths,
+        )
+
+        report = UnloadReport(
+            plugin_id=plugin_id,
+            mode=UnloadMode.UNINSTALL,
+        )
+        source_path = self._find_installed_plugin_dir(plugin_id)
+        has_inventory = inventory_path(plugin_id).is_file()
+        if source_path is None and not has_inventory:
+            raise KeyError(f"Plugin '{plugin_id}' is not installed")
+
+        created = snapshot_created_dests(plugin_id)
+        declared: list[str] = []
+        candidate = False
+        if not created and source_path is not None:
+            try:
+                _path, manifest = await asyncio.to_thread(
+                    self._read_source_manifest,
+                    source_path,
+                )
+                del _path
+                declared = declared_provision_dests(
+                    _manifest_as_dict(manifest),
+                )
+            except Exception:  # noqa: BLE001
+                declared = []
+            if declared:
+                candidate = True
+                report.errors.append(
+                    "candidate: inventory missing; "
+                    "using plugin.json declarations",
+                )
+
+        teardown_created_locations(plugin_id)
+        if candidate:
+            teardown_paths(declared)
+        PluginApi.cleanup_sourced_skills(plugin_id)
+
+        leftover = leftover_dests(created or declared)
+        for dest in leftover:
+            prefix = (
+                "candidate leftover" if candidate else "inventory leftover"
+            )
+            report.errors.append(f"{prefix}: {dest}")
+            report.clean = False
+
+        if source_path is not None and await asyncio.to_thread(
+            source_path.exists,
+        ):
+            await asyncio.to_thread(shutil.rmtree, source_path)
+        self.lifecycle.drop_instance(plugin_id)
+        logger.info(
+            "Uninstalled plugin '%s' without a live instance",
+            plugin_id,
+        )
+        return report
 
     def get_loaded_plugin(self, plugin_id: str) -> Optional[PluginRecord]:
         """Get loaded plugin record.
@@ -2076,17 +2156,103 @@ class PluginLoader:
         commit_migrations(plugin_id)
 
     async def run_plugin_startup_hooks(self, plugin_id: str) -> None:
-        """Run startup hooks that currently belong to *plugin_id*."""
+        """Run startup hooks that currently belong to *plugin_id*.
+
+        Exceptions propagate so ``update_config`` / reload can roll back.
+        """
         for hook in self.registry.get_startup_hooks():
             if hook.plugin_id != plugin_id:
                 continue
-            result = hook.callback()
-            await await_with_budget(
-                result,
-                seconds=REGISTER_WALL_CLOCK_SECONDS,
-                what=f"startup hook '{hook.hook_name}'",
-                plugin_id=plugin_id,
+            await self._invoke_startup_hook(hook)
+
+    async def run_startup_hooks_isolated(self, plugin_id: str) -> bool:
+        """Run one plugin's startup hooks; failure → FAILED + ledger undo.
+
+        Returns ``True`` when every hook succeeded.
+        """
+        for hook in self.registry.get_startup_hooks():
+            if hook.plugin_id != plugin_id:
+                continue
+            try:
+                await self._invoke_startup_hook(hook)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "✗ Failed to execute startup hook '%s' "
+                    "from plugin '%s': %s",
+                    hook.hook_name,
+                    plugin_id,
+                    exc,
+                    exc_info=True,
+                )
+                await self._fail_after_startup(plugin_id, str(exc))
+                return False
+        return True
+
+    async def run_all_startup_hooks(self) -> None:
+        """Run every startup hook; one failure does not stop the others."""
+        failed: set[str] = set()
+        for hook in self.registry.get_startup_hooks():
+            if hook.plugin_id in failed:
+                continue
+            logger.debug(
+                "Executing startup hook '%s' from plugin '%s' "
+                "(priority=%s)",
+                hook.hook_name,
+                hook.plugin_id,
+                hook.priority,
             )
+            try:
+                await self._invoke_startup_hook(hook)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "✗ Failed to execute startup hook '%s' "
+                    "from plugin '%s': %s",
+                    hook.hook_name,
+                    hook.plugin_id,
+                    exc,
+                    exc_info=True,
+                )
+                failed.add(hook.plugin_id)
+                await self._fail_after_startup(hook.plugin_id, str(exc))
+                continue
+            logger.debug(
+                "Completed startup hook '%s' from plugin '%s'",
+                hook.hook_name,
+                hook.plugin_id,
+            )
+
+    async def _invoke_startup_hook(self, hook: Any) -> None:
+        result = hook.callback()
+        await await_with_budget(
+            result,
+            seconds=REGISTER_WALL_CLOCK_SECONDS,
+            what=f"startup hook '{hook.hook_name}'",
+            plugin_id=hook.plugin_id,
+        )
+
+    async def _fail_after_startup(
+        self,
+        plugin_id: str,
+        reason: str,
+    ) -> None:
+        """Mark FAILED, undo the runtime ledger, keep the loaded record."""
+        instance = self.lifecycle.ensure_instance(plugin_id)
+        instance.mark_failed(reason)
+        await instance.dispose(UnloadMode.UNLOAD)
+        from .provision import recover_migrating_inventory
+
+        recover_migrating_inventory(plugin_id)
+        self.registry.unregister_plugin(plugin_id)
+        record = self._loaded_plugins.get(plugin_id)
+        if record is not None:
+            record.status = "failed"
+            record.enabled = False
+            record.diagnostics = list(instance.diagnostics)
+        logger.error(
+            "Plugin '%s' marked FAILED after startup: %s",
+            plugin_id,
+            reason,
+        )
 
     async def load_installed_unlocked(self, plugin_id: str) -> PluginRecord:
         """Load an on-disk plugin; caller must hold the lifecycle lock."""
@@ -2120,6 +2286,24 @@ async def _invoke_after_unload(
     maybe = after_unload(plugin_id)
     if inspect.isawaitable(maybe):
         await maybe
+
+
+def _recheck_created_locations(
+    plugin_id: str,
+    report: UnloadReport,
+) -> None:
+    """Uninstall step ⑦: teardown created dests, then ERROR if they remain."""
+    from .provision import (
+        leftover_dests,
+        snapshot_created_dests,
+        teardown_created_locations,
+    )
+
+    created = snapshot_created_dests(plugin_id)
+    teardown_created_locations(plugin_id)
+    for dest in leftover_dests(created):
+        report.errors.append(f"inventory leftover: {dest}")
+        report.clean = False
 
 
 def _manifest_as_dict(manifest: PluginManifest) -> Dict[str, Any]:

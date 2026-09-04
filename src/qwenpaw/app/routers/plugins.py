@@ -4,7 +4,6 @@
 static files.  Also provides runtime install / uninstall endpoints."""
 
 import asyncio
-import inspect
 import json
 import logging
 import mimetypes
@@ -212,17 +211,9 @@ async def _post_load_setup(  # pylint: disable=too-many-branches
         logger.warning(f"Control command setup skipped: {exc}")
 
     # Execute startup hooks for the new plugin
-    for hook in registry.get_startup_hooks():
-        if hook.plugin_id != plugin_id:
-            continue
-        try:
-            result = hook.callback()
-            if inspect.iscoroutine(result) or inspect.isawaitable(result):
-                await result
-        except Exception as exc:
-            logger.error(
-                f"Startup hook '{hook.hook_name}' failed: {exc}",
-            )
+    started = await loader.run_startup_hooks_isolated(plugin_id)
+    if not started:
+        return
 
     # Sync the plugin's tools into every agent's builtin_tools config
     # (config file I/O — keep off the event loop).
@@ -698,9 +689,8 @@ async def upload_plugin(
     "/{plugin_id}",
     summary="Uninstall a plugin",
     description=(
-        "Unload and permanently delete a plugin.  All agents are "
-        "reloaded in the background so tool changes take effect "
-        "immediately."
+        "Unload and permanently delete a plugin, including plugins "
+        "that are not currently loaded (disabled or FAILED)."
     ),
 )
 async def uninstall_plugin(plugin_id: str, request: Request):
@@ -718,9 +708,18 @@ async def uninstall_plugin(plugin_id: str, request: Request):
     try:
         async with loader.plugin_lifecycle(plugin_id):
             record = loader.get_loaded_plugin(plugin_id)
-            if record is None:
-                raise KeyError(f"Plugin '{plugin_id}' is not loaded.")
-            meta: dict = record.manifest.meta or {}
+            meta: dict = {}
+            if record is not None:
+                meta = record.manifest.meta or {}
+            else:
+                source = loader.find_installed_plugin_dir(plugin_id)
+                if source is not None:
+                    _path, manifest = await asyncio.to_thread(
+                        loader.read_source_manifest,
+                        source,
+                    )
+                    del _path
+                    meta = manifest.meta or {}
 
             from ...plugins.lifecycle import UnloadMode
 

@@ -327,13 +327,35 @@ class HookRegistry:
         * ``SKIP_AGENT`` is sticky: subsequent hooks still run, but the
           final result of the phase carries ``SKIP_AGENT`` so the Runtime
           can skip the two fixed agent steps.
-        * Any hook raising propagates to the runtime's ``ON_ERROR`` chain
-          via the normal exception path — the registry does **not** swallow
-          exceptions; tests rely on this contract.
+        * Host hooks (empty ``owner_plugin_id``) that raise still
+          propagate to the runtime's ``ON_ERROR`` chain.
+        * Plugin-owned hooks are isolated: the error is logged and
+          recorded on that plugin, and the phase continues.
         """
         final_action = HookAction.CONTINUE
         for hook in self.hooks_for(phase):
-            result = await hook.run(ctx)
+            try:
+                result = await hook.run(ctx)
+            except Exception as exc:
+                owner = getattr(hook, "owner_plugin_id", "") or ""
+                if owner:
+                    logger.error(
+                        "Plugin '%s' runtime hook '%s' failed: %s",
+                        owner,
+                        hook.name,
+                        exc,
+                        exc_info=True,
+                    )
+                    from qwenpaw.plugins.lifecycle import (
+                        note_plugin_diagnostic,
+                    )
+
+                    note_plugin_diagnostic(
+                        owner,
+                        f"runtime hook {hook.name}: {exc}",
+                    )
+                    continue
+                raise
             if result.action == HookAction.SHORT_CIRCUIT:
                 return result
             if result.action == HookAction.SKIP_AGENT:

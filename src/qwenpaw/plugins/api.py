@@ -4,6 +4,7 @@
 import inspect
 import logging
 import threading
+import warnings
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Type
 
@@ -905,6 +906,10 @@ class PluginApi:  # pylint: disable=too-many-public-methods
     ):
         """Register a shutdown hook.
 
+        .. deprecated::
+            Cross-layer historical hook. Prefer hosted teardown via
+            ``api.effect`` / the runtime ledger. Timing is unchanged.
+
         Args:
             hook_name: Unique hook identifier
             callback: Async or sync function to call on shutdown
@@ -917,6 +922,12 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             ...     priority=100,
             ... )
         """
+        warnings.warn(
+            "register_shutdown_hook is deprecated; use hosted teardown "
+            "via api.effect or the runtime ledger",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if self._registry:
             self._registry.register_shutdown_hook(
                 plugin_id=self.plugin_id,
@@ -942,13 +953,16 @@ class PluginApi:  # pylint: disable=too-many-public-methods
     ):
         """Register an uninstall hook.
 
+        .. deprecated::
+            Cross-layer historical hook. The framework cannot keep the
+            two ledger layers separate for this callback. Prefer
+            ``api.provision`` / install-layer teardown. Timing is
+            unchanged: ``unload`` / ``uninstall`` run it; ``shutdown``
+            and failure rollback do not.
+
         Unlike shutdown hooks (which run on every app shutdown),
         uninstall hooks run **only** when the plugin is explicitly
         unloaded or removed via ``PluginLoader.unload_plugin()``.
-
-        Use these for one-time cleanup on uninstall — e.g. removing
-        workspace skills, clearing manifest entries, or undoing
-        monkey-patches applied during startup.
 
         The callback receives keyword arguments:
             - ``plugin_id`` (str): The plugin being uninstalled.
@@ -965,6 +979,12 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             ...     callback=self.on_uninstall,
             ... )
         """
+        warnings.warn(
+            "register_uninstall_hook is deprecated; use api.provision "
+            "or install-layer teardown",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if self._registry:
             self._registry.register_uninstall_hook(
                 plugin_id=self.plugin_id,
@@ -1762,16 +1782,17 @@ class PluginApi:  # pylint: disable=too-many-public-methods
     ) -> None:
         """Register a plugin as a skill provider.
 
-        Copies the plugin's skills into the workspace skill directory,
-        reconciles the workspace manifest, and applies the plugin's
-        default enable/channel strategy.  On uninstall, skills sourced
-        from this plugin are automatically cleaned up.
+        Copies the plugin's skills through framework ``provision_files``
+        (three-way hash / migrate / ``.new``), reconciles the workspace
+        skill manifest, and applies the plugin's default enable/channel
+        strategy.  On uninstall, skills sourced from this plugin are
+        cleaned up from the install-layer ledger.
 
         Skills are also automatically installed into workspaces created
         after the server starts, via a ``workspace_created`` hook.
 
         The host handles:
-        - Copying the skill directory into the workspace.
+        - Copying the skill directory via ``provision_files``.
         - Reconciling the workspace skill manifest.
         - Applying the default enabled/channels strategy.
         - Cleaning up manifest entries on uninstall (by ``source``).
@@ -1842,9 +1863,9 @@ class PluginApi:  # pylint: disable=too-many-public-methods
     def unregister_skill_provider(self) -> None:
         """Unregister this plugin as a skill provider.
 
-        Removes the startup, workspace_created, and uninstall hooks
-        that were registered by ``register_skill_provider()``, and
-        cleans up skills sourced from this plugin across all existing
+        Removes the startup and workspace_created hooks that were
+        registered by ``register_skill_provider()``, and cleans up
+        skills sourced from this plugin across all existing
         workspaces.
 
         This allows plugins to dynamically disable their skill
@@ -2010,6 +2031,11 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 f"'{self.plugin_id}': {exc}",
                 exc_info=True,
             )
+
+    @staticmethod
+    def cleanup_sourced_skills(plugin_id: str) -> None:
+        """Remove skills tagged ``plugin:{id}`` from every workspace."""
+        PluginApi._do_uninstall_skills(plugin_id, f"plugin:{plugin_id}")
 
     @staticmethod
     def _do_uninstall_skills(plugin_id: str, source_tag: str) -> None:

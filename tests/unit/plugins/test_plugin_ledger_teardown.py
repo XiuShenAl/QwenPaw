@@ -255,6 +255,49 @@ async def test_reload_aborts_when_not_quiescent(
     )
 
 
+@pytest.mark.asyncio
+async def test_plugin_runtime_hook_is_isolated():
+    from qwenpaw.runtime.hooks import HookBase, HookContext, HookRegistry
+    from qwenpaw.runtime.phases import Phase
+
+    inst = PluginInstance("hook-plug")
+
+    class Boom(HookBase):
+        phase = Phase.PRE_DISPATCH
+        name = "boom"
+        owner_plugin_id = "hook-plug"
+
+        async def run(self, _ctx):
+            raise RuntimeError("hook-boom")
+
+    class HostBoom(HookBase):
+        phase = Phase.PRE_EXECUTE
+        name = "host-boom"
+
+        async def run(self, _ctx):
+            raise RuntimeError("host-boom")
+
+    ctx = HookContext(
+        request=SimpleNamespace(),
+        session_id="s",
+        agent_id="a",
+        root_session_id="s",
+        root_agent_id="a",
+        workspace_dir=None,
+        workspace=None,
+        app_services=None,
+    )
+    registry = HookRegistry()
+    registry.register(Boom())
+    await registry.run(Phase.PRE_DISPATCH, ctx)
+    assert any("hook-boom" in item for item in inst.diagnostics)
+
+    host = HookRegistry()
+    host.register(HostBoom())
+    with pytest.raises(RuntimeError, match="host-boom"):
+        await host.run(Phase.PRE_EXECUTE, ctx)
+
+
 def test_cloudpaw_uses_provision_not_loader_patch():
     source = (
         Path(__file__).parents[3]

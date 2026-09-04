@@ -16,6 +16,18 @@ logger = logging.getLogger(__name__)
 # bounds ``await``; a synchronous ``requests.get`` still blocks the loop.
 REGISTER_WALL_CLOCK_SECONDS = 300.0
 
+# Last instance created for each id. Runtime hooks use this to attach
+# diagnostics without holding a loader reference.
+_LIVE_INSTANCES: dict[str, "PluginInstance"] = {}
+
+
+def note_plugin_diagnostic(plugin_id: str, message: str) -> None:
+    """Record a runtime diagnostic on the live instance, if any."""
+    inst = _LIVE_INSTANCES.get(plugin_id)
+    if inst is None:
+        return
+    inst.add_diagnostic(message)
+
 
 class UnloadMode(str, Enum):
     """Three projections of the same teardown ledger."""
@@ -141,6 +153,7 @@ class PluginInstance:
         self._runtime: list[LedgerEntry] = []
         self._install: list[LedgerEntry] = []
         self._dispose_task: asyncio.Task[UnloadReport] | None = None
+        _LIVE_INSTANCES[plugin_id] = self
 
     def legacy_uninstall_descs(self) -> list[str]:
         """Return runtime rows recorded as legacy uninstall hooks."""
@@ -353,7 +366,9 @@ class PluginLifecycle:
         return inst
 
     def drop_instance(self, plugin_id: str) -> None:
-        self._instances.pop(plugin_id, None)
+        dropped = self._instances.pop(plugin_id, None)
+        if _LIVE_INSTANCES.get(plugin_id) is dropped:
+            _LIVE_INSTANCES.pop(plugin_id, None)
 
     async def load(
         self,
