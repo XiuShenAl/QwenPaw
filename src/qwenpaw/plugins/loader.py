@@ -26,6 +26,7 @@ from .api import PluginApi
 from .dependency_gate import DependencyGate, GateDecision
 from .lifecycle import (
     PluginLifecycle,
+    ReloadReport,
     UnloadMode,
     UnloadReport,
     await_with_budget,
@@ -34,6 +35,9 @@ from .lifecycle import (
 from .module_isolation import (
     build_plugin_builtins,
     get_namespace_finder,
+    probe_plugin_source,
+    restore_plugin_import_state,
+    snapshot_plugin_import_state,
     strip_plugin_sys_path,
     sweep_bare_tree_modules,
     unregister_namespace,
@@ -70,6 +74,51 @@ def _plugin_runtime_dir() -> Path:
     from ..constant import WORKING_DIR
 
     return Path(WORKING_DIR) / "plugin_runtime"
+
+
+def _backend_entry_file(
+    source_path: Path,
+    manifest: PluginManifest,
+) -> Path | None:
+    backend = getattr(manifest.entry, "backend", None)
+    if not backend:
+        return None
+    return source_path / backend
+
+
+def _probe_incoming(
+    plugin_id: str,
+    source_path: Path,
+    entry_file: Path | None,
+) -> ReloadReport | None:
+    """Return a failed report when probe import does not succeed."""
+    if entry_file is None:
+        return None
+    try:
+        probe_plugin_source(plugin_id, source_path, entry_file)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "Probe import failed for plugin '%s': %s",
+            plugin_id,
+            exc,
+            exc_info=True,
+        )
+        return ReloadReport(
+            plugin_id=plugin_id,
+            ok=False,
+            unchanged=True,
+            errors=[f"probe failed: {exc}"],
+        )
+    return None
+
+
+def _remove_dir(path: Path | None) -> None:
+    if path is None or not path.exists():
+        return
+    if path.is_dir():
+        shutil.rmtree(path)
+        return
+    path.unlink()
 
 
 def _plugin_site_dir() -> Path:
@@ -666,7 +715,13 @@ class PluginLoader:
         except Exception as exc:
             instance.mark_failed(str(exc))
             await instance.dispose(UnloadMode.UNLOAD)
+            from .provision import recover_migrating_inventory
+
+            recover_migrating_inventory(plugin_id)
             raise
+        from .provision import commit_migrations
+
+        commit_migrations(plugin_id)
 
     def _cleanup_failed_load(
         self,
@@ -763,6 +818,8 @@ class PluginLoader:
             return self._loaded_plugins[plugin_id]
 
         instance = self.lifecycle.ensure_instance(plugin_id)
+        instance.source_path = source_path
+        instance.config = dict(config or {})
 
         compatible, compat_msg = self._check_version_compatibility(manifest)
         if not compatible:
@@ -885,7 +942,9 @@ class PluginLoader:
             Dictionary of plugin_id -> PluginRecord
         """
         from .provision import recover_migrating_inventory
+        from .updates import recover_interrupted_updates
 
+        recover_interrupted_updates()
         recover_migrating_inventory()
 
         discovered = self.discover_plugins()
@@ -1163,6 +1222,205 @@ class PluginLoader:
         manifest_path = resolved_plugin_manifest_path(source_path)
         return manifest_path, self._load_manifest(manifest_path)
 
+    async def reload_plugin_unlocked(
+        self,
+        plugin_id: str,
+        *,
+        new_source: Optional[Path] = None,
+        config: Optional[Dict] = None,
+        allow_install: bool = False,
+        owns_dependency_env: bool = True,
+        after_unload: Optional[Any] = None,
+    ) -> ReloadReport:
+        """Reload one plugin. Caller must hold the lifecycle lock."""
+        record = self._loaded_plugins.get(plugin_id)
+        if record is None:
+            return ReloadReport(
+                plugin_id=plugin_id,
+                ok=False,
+                errors=[f"Plugin '{plugin_id}' is not loaded"],
+            )
+        old_path = Path(record.source_path)
+        old_config = dict(
+            getattr(self.lifecycle.get_instance(plugin_id), "config", {})
+            or {},
+        )
+        old_generation = 0
+        inst = self.lifecycle.get_instance(plugin_id)
+        if inst is not None:
+            old_generation = inst.generation
+        incoming = Path(new_source).resolve() if new_source else old_path
+        incoming_manifest = record.manifest
+        if incoming != old_path:
+            _, incoming_manifest = await asyncio.to_thread(
+                self._read_source_manifest,
+                incoming,
+            )
+        entry = _backend_entry_file(incoming, incoming_manifest)
+        failed = _probe_incoming(
+            plugin_id,
+            incoming,
+            entry,
+        )
+        if failed is not None:
+            return failed
+        if owns_dependency_env:
+            decision = await self._ensure_dependencies_installed(
+                incoming,
+                plugin_id,
+                allow_install=allow_install,
+            )
+            if decision.require_restart:
+                return ReloadReport(
+                    plugin_id=plugin_id,
+                    ok=False,
+                    unchanged=True,
+                    errors=[decision.reason],
+                )
+        snapshot = snapshot_plugin_import_state(plugin_id, old_path)
+        swapped: Path | None = None
+        try:
+            await self._unload_plugin_unlocked(
+                plugin_id,
+                delete_files=False,
+                mode=UnloadMode.UNLOAD,
+            )
+            if after_unload is not None:
+                maybe = after_unload(plugin_id)
+                if inspect.isawaitable(maybe):
+                    await maybe
+            swapped = await self._swap_plugin_dir(
+                plugin_id,
+                old_path,
+                incoming,
+            )
+            target = old_path if swapped else incoming
+            _, installed_manifest = await asyncio.to_thread(
+                self._read_source_manifest,
+                target,
+            )
+            new_record = await self._load_plugin_unlocked(
+                installed_manifest,
+                target,
+                config if config is not None else old_config,
+                allow_install=allow_install,
+            )
+            if new_record.status == "failed":
+                raise RuntimeError(
+                    new_record.diagnostics[0]
+                    if new_record.diagnostics
+                    else f"Plugin '{plugin_id}' failed to load",
+                )
+            from .updates import clear_updating_marker
+
+            clear_updating_marker(plugin_id)
+            if swapped:
+                _remove_dir(swapped)
+            new_inst = self.lifecycle.get_instance(plugin_id)
+            if new_inst is not None:
+                new_inst.generation = old_generation + 1
+            return ReloadReport(
+                plugin_id=plugin_id,
+                ok=True,
+                generation=old_generation + 1,
+            )
+        except Exception as exc:  # noqa: BLE001
+            await self._rollback_reload(
+                plugin_id,
+                old_path,
+                old_config,
+                snapshot,
+                swapped,
+                incoming_manifest=record.manifest,
+            )
+            return ReloadReport(
+                plugin_id=plugin_id,
+                ok=False,
+                errors=[str(exc)],
+                generation=old_generation,
+            )
+
+    async def _swap_plugin_dir(
+        self,
+        plugin_id: str,
+        old_path: Path,
+        incoming: Path,
+    ) -> Path | None:
+        """Rename *old_path* aside and copy *incoming* in. None if in-place."""
+        if incoming.resolve() == old_path.resolve():
+            return None
+        from .updates import write_updating_marker
+
+        backup = old_path.with_name(old_path.name + f".{plugin_id}.bak")
+
+        def _swap() -> None:
+            if backup.exists():
+                shutil.rmtree(backup)
+            shutil.move(str(old_path), str(backup))
+            shutil.copytree(incoming, old_path)
+
+        write_updating_marker(
+            plugin_id,
+            backup_path=backup,
+            target_path=old_path,
+        )
+        try:
+            await asyncio.to_thread(_swap)
+        except Exception:
+            if backup.exists() and not old_path.exists():
+                shutil.move(str(backup), str(old_path))
+            from .updates import clear_updating_marker
+
+            clear_updating_marker(plugin_id)
+            raise
+        return backup
+
+    async def _rollback_reload(
+        self,
+        plugin_id: str,
+        old_path: Path,
+        old_config: Dict,
+        snapshot: dict,
+        backup: Path | None,
+        *,
+        incoming_manifest: PluginManifest,
+    ) -> None:
+        """Restore runtime, directory, modules, and the previous load."""
+        from .provision import recover_migrating_inventory
+        from .updates import clear_updating_marker
+
+        if plugin_id in self._loaded_plugins:
+            try:
+                await self._unload_plugin_unlocked(
+                    plugin_id,
+                    delete_files=False,
+                    mode=UnloadMode.UNLOAD,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Rollback unload failed for plugin '%s'",
+                    plugin_id,
+                )
+        recover_migrating_inventory(plugin_id)
+        if backup is not None and backup.exists():
+            if old_path.exists():
+                shutil.rmtree(old_path)
+            shutil.move(str(backup), str(old_path))
+        clear_updating_marker(plugin_id)
+        restore_plugin_import_state(snapshot)
+        try:
+            await self._load_plugin_unlocked(
+                incoming_manifest,
+                old_path,
+                old_config,
+                allow_install=False,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Failed to restore previous plugin '%s' after reload",
+                plugin_id,
+            )
+
     async def load_plugin_from_path(
         self,
         source_path: Path,
@@ -1182,9 +1440,10 @@ class PluginLoader:
         ``requirements.txt`` are installed before loading.
 
         When *force* is true and the plugin id is already loaded, the
-        existing instance is unloaded under :meth:`plugin_lifecycle`
-        before install (optional *before_force_unload* /
-        *after_force_unload* callbacks run around that unload).
+        existing instance is replaced via :meth:`reload_plugin_unlocked`
+        (probe first; failure leaves the old instance serving). Optional
+        *before_force_unload* / *after_force_unload* run around that
+        inner unload.
 
         *after_load* runs still inside the lifecycle lock so router
         post-load setup (providers / commands / agent config) cannot
@@ -1195,7 +1454,7 @@ class PluginLoader:
             config: Optional plugin configuration dict
             install_dir: Target plugins directory.  Defaults to the
                 first directory in ``self.plugin_dirs``.
-            force: Unload a same-id loaded plugin before installing
+            force: Replace a same-id loaded plugin via reload
             before_force_unload: ``callback(plugin_id)`` before unload
             after_force_unload: ``callback(plugin_id)`` after unload
             after_load: ``callback(record)`` after successful load
@@ -1221,14 +1480,31 @@ class PluginLoader:
                     maybe_before = before_force_unload(plugin_id)
                     if inspect.isawaitable(maybe_before):
                         await maybe_before
-                await self._unload_plugin_unlocked(
+                report = await self.reload_plugin_unlocked(
                     plugin_id,
-                    delete_files=False,
+                    new_source=source_path,
+                    config=config,
+                    allow_install=True,
+                    owns_dependency_env=(
+                        self.lifecycle.delegate.owns_dependency_env(
+                            plugin_id,
+                        )
+                    ),
+                    after_unload=after_force_unload,
                 )
-                if after_force_unload is not None:
-                    maybe_after = after_force_unload(plugin_id)
-                    if inspect.isawaitable(maybe_after):
-                        await maybe_after
+                if not report.ok:
+                    detail = (
+                        report.errors[0]
+                        if report.errors
+                        else f"Reload of '{plugin_id}' failed"
+                    )
+                    raise RuntimeError(detail)
+                record = self._loaded_plugins[plugin_id]
+                if after_load is not None:
+                    maybe_loaded = after_load(record)
+                    if inspect.isawaitable(maybe_loaded):
+                        await maybe_loaded
+                return record
             record = await self._load_plugin_from_path_unlocked(
                 source_path,
                 manifest,
@@ -1505,6 +1781,11 @@ class PluginLoader:
         leftovers = self.registry.leftover_channel_keys(plugin_id)
         for key in leftovers:
             report.leftovers.append(f"channel:{key}")
+            report.clean = False
+        from .custody import scan_unhosted_tasks
+
+        for item in scan_unhosted_tasks(plugin_id):
+            report.leftovers.append(item)
             report.clean = False
         self.registry.projector.drop_plugin(plugin_id)
 

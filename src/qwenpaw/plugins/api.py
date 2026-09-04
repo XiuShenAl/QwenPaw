@@ -265,14 +265,16 @@ def _write_tool_config(
     enabled: bool,
     description: str,
     icon: str,
+    plugin_id: str,
 ) -> None:
-    """Persist BuiltinToolConfig entry to the agent config file."""
+    """Persist BuiltinToolConfig, migrating plugin-owned fields."""
     from ..config.config import (
         BuiltinToolConfig,
         load_agent_config,
         save_agent_config,
     )
     from ..app.agent_context import get_current_agent_id
+    from .provision import apply_tool_factory
 
     agent_id = get_current_agent_id()
     if not agent_id:
@@ -290,29 +292,39 @@ def _write_tool_config(
 
         agent_config.tools = ToolsConfig()
 
-    if tool_name not in agent_config.tools.builtin_tools:
-        agent_config.tools.builtin_tools[tool_name] = BuiltinToolConfig(
-            name=tool_name,
-            enabled=enabled,
-            description=description,
-            display_to_user=True,
-            async_execution=False,
-            icon=icon,
-        )
-        logger.info(
-            "Added tool '%s' to agent '%s' config (enabled=%s)",
-            tool_name,
-            agent_id,
-            enabled,
-        )
-    else:
-        logger.info(
-            "Tool '%s' already in agent '%s' config, skipping",
-            tool_name,
-            agent_id,
-        )
-
+    existing = agent_config.tools.builtin_tools.get(tool_name)
+    current = None
+    if existing is not None:
+        current = existing.model_dump()
+        current.pop("name", None)
+    factory = _tool_factory(enabled, description, icon)
+    merged = apply_tool_factory(plugin_id, tool_name, factory, current)
+    merged.pop("name", None)
+    agent_config.tools.builtin_tools[tool_name] = BuiltinToolConfig(
+        name=tool_name,
+        **merged,
+    )
     save_agent_config(agent_id, agent_config)
+    logger.info(
+        "Wrote tool '%s' into agent '%s' config",
+        tool_name,
+        agent_id,
+    )
+
+
+def _tool_factory(
+    enabled: bool,
+    description: str,
+    icon: str,
+) -> dict:
+    return {
+        "description": description,
+        "icon": icon,
+        "display_to_user": True,
+        "enabled": enabled,
+        "async_execution": False,
+        "config": {},
+    }
 
 
 # -------------------------------------------------------------------
@@ -471,6 +483,168 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         if setup is not None:
             setup()
         self._note_install(desc, teardown, kind="provision")
+
+    def effect(
+        self,
+        desc: str,
+        setup,
+        teardown,
+        shutdown_critical: bool = True,
+    ) -> None:
+        """Record a process-local side effect on the runtime ledger."""
+        self._guard_register()
+        if setup is not None:
+            setup()
+        if self._instance is not None:
+            self._instance.record_runtime(
+                desc,
+                teardown,
+                shutdown_critical=shutdown_critical,
+                kind="effect",
+            )
+
+    def spawn_task(self, coro, desc: str = "task") -> Any:
+        """Create an asyncio task and stop it on unload."""
+        import asyncio
+
+        from . import custody
+
+        self._guard_register()
+        if self._instance is None:
+            raise RuntimeError("Plugin instance is not bound")
+        generation = self._instance.generation
+        task = asyncio.create_task(
+            custody.wrap_task_body(
+                coro,
+                instance=self._instance,
+                generation=generation,
+                desc=desc,
+            ),
+            name=f"{self.plugin_id}:{desc}",
+        )
+
+        async def _teardown():
+            await custody.stop_task(task, desc)
+
+        self._instance.record_runtime(
+            f"task:{desc}",
+            _teardown,
+            kind="custody",
+        )
+        return task
+
+    def spawn_thread(
+        self,
+        target,
+        desc: str = "thread",
+        stop=None,
+    ) -> Any:
+        """Start a background thread and join it on unload."""
+        from . import custody
+
+        self._guard_register()
+        if self._instance is None:
+            raise RuntimeError("Plugin instance is not bound")
+        if stop is None:
+            stop = threading.Event()
+        instance = self._instance
+
+        def _run() -> None:
+            try:
+                target()
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Hosted thread %r for plugin '%s' crashed",
+                    desc,
+                    instance.plugin_id,
+                )
+                instance.add_diagnostic("有托管任务异常退出")
+
+        thread = threading.Thread(
+            target=_run,
+            name=f"{self.plugin_id}:{desc}",
+            daemon=True,
+        )
+        thread.start()
+
+        def _teardown():
+            custody.stop_thread(thread, stop, desc)
+
+        self._instance.record_runtime(
+            f"thread:{desc}",
+            _teardown,
+            kind="custody",
+        )
+        return thread
+
+    def spawn_subprocess(self, args, desc: str = "subprocess") -> Any:
+        """Start a subprocess and terminate it on unload."""
+        # pylint: disable=consider-using-with
+        import subprocess
+
+        from . import custody
+
+        self._guard_register()
+        if self._instance is None:
+            raise RuntimeError("Plugin instance is not bound")
+        proc = subprocess.Popen(args)  # noqa: S603
+
+        def _teardown():
+            custody.stop_subprocess(proc, desc)
+
+        self._instance.record_runtime(
+            f"subprocess:{desc}",
+            _teardown,
+            kind="custody",
+        )
+        return proc
+
+    def watch(self, path, on_event, desc: str = "watch") -> Any:
+        """Watch *path* and stop the watcher on unload."""
+        from . import custody
+
+        self._guard_register()
+        if self._instance is None:
+            raise RuntimeError("Plugin instance is not bound")
+        stop = threading.Event()
+        generation = self._instance.generation
+        instance = self._instance
+        thread = custody.start_watch(
+            Path(path),
+            on_event,
+            stop,
+            generation,
+            lambda: instance.generation,
+        )
+
+        def _teardown():
+            stop.set()
+            custody.stop_thread(thread, stop, desc)
+
+        self._instance.record_runtime(
+            f"watch:{desc}",
+            _teardown,
+            kind="custody",
+        )
+        return thread
+
+    def hold_connection(self, client, desc: str = "connection") -> Any:
+        """Keep *client* and close it on unload."""
+        from . import custody
+
+        self._guard_register()
+        if self._instance is None:
+            raise RuntimeError("Plugin instance is not bound")
+
+        async def _teardown():
+            await custody.close_connection(client, desc)
+
+        self._instance.record_runtime(
+            f"connection:{desc}",
+            _teardown,
+            kind="custody",
+        )
+        return client
 
     def register_provider(
         self,
@@ -1012,6 +1186,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                     enabled,
                     description,
                     icon,
+                    self.plugin_id,
                 )
 
             except Exception as exc:
@@ -1057,20 +1232,6 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             ),
         )
         if self._instance is not None:
-            from .provision import record_tool_factory
-
-            record_tool_factory(
-                self.plugin_id,
-                tool_name,
-                {
-                    "description": description,
-                    "icon": icon,
-                    "display_to_user": True,
-                    "enabled": enabled,
-                    "async_execution": False,
-                    "config": {},
-                },
-            )
             self._note_install(
                 f"tool_config:{tool_name}",
                 kind="official",
@@ -1554,12 +1715,12 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         """
         try:
             from ..agents.skill_system.store import (
-                copy_skill_dir,
                 get_workspace_skills_dir,
                 get_workspace_skill_manifest_path,
                 default_workspace_manifest,
                 mutate_json,
             )
+            from .provision import commit_migrations, provision_files
             from ..agents.skill_system.registry import (
                 reconcile_workspace_manifest,
             )
@@ -1572,11 +1733,15 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             ws_skills_dir = get_workspace_skills_dir(workspace_dir)
             ws_skills_dir.mkdir(parents=True, exist_ok=True)
 
+            version = str(self.manifest.get("version") or "0")
             for skill_name in skill_names:
-                copy_skill_dir(
+                provision_files(
+                    self.plugin_id,
                     skills_dir / skill_name,
                     ws_skills_dir / skill_name,
+                    version,
                 )
+            commit_migrations(self.plugin_id)
 
             reconcile_workspace_manifest(workspace_dir)
 

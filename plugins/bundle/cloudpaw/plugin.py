@@ -444,8 +444,13 @@ def _patch_plugin_loader_unload() -> None:
         self,
         plugin_id: str,
         delete_files: bool = False,
+        *,
+        mode=None,
     ) -> None:
-        if plugin_id == "cloudpaw":
+        is_uninstall = delete_files or (
+            getattr(mode, "value", mode) == "uninstall"
+        )
+        if plugin_id == "cloudpaw" and is_uninstall:
             logger.info(
                 "[CloudPaw] Uninstall detected, cleaning up agents...",
             )
@@ -460,7 +465,12 @@ def _patch_plugin_loader_unload() -> None:
                     exc,
                 )
 
-        return await _original_unload_plugin(self, plugin_id, delete_files)
+        return await _original_unload_plugin(
+            self,
+            plugin_id,
+            delete_files,
+            mode=mode,
+        )
 
     _patched_unload_plugin._cloudpaw_patched = True
     _patched_unload_plugin._original = _original_unload_plugin

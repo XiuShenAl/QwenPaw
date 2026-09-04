@@ -57,6 +57,17 @@ class UnloadReport:
 
 
 @dataclass
+class ReloadReport:
+    """Result of ``PluginLifecycle.reload``."""
+
+    plugin_id: str
+    ok: bool = True
+    unchanged: bool = False
+    errors: list[str] = field(default_factory=list)
+    generation: int = 0
+
+
+@dataclass
 class LedgerEntry:
     """One recorded registration and how to undo it."""
 
@@ -99,6 +110,8 @@ class PluginInstance:
         self.state = PluginState.ACTIVE
         self.generation = 0
         self.diagnostics: list[str] = []
+        self.source_path: Any = None
+        self.config: dict[str, Any] = {}
         self._runtime: list[LedgerEntry] = []
         self._install: list[LedgerEntry] = []
         self._dispose_task: asyncio.Task[UnloadReport] | None = None
@@ -314,6 +327,33 @@ class PluginLifecycle:
         if mode is not UnloadMode.SHUTDOWN:
             self.drop_instance(plugin_id)
         return report
+
+    async def reload(
+        self,
+        plugin_id: str,
+        new_source: Any = None,
+        config: dict[str, Any] | None = None,
+        *,
+        allow_install: bool = False,
+    ) -> ReloadReport:
+        """Replace plugin code: probe first, then unload, then load."""
+        async with self._loader.plugin_lifecycle(plugin_id):
+            if not self.delegate.owns_commit(plugin_id):
+                return ReloadReport(
+                    plugin_id=plugin_id,
+                    ok=False,
+                    unchanged=True,
+                    errors=["commit is not owned by this process"],
+                )
+            return await self._loader.reload_plugin_unlocked(
+                plugin_id,
+                new_source=new_source,
+                config=config,
+                allow_install=allow_install,
+                owns_dependency_env=self.delegate.owns_dependency_env(
+                    plugin_id,
+                ),
+            )
 
     async def unload_all(self, mode: UnloadMode) -> list[UnloadReport]:
         """Unload every known instance (used at process shutdown)."""

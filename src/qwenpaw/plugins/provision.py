@@ -155,15 +155,25 @@ def provision_files(
             data,
         )
     new_files = _apply_factory_copy(src, dest, prev_files, branch)
+    marker = None
+    if branch == "migrate" and backup is not None:
+        marker = {
+            "backup_path": str(backup),
+            "target_version": version,
+            "prev_version": prev_version,
+            "prev_factory_hashes": {
+                rel: (info or {}).get("factory_hash", "")
+                for rel, info in prev_files.items()
+            },
+        }
     locations[dest_key] = {
         "src": str(src),
         "version": version,
         "branch": branch,
         "files": new_files,
-        "migrating": None,
+        "migrating": marker,
     }
     save_inventory(plugin_id, data)
-    _remove_path(backup)
     return branch
 
 
@@ -321,6 +331,64 @@ def _restore_backup(backup: Path, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(backup, dest)
     backup.unlink()
+
+
+_PLUGIN_OWNED_TOOL_FIELDS = (
+    "description",
+    "icon",
+    "display_to_user",
+)
+_USER_OWNED_TOOL_FIELDS = (
+    "enabled",
+    "async_execution",
+    "config",
+)
+
+
+def apply_tool_factory(
+    plugin_id: str,
+    tool_name: str,
+    factory: dict[str, Any],
+    current: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Merge one BuiltinToolConfig by field ownership.
+
+    Plugin-owned fields follow the new factory when the user did not
+    edit them. User-owned fields are always kept.
+    """
+    data = load_inventory(plugin_id)
+    tools: dict[str, Any] = data["tools"]
+    previous = (tools.get(tool_name) or {}).get("factory") or {}
+    merged = dict(factory)
+    if current:
+        for field_name in _PLUGIN_OWNED_TOOL_FIELDS:
+            if field_name in current and field_name in previous:
+                if current.get(field_name) != previous.get(field_name):
+                    merged[field_name] = current[field_name]
+            elif field_name in current and field_name not in previous:
+                merged[field_name] = current[field_name]
+        for field_name in _USER_OWNED_TOOL_FIELDS:
+            if field_name in current:
+                merged[field_name] = current[field_name]
+    tools[tool_name] = {"factory": dict(factory)}
+    save_inventory(plugin_id, data)
+    return merged
+
+
+def commit_migrations(plugin_id: str) -> None:
+    """Clear migrating markers and delete their backups after a good load."""
+    data = load_inventory(plugin_id)
+    changed = False
+    for loc in (data.get("locations") or {}).values():
+        marker = (loc or {}).get("migrating")
+        if not marker:
+            continue
+        backup = Path(marker.get("backup_path") or "")
+        _remove_path(backup)
+        loc["migrating"] = None
+        changed = True
+    if changed:
+        save_inventory(plugin_id, data)
 
 
 def teardown_created_locations(plugin_id: str) -> None:
