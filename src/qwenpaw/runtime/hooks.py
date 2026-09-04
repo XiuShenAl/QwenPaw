@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..exceptions import HookCycleError
+from .occupancy import occupancy_conflict
 from .phases import Phase
 
 if TYPE_CHECKING:
@@ -155,6 +156,7 @@ class HookBase:
     priority: int = 100
     before: tuple[str, ...] = ()
     after: tuple[str, ...] = ()
+    owner_plugin_id: str = ""
 
     async def run(self, _ctx: HookContext) -> HookResult:  # noqa: D401
         return HookResult()
@@ -278,8 +280,35 @@ class HookRegistry:
             raise TypeError(
                 f"hook {hook.name!r} has invalid phase {hook.phase!r}",
             )
+        occupant = self._hook_named(hook.name)
+        if occupant is not None:
+            raise ValueError(
+                occupancy_conflict(
+                    "hook",
+                    hook.name,
+                    getattr(occupant, "owner_plugin_id", "") or "",
+                ),
+            )
         self._by_phase[hook.phase].append(hook)
         self._sorted_cache.pop(hook.phase, None)
+
+    def _hook_named(self, name: str) -> HookBase | None:
+        for hooks in self._by_phase.values():
+            for hook in hooks:
+                if hook.name == name:
+                    return hook
+        return None
+
+    def unregister(self, name: str) -> bool:
+        """Remove a hook by name. Returns ``True`` if it was present."""
+        found = False
+        for phase, hooks in list(self._by_phase.items()):
+            kept = [h for h in hooks if h.name != name]
+            if len(kept) != len(hooks):
+                self._by_phase[phase] = kept
+                self._sorted_cache.pop(phase, None)
+                found = True
+        return found
 
     def hooks_for(self, phase: Phase) -> list[HookBase]:
         """Return the topologically sorted hooks registered for ``phase``."""

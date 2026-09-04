@@ -868,7 +868,6 @@ async def uninstall_plugin(plugin_id: str, request: Request):
                 plugin_id,
                 meta,
             )
-            await _schedule_all_agents_reload(request)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:

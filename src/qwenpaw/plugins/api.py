@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Plugin API for plugin developers."""
 
+import inspect
 import logging
 import threading
 from pathlib import Path
@@ -144,13 +145,14 @@ def _bridge_to_runtime(
     enabled: bool,
     description: str,
     registry,
+    plugin_id: str = "",
 ) -> None:
     """Attach ToolDescriptor and inject into runtime ToolRegistries.
 
     Replaces any existing descriptor / bootstrap entry for *tool_name*
     so hot-reload does not keep a stale callable.
     """
-    import inspect
+    from dataclasses import replace
 
     from ..runtime.tool_registry import ToolDescriptor
 
@@ -163,6 +165,7 @@ def _bridge_to_runtime(
             enabled_by_default=enabled,
             async_execution=is_async,
             description=description,
+            owner_plugin_id=plugin_id,
         )
         # pylint: disable-next=protected-access
         tool_func._tool_descriptor = desc  # type: ignore[attr-defined]
@@ -170,6 +173,10 @@ def _bridge_to_runtime(
             "Attached ToolDescriptor to '%s'",
             tool_name,
         )
+    elif plugin_id and not getattr(desc, "owner_plugin_id", ""):
+        desc = replace(desc, owner_plugin_id=plugin_id)
+        # pylint: disable-next=protected-access
+        tool_func._tool_descriptor = desc  # type: ignore[attr-defined]
 
     if registry is None:
         return
@@ -364,11 +371,68 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         if self._instance is not None:
             self._instance.guard_register()
 
-    def _note_runtime(self, desc: str, *, kind: str = "official") -> None:
-        """Record a runtime-ledger row. Sweep still uses unregister_plugin."""
+    def _note_runtime(
+        self,
+        desc: str,
+        teardown=None,
+        *,
+        kind: str = "official",
+    ) -> None:
+        """Record a runtime-ledger row, optionally with a teardown."""
         self._guard_register()
         if self._instance is not None:
-            self._instance.record_runtime(desc, teardown=None, kind=kind)
+            self._instance.record_runtime(desc, teardown, kind=kind)
+
+    def _schedule_workspace_intent(
+        self,
+        kind: str,
+        name: str,
+        apply,
+        revoke,
+        *,
+        priority: int = 60,
+        extra_teardown=None,
+    ) -> None:
+        """Remember an intent, project it, and record revoke on the ledger."""
+        if self._registry is None:
+            return
+        projector = self._registry.projector
+        projector.intend(kind, name, self.plugin_id, apply, revoke)
+
+        def _startup():
+            return projector.project(kind, name, self.plugin_id)
+
+        def _created(workspace_info: dict):
+            workspace = self._get_workspace_from_info(workspace_info)
+            if workspace is None:
+                return None
+            return projector.project_one(
+                workspace,
+                kind,
+                name,
+                self.plugin_id,
+            )
+
+        async def _teardown():
+            await projector.revoke(kind, name, self.plugin_id)
+            if extra_teardown is None:
+                return
+            extra = extra_teardown()
+            if inspect.isawaitable(extra):
+                await extra
+
+        self.register_startup_hook(
+            hook_name=f"{kind}_{self.plugin_id}_{name}",
+            callback=_startup,
+            priority=priority,
+        )
+        self.register_workspace_created_hook(
+            hook_name=f"{kind}_ws_{self.plugin_id}_{name}",
+            callback=_created,
+            priority=priority,
+            reload_safe=True,
+        )
+        self._note_runtime(f"{kind}:{name}", teardown=_teardown)
 
     def _note_install(
         self,
@@ -795,7 +859,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             f"Plugin '{self.plugin_id}' registered channel "
             f"'{channel_key}'",
         )
-        self._note_runtime(f"channel:{channel_key}")
+        self._project_channel(channel_key)
 
     @property
     def runtime(self):
@@ -941,6 +1005,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                     enabled,
                     description,
                     self._registry,
+                    self.plugin_id,
                 )
                 _write_tool_config(
                     tool_name,
@@ -983,7 +1048,14 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             f"Plugin '{self.plugin_id}' scheduled tool "
             f"'{tool_name}' for registration on startup",
         )
-        self._note_runtime(f"tool:{tool_name}")
+        self._note_runtime(
+            f"tool:{tool_name}",
+            teardown=lambda: _unbridge_from_runtime(
+                tool_name,
+                tool_func,
+                self._registry,
+            ),
+        )
         if self._instance is not None:
             from .provision import record_tool_factory
 
@@ -1039,30 +1111,30 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             category=category,
             help_text=help_text,
             metadata=metadata or {},
+            owner_plugin_id=self.plugin_id,
         )
 
-        def _register_to_workspaces():
-            self._register_spec_to_all_workspaces(spec)
+        def apply(workspace):
+            self._guard_register()
+            try:
+                workspace.plugins.slash_command_registry.register(spec)
+            except ValueError as exc:
+                self._projection_failed("slash_command", exc)
 
-        def _on_workspace_created(workspace_info: dict):
-            self._register_spec_to_workspace(spec, workspace_info)
+        def revoke(workspace):
+            workspace.plugins.slash_command_registry.unregister(name)
 
-        self.register_startup_hook(
-            hook_name=(f"slash_cmd_{self.plugin_id}_{name}"),
-            callback=_register_to_workspaces,
+        self._schedule_workspace_intent(
+            "slash_command",
+            name,
+            apply,
+            revoke,
             priority=60,
-        )
-        self.register_workspace_created_hook(
-            hook_name=(f"slash_cmd_ws_{self.plugin_id}_{name}"),
-            callback=_on_workspace_created,
-            priority=60,
-            reload_safe=True,
         )
         logger.info(
             f"Plugin '{self.plugin_id}' scheduled slash command "
             f"'/{name}' for registration",
         )
-        self._note_runtime(f"slash_command:/{name}")
 
     def register_mode(
         self,
@@ -1082,31 +1154,29 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         """
         mode_name = getattr(mode_cls, "name", None) or mode_cls.__name__
 
-        def _register_mode():
-            self._register_mode_cls_to_all_workspaces(mode_cls)
+        def apply(workspace):
+            self._guard_register()
+            mode = mode_cls()
+            mode.owner_plugin_id = self.plugin_id
+            try:
+                workspace.plugins.register_mode(mode, workspace)
+            except ValueError as exc:
+                self._projection_failed("mode", exc)
 
-        def _on_workspace_created(workspace_info: dict):
-            self._register_mode_cls_to_workspace(
-                mode_cls,
-                workspace_info,
-            )
+        def revoke(workspace):
+            workspace.plugins.unregister_mode(mode_name, workspace)
 
-        self.register_startup_hook(
-            hook_name=(f"mode_{self.plugin_id}_{mode_name}"),
-            callback=_register_mode,
+        self._schedule_workspace_intent(
+            "mode",
+            mode_name,
+            apply,
+            revoke,
             priority=70,
-        )
-        self.register_workspace_created_hook(
-            hook_name=(f"mode_ws_{self.plugin_id}_{mode_name}"),
-            callback=_on_workspace_created,
-            priority=70,
-            reload_safe=True,
         )
         logger.info(
             f"Plugin '{self.plugin_id}' scheduled mode "
             f"'{mode_name}' for registration",
         )
-        self._note_runtime(f"mode:{mode_name}")
 
     def register_runtime_hook(
         self,
@@ -1123,31 +1193,29 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 ``name``, and ``run()`` defined.
         """
 
-        def _register_hook():
-            self._register_hook_to_all_workspaces(hook)
+        hook.owner_plugin_id = self.plugin_id
 
-        def _on_workspace_created(workspace_info: dict):
-            self._register_hook_to_workspace(
-                hook,
-                workspace_info,
-            )
+        def apply(workspace):
+            self._guard_register()
+            try:
+                workspace.plugins.hook_registry.register(hook)
+            except (TypeError, ValueError) as exc:
+                self._projection_failed("hook", exc)
 
-        self.register_startup_hook(
-            hook_name=(f"rt_hook_{self.plugin_id}_{hook.name}"),
-            callback=_register_hook,
+        def revoke(workspace):
+            workspace.plugins.hook_registry.unregister(hook.name)
+
+        self._schedule_workspace_intent(
+            "hook",
+            hook.name,
+            apply,
+            revoke,
             priority=65,
-        )
-        self.register_workspace_created_hook(
-            hook_name=(f"rt_hook_ws_{self.plugin_id}_{hook.name}"),
-            callback=_on_workspace_created,
-            priority=65,
-            reload_safe=True,
         )
         logger.info(
             f"Plugin '{self.plugin_id}' scheduled runtime hook "
             f"'{hook.name}' (phase={hook.phase})",
         )
-        self._note_runtime(f"runtime_hook:{hook.name}")
 
     def register_agent_stop_handler(
         self,
@@ -1176,33 +1244,30 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             handler=handler,
             priority=priority,
             name=name or f"{self.plugin_id}_stop",
+            owner_plugin_id=self.plugin_id,
         )
 
-        def _register():
-            self._register_stop_handler_to_all_workspaces(reg)
+        def apply(workspace):
+            self._guard_register()
+            try:
+                workspace.plugins.register_stop_handler(reg)
+            except ValueError as exc:
+                self._projection_failed("stop_handler", exc)
 
-        def _on_workspace_created(workspace_info: dict):
-            self._register_stop_handler_to_workspace(
-                reg,
-                workspace_info,
-            )
+        def revoke(workspace):
+            workspace.plugins.unregister_stop_handler(reg.name)
 
-        self.register_startup_hook(
-            hook_name=(f"stop_{self.plugin_id}_{reg.name}"),
-            callback=_register,
+        self._schedule_workspace_intent(
+            "stop_handler",
+            reg.name,
+            apply,
+            revoke,
             priority=55,
-        )
-        self.register_workspace_created_hook(
-            hook_name=(f"stop_ws_{self.plugin_id}_{reg.name}"),
-            callback=_on_workspace_created,
-            priority=55,
-            reload_safe=True,
         )
         logger.info(
             f"Plugin '{self.plugin_id}' scheduled stop handler "
             f"'{reg.name}' (priority={priority})",
         )
-        self._note_runtime(f"stop_handler:{reg.name}")
 
     def register_prompt_section(
         self,
@@ -1269,22 +1334,6 @@ class PluginApi:  # pylint: disable=too-many-public-methods
     # Internal helpers for workspace registration
     # ================================================================
 
-    def _get_all_workspaces(self) -> list:
-        """Get all workspace instances from the registry."""
-        try:
-            from .registry import PluginRegistry
-
-            registry = PluginRegistry()
-            mgr = registry.get_workspace_manager()
-            if mgr is None:
-                return []
-            return list(mgr.agents.values())
-        except Exception as exc:
-            logger.debug(
-                f"Could not get workspaces: {exc}",
-            )
-            return []
-
     def _get_workspace_from_info(
         self,
         workspace_info: dict,
@@ -1311,94 +1360,43 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             )
             return None
 
-    def _register_spec_to_all_workspaces(self, spec):
-        """Register a CommandSpec to all existing workspaces."""
-        for ws in self._get_all_workspaces():
+    def _project_channel(self, channel_key: str) -> None:
+        """Project a registered channel onto live workspaces."""
+        from .workspace_projector import channel_passes_gates
+
+        def extra_teardown():
+            if self._registry is not None:
+                self._registry.unregister_channel(channel_key)
+
+        async def apply(workspace):
+            self._guard_register()
+            if not channel_passes_gates(workspace, channel_key):
+                return
+            manager = getattr(workspace, "channel_manager", None)
+            if manager is None:
+                return
             try:
-                ws.plugins.slash_command_registry.register(spec)
-            except ValueError as exc:
-                self._projection_failed("slash_command", exc)
+                await manager.start_one(
+                    channel_key,
+                    getattr(workspace, "_config", None),
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._projection_failed("channel", exc)
 
-    def _register_spec_to_workspace(
-        self,
-        spec,
-        workspace_info: dict,
-    ):
-        """Register a CommandSpec to a specific workspace."""
-        ws = self._get_workspace_from_info(workspace_info)
-        if ws is None:
-            return
-        try:
-            ws.plugins.slash_command_registry.register(spec)
-        except ValueError as exc:
-            self._projection_failed("slash_command", exc)
+        async def revoke(workspace):
+            manager = getattr(workspace, "channel_manager", None)
+            if manager is None:
+                return
+            await manager.stop_one(channel_key)
 
-    def _register_mode_cls_to_all_workspaces(self, mode_cls: Type) -> None:
-        """Instantiate and register *mode_cls* on every workspace."""
-        for ws in self._get_all_workspaces():
-            try:
-                ws.plugins.register_mode(mode_cls(), ws)
-            except ValueError as exc:
-                self._projection_failed("mode", exc)
-
-    def _register_mode_cls_to_workspace(
-        self,
-        mode_cls: Type,
-        workspace_info: dict,
-    ) -> None:
-        """Instantiate and register *mode_cls* on one workspace."""
-        ws = self._get_workspace_from_info(workspace_info)
-        if ws is None:
-            return
-        try:
-            ws.plugins.register_mode(mode_cls(), ws)
-        except ValueError as exc:
-            self._projection_failed("mode", exc)
-
-    def _register_hook_to_all_workspaces(self, hook):
-        """Register a runtime hook to all workspaces."""
-        for ws in self._get_all_workspaces():
-            try:
-                ws.plugins.hook_registry.register(hook)
-            except (TypeError, ValueError) as exc:
-                self._projection_failed("hook", exc)
-
-    def _register_hook_to_workspace(
-        self,
-        hook,
-        workspace_info: dict,
-    ):
-        """Register a runtime hook to a specific workspace."""
-        ws = self._get_workspace_from_info(workspace_info)
-        if ws is None:
-            return
-        try:
-            ws.plugins.hook_registry.register(hook)
-        except (TypeError, ValueError) as exc:
-            self._projection_failed("hook", exc)
-
-    def _register_stop_handler_to_all_workspaces(self, reg):
-        """Register stop handler to all workspaces."""
-        for ws in self._get_all_workspaces():
-            self._attach_stop_handler(ws, reg)
-
-    def _register_stop_handler_to_workspace(
-        self,
-        reg,
-        workspace_info: dict,
-    ):
-        """Register stop handler to a specific workspace."""
-        ws = self._get_workspace_from_info(workspace_info)
-        if ws is None:
-            return
-        self._attach_stop_handler(ws, reg)
-
-    @staticmethod
-    def _attach_stop_handler(ws, reg):
-        """Attach a stop handler registration to workspace."""
-        if not hasattr(ws.plugins, "stop_handlers"):
-            ws.plugins.stop_handlers = []
-        ws.plugins.stop_handlers.append(reg)
+        self._schedule_workspace_intent(
+            "channel",
+            channel_key,
+            apply,
+            revoke,
+            priority=80,
+            extra_teardown=extra_teardown,
+        )
 
     # ================================================================
     # End Loop Engineering

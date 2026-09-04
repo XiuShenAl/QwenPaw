@@ -1412,6 +1412,8 @@ class PluginLoader:
             instance = self.lifecycle.ensure_instance(plugin_id)
 
         report = await instance.dispose(mode)
+        if mode is not UnloadMode.SHUTDOWN:
+            self._record_workspace_scan(plugin_id, report)
         await self._run_shutdown_hooks(plugin_id, report)
         if mode is UnloadMode.SHUTDOWN:
             logger.info("Shutdown hooks finished for plugin '%s'", plugin_id)
@@ -1482,6 +1484,29 @@ class PluginLoader:
 
         logger.info(f"Unloaded plugin '{plugin_id}'")
         return report
+
+    def _record_workspace_scan(
+        self,
+        plugin_id: str,
+        report: UnloadReport,
+    ) -> None:
+        """Scan live workspace tables after ledger teardown (report only)."""
+        from .workspace_projector import (
+            default_live_workspaces,
+            scan_owner_rows,
+        )
+
+        scan = scan_owner_rows(plugin_id, default_live_workspaces())
+        report.workspace_leaks.extend(scan.stamped_leaks)
+        if scan.saw_unstamped:
+            report.workspace_leaks.append("无章、未覆盖")
+        if scan.stamped_leaks:
+            report.clean = False
+        leftovers = self.registry.leftover_channel_keys(plugin_id)
+        for key in leftovers:
+            report.leftovers.append(f"channel:{key}")
+            report.clean = False
+        self.registry.projector.drop_plugin(plugin_id)
 
     def _cleanup_plugin_tools(
         self,

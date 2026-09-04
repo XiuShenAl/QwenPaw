@@ -166,6 +166,9 @@ class PluginRegistry:  # pylint:disable=too-many-public-methods
         self._prompt_sections: List[PromptSectionRegistration] = []
         self._prompt_section_names: set = set()
         self._workspace_manager: Optional[Any] = None
+        from .workspace_projector import WorkspaceProjector
+
+        self.projector = WorkspaceProjector()
 
         self._initialized = True
 
@@ -887,24 +890,35 @@ class PluginRegistry:  # pylint:disable=too-many-public-methods
         """
         return self._channels.get(channel_key)
 
-    def _unregister_plugin_channels(self, plugin_id: str) -> None:
-        """Remove all channels registered by a plugin (used on unload).
+    def unregister_channel(self, channel_key: str) -> bool:
+        """Drop one channel registration by key."""
+        if channel_key not in self._channels:
+            return False
+        del self._channels[channel_key]
+        logger.info("Unregistered channel '%s'", channel_key)
+        return True
 
-        Note: This only removes the registration from the registry.
-        Already-instantiated channel instances in ChannelManager are
-        cleaned up when the workspace triggers a config reload
-        (schedule_agent_reload), which rebuilds the ChannelManager.
-        """
-        to_remove = [
+    def leftover_channel_keys(self, plugin_id: str) -> List[str]:
+        """Channel keys still owned by *plugin_id* (report-only)."""
+        return [
             key
             for key, reg in self._channels.items()
             if reg.plugin_id == plugin_id
         ]
-        for key in to_remove:
-            del self._channels[key]
-            logger.info(
-                f"Unregistered channel '{key}' (plugin '{plugin_id}' "
-                f"unloaded)",
+
+    def _unregister_plugin_channels(self, plugin_id: str) -> None:
+        """Report leftover channel registrations; do not delete them.
+
+        Ledger teardown owns ``unregister_channel``. Rows still present
+        here are leaks for the unload report.
+        """
+        leftovers = self.leftover_channel_keys(plugin_id)
+        for key in leftovers:
+            logger.error(
+                "Channel '%s' still registered after teardown "
+                "(plugin '%s')",
+                key,
+                plugin_id,
             )
 
     def register_plugin_manifest(
