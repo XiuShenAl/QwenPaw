@@ -921,6 +921,10 @@ class PluginRegistry:  # pylint:disable=too-many-public-methods
         self._plugin_manifests[plugin_id] = manifest
         logger.debug(f"Registered manifest for plugin '{plugin_id}'")
 
+    def drop_plugin_manifest(self, plugin_id: str) -> None:
+        """Remove a stored manifest if present."""
+        self._plugin_manifests.pop(plugin_id, None)
+
     def get_all_plugin_manifests(self) -> Dict[str, Dict[str, Any]]:
         """Get all plugin manifests.
 

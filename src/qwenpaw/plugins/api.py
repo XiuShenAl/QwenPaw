@@ -335,6 +335,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         self.config = config
         self.manifest = manifest or {}
         self._registry = None
+        self._instance = None
 
     def set_registry(self, registry):
         """Set registry reference (called by loader).
@@ -343,6 +344,69 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             registry: PluginRegistry instance
         """
         self._registry = registry
+
+    def bind_instance(self, instance) -> None:
+        """Attach the current ``PluginInstance`` for ledger recording."""
+        self._instance = instance
+
+    def _projection_failed(self, kind: str, exc: Exception) -> None:
+        """Fail loudly when a workspace projection cannot be applied."""
+        message = f"Projection {kind} failed: {exc}"
+        logger.error(
+            "Plugin '%s' %s",
+            self.plugin_id,
+            message,
+        )
+        if self._instance is not None:
+            self._instance.add_diagnostic(message)
+
+    def _guard_register(self) -> None:
+        if self._instance is not None:
+            self._instance.guard_register()
+
+    def _note_runtime(self, desc: str, *, kind: str = "official") -> None:
+        """Record a runtime-ledger row. Sweep still uses unregister_plugin."""
+        self._guard_register()
+        if self._instance is not None:
+            self._instance.record_runtime(desc, teardown=None, kind=kind)
+
+    def _note_install(
+        self,
+        desc: str,
+        teardown=None,
+        *,
+        kind: str = "provision",
+    ) -> None:
+        self._guard_register()
+        if self._instance is not None:
+            self._instance.record_install(desc, teardown, kind=kind)
+
+    def provision_files(self, src, dest, version: str) -> str:
+        """Copy factory files with three-way merge."""
+        from .provision import provision_files as _provision_files
+
+        self._guard_register()
+        branch = _provision_files(
+            self.plugin_id,
+            Path(src),
+            Path(dest),
+            version,
+        )
+        self._note_install(
+            f"provision_files:{dest}",
+            kind="provision_files",
+        )
+        return branch
+
+    def provision(self, desc: str, setup, teardown) -> None:
+        """Escape hatch: leave existing files, delete only on uninstall."""
+        from .provision import record_escape_provision
+
+        self._guard_register()
+        record_escape_provision(self.plugin_id, desc)
+        if setup is not None:
+            setup()
+        self._note_install(desc, teardown, kind="provision")
 
     def register_provider(
         self,
@@ -371,6 +435,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             ...     require_api_key=True,
             ... )
         """
+        self._guard_register()
         if self._registry:
             # Merge plugin manifest meta with provider metadata
             merged_metadata = dict(metadata)
@@ -389,6 +454,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 f"Plugin '{self.plugin_id}' registered provider "
                 f"'{provider_id}'",
             )
+            self._note_runtime(f"provider:{provider_id}")
 
     def register_startup_hook(
         self,
@@ -421,6 +487,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 f"Plugin '{self.plugin_id}' registered startup hook "
                 f"'{hook_name}' (priority={priority})",
             )
+            self._note_runtime(f"startup_hook:{hook_name}")
 
     def register_shutdown_hook(
         self,
@@ -452,6 +519,10 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             logger.info(
                 f"Plugin '{self.plugin_id}' registered shutdown hook "
                 f"'{hook_name}' (priority={priority})",
+            )
+            self._note_runtime(
+                f"shutdown_hook:{hook_name}",
+                kind="shutdown_hook",
             )
 
     def register_uninstall_hook(
@@ -496,6 +567,10 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 f"Plugin '{self.plugin_id}' registered uninstall hook "
                 f"'{hook_name}' (priority={priority})",
             )
+            self._note_runtime(
+                f"uninstall_hook:{hook_name}",
+                kind="legacy_uninstall",
+            )
 
     def register_workspace_created_hook(
         self,
@@ -538,6 +613,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 f"workspace_created hook '{hook_name}' "
                 f"(priority={priority})",
             )
+            self._note_runtime(f"workspace_created_hook:{hook_name}")
 
     def register_http_router(
         self,
@@ -569,6 +645,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 prefix=prefix,
                 tags=tags,
             )
+            self._note_runtime(f"http_router:{prefix}")
 
     def register_control_command(
         self,
@@ -592,6 +669,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 f"Plugin '{self.plugin_id}' registered control command "
                 f"'{handler.command_name}' (priority={priority_level})",
             )
+            self._note_runtime(f"control_command:{handler.command_name}")
 
     def register_middleware(
         self,
@@ -627,6 +705,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 f"Plugin '{self.plugin_id}' registered middleware "
                 f"factory (priority={priority})",
             )
+            self._note_runtime(f"middleware:{priority}")
 
     def register_channel(
         self,
@@ -716,6 +795,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             f"Plugin '{self.plugin_id}' registered channel "
             f"'{channel_key}'",
         )
+        self._note_runtime(f"channel:{channel_key}")
 
     @property
     def runtime(self):
@@ -813,6 +893,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             ...         tool_type="network",
             ...     )
         """
+        self._guard_register()
 
         def _startup_register():
             # Ownership + governance first: fail closed before exposing
@@ -902,6 +983,26 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             f"Plugin '{self.plugin_id}' scheduled tool "
             f"'{tool_name}' for registration on startup",
         )
+        self._note_runtime(f"tool:{tool_name}")
+        if self._instance is not None:
+            from .provision import record_tool_factory
+
+            record_tool_factory(
+                self.plugin_id,
+                tool_name,
+                {
+                    "description": description,
+                    "icon": icon,
+                    "display_to_user": True,
+                    "enabled": enabled,
+                    "async_execution": False,
+                    "config": {},
+                },
+            )
+            self._note_install(
+                f"tool_config:{tool_name}",
+                kind="official",
+            )
 
     def register_slash_command(
         self,
@@ -961,6 +1062,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             f"Plugin '{self.plugin_id}' scheduled slash command "
             f"'/{name}' for registration",
         )
+        self._note_runtime(f"slash_command:/{name}")
 
     def register_mode(
         self,
@@ -1004,6 +1106,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             f"Plugin '{self.plugin_id}' scheduled mode "
             f"'{mode_name}' for registration",
         )
+        self._note_runtime(f"mode:{mode_name}")
 
     def register_runtime_hook(
         self,
@@ -1044,6 +1147,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             f"Plugin '{self.plugin_id}' scheduled runtime hook "
             f"'{hook.name}' (phase={hook.phase})",
         )
+        self._note_runtime(f"runtime_hook:{hook.name}")
 
     def register_agent_stop_handler(
         self,
@@ -1098,6 +1202,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             f"Plugin '{self.plugin_id}' scheduled stop handler "
             f"'{reg.name}' (priority={priority})",
         )
+        self._note_runtime(f"stop_handler:{reg.name}")
 
     def register_prompt_section(
         self,
@@ -1158,6 +1263,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 f"section '{name}' after '{after}' "
                 f"(priority={priority})",
             )
+            self._note_runtime(f"prompt_section:{name}")
 
     # ================================================================
     # Internal helpers for workspace registration
@@ -1211,9 +1317,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             try:
                 ws.plugins.slash_command_registry.register(spec)
             except ValueError as exc:
-                logger.debug(
-                    f"Slash cmd already registered: {exc}",
-                )
+                self._projection_failed("slash_command", exc)
 
     def _register_spec_to_workspace(
         self,
@@ -1227,9 +1331,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         try:
             ws.plugins.slash_command_registry.register(spec)
         except ValueError as exc:
-            logger.debug(
-                f"Slash cmd already registered: {exc}",
-            )
+            self._projection_failed("slash_command", exc)
 
     def _register_mode_cls_to_all_workspaces(self, mode_cls: Type) -> None:
         """Instantiate and register *mode_cls* on every workspace."""
@@ -1237,9 +1339,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             try:
                 ws.plugins.register_mode(mode_cls(), ws)
             except ValueError as exc:
-                logger.debug(
-                    f"Mode already registered: {exc}",
-                )
+                self._projection_failed("mode", exc)
 
     def _register_mode_cls_to_workspace(
         self,
@@ -1253,9 +1353,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         try:
             ws.plugins.register_mode(mode_cls(), ws)
         except ValueError as exc:
-            logger.debug(
-                f"Mode already registered: {exc}",
-            )
+            self._projection_failed("mode", exc)
 
     def _register_hook_to_all_workspaces(self, hook):
         """Register a runtime hook to all workspaces."""
@@ -1263,9 +1361,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             try:
                 ws.plugins.hook_registry.register(hook)
             except (TypeError, ValueError) as exc:
-                logger.debug(
-                    f"Hook registration issue: {exc}",
-                )
+                self._projection_failed("hook", exc)
 
     def _register_hook_to_workspace(
         self,
@@ -1279,9 +1375,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         try:
             ws.plugins.hook_registry.register(hook)
         except (TypeError, ValueError) as exc:
-            logger.debug(
-                f"Hook registration issue: {exc}",
-            )
+            self._projection_failed("hook", exc)
 
     def _register_stop_handler_to_all_workspaces(self, reg):
         """Register stop handler to all workspaces."""

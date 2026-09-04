@@ -626,6 +626,8 @@ async def list_plugins(request: Request):
                 "author": manifest.author,
                 "enabled": record.enabled,
                 "loaded": True,
+                "status": getattr(record, "status", "active"),
+                "diagnostics": list(record.diagnostics or []),
                 "plugin_type": manifest.plugin_type,
                 "frontend_entry": manifest.entry.frontend,
             },
@@ -848,7 +850,13 @@ async def uninstall_plugin(plugin_id: str, request: Request):
                 loader.registry,
                 plugin_id,
             )
-            await loader.unload_plugin(plugin_id, delete_files=True)
+            from ...plugins.lifecycle import UnloadMode
+
+            await loader.unload_plugin(
+                plugin_id,
+                delete_files=True,
+                mode=UnloadMode.UNINSTALL,
+            )
             _post_unload_cleanup(
                 request,
                 plugin_id,
@@ -879,6 +887,97 @@ async def uninstall_plugin(plugin_id: str, request: Request):
     }
 
 
+@router.post(
+    "/{plugin_id}/unload",
+    summary="Unload a plugin without deleting user data",
+    description=(
+        "Remove the plugin from the process (mode=unload). "
+        "agent.json and config.plugins are left unchanged."
+    ),
+)
+async def unload_plugin_keep_config(plugin_id: str, request: Request):
+    """Callable entry for ``unload(mode=unload)``."""
+    loader = getattr(request.app.state, "plugin_loader", None)
+    if loader is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Plugin loader is not ready yet.",
+        )
+    from ...plugins.lifecycle import UnloadMode
+
+    try:
+        async with loader.plugin_lifecycle(plugin_id):
+            provider_ids, command_names = _collect_plugin_runtime_ids(
+                loader.registry,
+                plugin_id,
+            )
+            report = await loader.unload_plugin(
+                plugin_id,
+                delete_files=False,
+                mode=UnloadMode.UNLOAD,
+            )
+            _post_unload_cleanup(
+                request,
+                plugin_id,
+                provider_ids,
+                command_names,
+            )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "id": plugin_id,
+        "clean": report.clean,
+        "errors": report.errors,
+        "message": f"Plugin '{plugin_id}' unloaded.",
+    }
+
+
+@router.post(
+    "/{plugin_id}/repair-dependencies",
+    summary="Repair plugin dependencies",
+    description=(
+        "Explicitly install missing plugin dependencies, then load. "
+        "Host-package upgrades are rejected and require a backend restart."
+    ),
+)
+async def repair_plugin_dependencies(plugin_id: str, request: Request):
+    """User-triggered dependency repair (boot never installs)."""
+    loader = getattr(request.app.state, "plugin_loader", None)
+    if loader is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Plugin loader is not ready yet.",
+        )
+    try:
+        record = await loader.repair_dependencies(plugin_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error(
+            "Repair dependencies failed for '%s': %s",
+            _log_safe(plugin_id),
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Repair failed: {exc}",
+        ) from exc
+    return {
+        "id": plugin_id,
+        "status": record.status,
+        "enabled": record.enabled,
+        "diagnostics": list(record.diagnostics or []),
+        "message": (
+            f"Plugin '{plugin_id}' repaired."
+            if record.status != "failed"
+            else f"Plugin '{plugin_id}' still failed."
+        ),
+    }
+
+
 @router.get(
     "/{plugin_id}/status",
     summary="Get plugin status",
@@ -895,6 +994,8 @@ async def get_plugin_status(plugin_id: str, request: Request):
                 "id": plugin_id,
                 "loaded": True,
                 "enabled": record.enabled,
+                "status": getattr(record, "status", "active"),
+                "diagnostics": list(record.diagnostics or []),
                 "version": record.manifest.version,
             }
 
