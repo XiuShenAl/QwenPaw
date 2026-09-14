@@ -5,17 +5,30 @@ import pytest
 from pydantic import ValidationError
 
 from qwenpaw.config.config import (
-    ADBPGMemoryConfig,
+    AgentsRunningConfig,
     EmbeddingModelConfig,
     ReMeLightMemoryConfig,
 )
 
 
-def test_adbpg_auto_memory_search_defaults():
-    cfg = ADBPGMemoryConfig()
+def test_memory_backend_ids_are_canonicalized():
+    config = AgentsRunningConfig(
+        memory_manager_backend="  REMOTE-MEMORY ",
+        memory_backend_configs={" Remote-Memory ": {"value": 1}},
+    )
 
-    assert cfg.auto_memory_search_config.enabled is True
-    assert cfg.auto_memory_search_config.max_results == 3
+    assert config.memory_manager_backend == "remote-memory"
+    assert config.memory_backend_configs == {"remote-memory": {"value": 1}}
+
+
+def test_duplicate_canonical_memory_backend_config_ids_are_rejected():
+    with pytest.raises(ValidationError, match="duplicate memory backend"):
+        AgentsRunningConfig(
+            memory_backend_configs={
+                "remote-memory": {},
+                " REMOTE-MEMORY ": {},
+            },
+        )
 
 
 def test_reme_light_job_notifications_default_to_enabled():
