@@ -299,15 +299,22 @@ class HookRegistry:
                     return hook
         return None
 
-    def unregister(self, name: str) -> bool:
-        """Remove a hook by name. Returns ``True`` if it was present."""
+    def unregister(self, name: str, expected: Any = None) -> bool:
+        """Remove a hook only if *expected* still occupies the row."""
         found = False
         for phase, hooks in list(self._by_phase.items()):
-            kept = [h for h in hooks if h.name != name]
+            kept = []
+            for hook in hooks:
+                if hook.name != name:
+                    kept.append(hook)
+                    continue
+                if expected is not None and hook is not expected:
+                    kept.append(hook)
+                    continue
+                found = True
             if len(kept) != len(hooks):
                 self._by_phase[phase] = kept
                 self._sorted_cache.pop(phase, None)
-                found = True
         return found
 
     def hooks_for(self, phase: Phase) -> list[HookBase]:

@@ -668,9 +668,9 @@ class ChannelManager:
         """Stop one channel on this manager. Other channels are untouched."""
         async with self._lock:
             channel = None
-            for index, item in enumerate(self.channels):
+            for item in self.channels:
                 if item.channel == key:
-                    channel = self.channels.pop(index)
+                    channel = item
                     break
         if channel is None:
             return StopReceipt(
@@ -682,10 +682,14 @@ class ChannelManager:
         try:
             await channel.stop()
         except asyncio.CancelledError:
-            pass
+            return StopReceipt(key=key, stopped=False, detail="cancelled")
         except Exception as exc:  # noqa: BLE001
             logger.exception("Failed to stop channel '%s'", key)
             return StopReceipt(key=key, stopped=False, detail=str(exc))
+        async with self._lock:
+            self.channels = [
+                item for item in self.channels if item.channel != key
+            ]
         return StopReceipt(key=key, stopped=True)
 
     async def get_channel(self, channel: str) -> Optional[BaseChannel]:

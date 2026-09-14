@@ -145,78 +145,21 @@ async def _post_load_setup(  # pylint: disable=too-many-branches
     request: Request,
     plugin_id: str,
 ) -> None:
-    """Perform post-load integration for a newly loaded plugin.
+    """Sync tool entries after lifecycle has already activated the plugin.
 
-    Registers newly created providers / control-commands, executes
-    startup hooks, and syncs tool entries into agent configs.
-
-    Does **not** schedule agent reloads — callers must do that after any
-    follow-up config cleanup (e.g. removing obsolete tools on
-    force-reinstall) so reload never races stale tool entries.
-
-    Args:
-        request: Current FastAPI request (for app.state access)
-        plugin_id: ID of the plugin that was just loaded
+    Providers, control commands, and startup hooks belong to
+    ``PluginLoader.activate_plugin_unlocked``. This helper only updates
+    agent config files (force-reinstall obsolete-tool cleanup still
+    happens in the caller).
     """
     loader = getattr(request.app.state, "plugin_loader", None)
     if loader is None:
         return
-
-    registry = loader.registry
-
-    # Register any providers the plugin registered
-    provider_manager = getattr(
-        request.app.state,
-        "provider_manager",
-        None,
-    )
-    if provider_manager is not None:
-        for pid, reg in registry.get_all_providers().items():
-            if reg.plugin_id != plugin_id:
-                continue
-            try:
-                await provider_manager.register_plugin_provider_async(
-                    provider_id=pid,
-                    provider_class=reg.provider_class,
-                    label=reg.label,
-                    base_url=reg.base_url,
-                    metadata=reg.metadata,
-                )
-            except Exception as exc:
-                logger.warning(
-                    f"Could not register provider '{pid}': {exc}",
-                )
-
-    # Register any control commands the plugin registered
-    try:
-        from ...runtime.commands.control import register_command
-        from ...app.channels.command_registry import CommandRegistry
-
-        command_registry = CommandRegistry()
-        for cmd_reg in registry.get_control_commands():
-            if cmd_reg.plugin_id != plugin_id:
-                continue
-            try:
-                register_command(cmd_reg.handler)
-                command_registry.register_command(
-                    f"/{cmd_reg.handler.command_name}",
-                    priority_level=cmd_reg.priority_level,
-                )
-            except Exception as exc:
-                logger.warning(
-                    f"Could not register control command "
-                    f"'{cmd_reg.handler.command_name}': {exc}",
-                )
-    except Exception as exc:
-        logger.warning(f"Control command setup skipped: {exc}")
-
-    # Execute startup hooks for the new plugin
-    started = await loader.run_startup_hooks_isolated(plugin_id)
-    if not started:
+    if plugin_id not in loader.get_all_loaded_plugins():
         return
-
-    # Sync the plugin's tools into every agent's builtin_tools config
-    # (config file I/O — keep off the event loop).
+    record = loader.get_loaded_plugin(plugin_id)
+    if record is None or getattr(record, "status", "") != "active":
+        return
     await asyncio.to_thread(_sync_plugin_tools_to_agents, loader, plugin_id)
 
 
@@ -723,11 +666,23 @@ async def uninstall_plugin(plugin_id: str, request: Request):
 
             from ...plugins.lifecycle import UnloadMode
 
-            await loader.unload_plugin(
+            report = await loader.unload_plugin(
                 plugin_id,
                 delete_files=True,
                 mode=UnloadMode.UNINSTALL,
             )
+            if not report.quiescent:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "id": plugin_id,
+                        "needs_restart": True,
+                        "errors": report.errors,
+                        "message": (
+                            f"Plugin '{plugin_id}' did not go quiescent."
+                        ),
+                    },
+                )
             await asyncio.to_thread(
                 _remove_plugin_tools_from_agents,
                 plugin_id,
@@ -781,6 +736,8 @@ async def unload_plugin_keep_config(plugin_id: str, request: Request):
     return {
         "id": plugin_id,
         "clean": report.clean,
+        "quiescent": report.quiescent,
+        "needs_restart": report.needs_restart,
         "errors": report.errors,
         "message": f"Plugin '{plugin_id}' unloaded.",
     }
@@ -941,8 +898,6 @@ async def update_plugin_config(
                 "unchanged": report.unchanged,
             },
         )
-    if plugin_id in loader.get_all_loaded_plugins():
-        await _post_load_setup(request, plugin_id)
     return {
         "id": plugin_id,
         "ok": True,
@@ -991,8 +946,6 @@ async def set_plugin_enabled(
                 "message": f"Plugin '{plugin_id}' disabled.",
             }
         record = await loader.lifecycle.set_enabled(plugin_id, True)
-        if record is not None:
-            await _post_load_setup(request, plugin_id)
         return {
             "id": plugin_id,
             "enabled": True,

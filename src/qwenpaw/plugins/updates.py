@@ -10,8 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from ..utils.io_utils import write_json_atomic
+from .safe_fs import parse_optional_absolute, safe_remove
 
 logger = logging.getLogger(__name__)
+
+STATUS_PREPARED = "prepared"
+STATUS_UPDATING = "updating"
+STATUS_COMMITTED = "committed"
 
 
 def updates_dir() -> Path:
@@ -33,17 +38,32 @@ def write_updating_marker(
     *,
     backup_path: Path,
     target_path: Path,
+    staging_path: Path | None = None,
+    status: str = STATUS_PREPARED,
 ) -> None:
     """Record an in-flight directory swap so boot can restore it."""
-    write_json_atomic(
-        marker_path(plugin_id),
-        {
-            "plugin_id": plugin_id,
-            "status": "updating",
-            "backup_path": str(backup_path),
-            "target_path": str(target_path),
-        },
-    )
+    payload: dict[str, Any] = {
+        "plugin_id": plugin_id,
+        "status": status,
+        "backup_path": str(backup_path),
+        "target_path": str(target_path),
+    }
+    if staging_path is not None:
+        payload["staging_path"] = str(staging_path)
+    write_json_atomic(marker_path(plugin_id), payload)
+
+
+def mark_update_committed(plugin_id: str) -> None:
+    """Persist committed before leftover backups are deleted."""
+    path = marker_path(plugin_id)
+    if not path.is_file():
+        return
+    try:
+        data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    data["status"] = STATUS_COMMITTED
+    write_json_atomic(path, data)
 
 
 def clear_updating_marker(plugin_id: str) -> None:
@@ -90,22 +110,33 @@ def _restore_one_marker(path: Path) -> str | None:
     except (OSError, json.JSONDecodeError):
         logger.warning("Corrupt update marker at %s", path)
         return None
-    if data.get("status") != "updating":
-        return None
+    status = str(data.get("status") or "")
     plugin_id = str(data.get("plugin_id") or path.stem)
-    backup = Path(data.get("backup_path") or "")
-    target = Path(data.get("target_path") or "")
-    if not backup.exists() or not target:
+    backup = parse_optional_absolute(data.get("backup_path"))
+    target = parse_optional_absolute(data.get("target_path"))
+    staging = parse_optional_absolute(data.get("staging_path"))
+    if status == STATUS_COMMITTED:
+        if backup is not None:
+            safe_remove(backup, purpose="drop committed update backup")
+        if staging is not None:
+            safe_remove(staging, purpose="drop committed update staging")
+        path.unlink(missing_ok=True)
+        return None
+    if status not in {STATUS_PREPARED, STATUS_UPDATING}:
+        return None
+    if staging is not None:
+        safe_remove(staging, purpose="drop prepared update staging")
+    if backup is None or target is None or not backup.exists():
         logger.warning(
             "Update marker for '%s' has no usable backup; leaving it",
             plugin_id,
         )
         return None
+    if target.exists() and not backup.exists():
+        path.unlink(missing_ok=True)
+        return None
     if target.exists():
-        if target.is_dir():
-            shutil.rmtree(target)
-        else:
-            target.unlink()
+        safe_remove(target, purpose="remove partial update target")
     shutil.move(str(backup), str(target))
     path.unlink(missing_ok=True)
     logger.warning(

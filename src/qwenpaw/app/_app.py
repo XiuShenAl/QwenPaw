@@ -494,59 +494,11 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
                 workspace_registry,
             )
 
-            for (
-                provider_id,
-                provider_reg,
-            ) in plugin_loader.registry.get_all_providers().items():
-                await provider_manager.register_plugin_provider_async(
-                    provider_id=provider_id,
-                    provider_class=provider_reg.provider_class,
-                    label=provider_reg.label,
-                    base_url=provider_reg.base_url,
-                    metadata=provider_reg.metadata,
-                )
-                logger.debug(
-                    f"Registered plugin provider: {provider_id}",
-                )
-
             app.state.plugin_loader = plugin_loader
             app.state.plugin_registry = plugin_loader.registry
 
-            # ---- Plugin Control Commands ----
-            logger.debug("Registering plugin control commands...")
-            from qwenpaw.runtime.commands.control import register_command
-
-            from ..app.channels.command_registry import CommandRegistry
-
-            command_registry = CommandRegistry()
-
-            control_commands = plugin_loader.registry.get_control_commands()
-            for cmd_reg in control_commands:
-                try:
-                    register_command(cmd_reg.handler)
-
-                    command_registry.register_command(
-                        f"/{cmd_reg.handler.command_name}",
-                        priority_level=cmd_reg.priority_level,
-                    )
-
-                    logger.debug(
-                        f"Registered plugin control command: "
-                        f"/{cmd_reg.handler.command_name} "
-                        f"from plugin '{cmd_reg.plugin_id}' (priority"
-                        f"={cmd_reg.priority_level})",
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"✗ Failed to register control command "
-                        f"'{cmd_reg.handler.command_name}' "
-                        f"from plugin '{cmd_reg.plugin_id}': {e}",
-                        exc_info=True,
-                    )
-
-            # ---- Startup Hooks ----
-            logger.debug("Executing plugin startup hooks...")
-            await plugin_loader.run_all_startup_hooks()
+            logger.debug("Activating loaded plugins...")
+            await plugin_loader.activate_all_loaded()
 
             # ---- Approval Service ----
             try:

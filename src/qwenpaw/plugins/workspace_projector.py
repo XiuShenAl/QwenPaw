@@ -9,15 +9,21 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ..app.channels.manager import (
+    StopReceipt,
     channel_cfg_for_key,
     channel_enabled,
 )
 from ..config import get_available_channels
+from .lifecycle import QuiescenceError
 
 logger = logging.getLogger(__name__)
 
 ApplyFn = Callable[[Any], Any]
-RevokeFn = Callable[[Any], Any]
+RevokeFn = Callable[..., Any]
+
+
+class ProjectionError(RuntimeError):
+    """A workspace projection failed and must fail the load transaction."""
 
 
 @dataclass
@@ -29,6 +35,7 @@ class WorkspaceIntent:
     plugin_id: str
     apply: ApplyFn
     revoke: RevokeFn
+    bindings: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -90,8 +97,22 @@ class WorkspaceProjector:
         intent = self._find(kind, name, plugin_id)
         if intent is None:
             return
+        errors: list[str] = []
         for workspace in self._live():
-            await _run(intent.apply, workspace)
+            key = _workspace_key(workspace)
+            if key in intent.bindings:
+                continue
+            try:
+                token = await _run(intent.apply, workspace)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{key}:{exc}")
+                continue
+            if token is not None:
+                intent.bindings[key] = token
+        if errors:
+            raise ProjectionError(
+                f"{kind} {name!r} failed: {'; '.join(errors)}",
+            )
 
     async def project_one(
         self,
@@ -103,24 +124,48 @@ class WorkspaceProjector:
         intent = self._find(kind, name, plugin_id)
         if intent is None:
             return
-        await _run(intent.apply, workspace)
+        key = _workspace_key(workspace)
+        if key in intent.bindings:
+            return
+        token = await _run(intent.apply, workspace)
+        if token is not None:
+            intent.bindings[key] = token
 
     async def revoke(self, kind: str, name: str, plugin_id: str) -> None:
         intent = self._find(kind, name, plugin_id)
         if intent is None:
             return
-        self._intents.remove(intent)
+        errors: list[str] = []
+        failed_stop: StopReceipt | None = None
         for workspace in self._live():
+            key = _workspace_key(workspace)
+            if key not in intent.bindings:
+                continue
+            token = intent.bindings[key]
             try:
-                await _run(intent.revoke, workspace)
-            except Exception:  # noqa: BLE001
-                logger.error(
-                    "Revoke %s %r for plugin '%s' failed",
-                    kind,
-                    name,
-                    plugin_id,
-                    exc_info=True,
-                )
+                result = await _run_revoke(intent.revoke, workspace, token)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{key}:{exc}")
+                continue
+            if isinstance(result, StopReceipt) and not result.stopped:
+                if result.detail == "not running":
+                    intent.bindings.pop(key, None)
+                    continue
+                failed_stop = result
+                errors.append(f"{key}:{result.detail or 'stop failed'}")
+                continue
+            intent.bindings.pop(key, None)
+        if not intent.bindings:
+            self._intents.remove(intent)
+        if failed_stop is not None:
+            raise QuiescenceError(
+                f"Revoke {kind} {name!r} failed: {'; '.join(errors)}",
+                receipt=failed_stop,
+            )
+        if errors:
+            raise RuntimeError(
+                f"Revoke {kind} {name!r} failed: {'; '.join(errors)}",
+            )
 
     def drop_plugin(self, plugin_id: str) -> None:
         self._intents = [
@@ -161,6 +206,10 @@ def scan_owner_rows(plugin_id: str, workspaces: list[Any]) -> OwnerScan:
     for workspace in workspaces:
         _scan_one_workspace(plugin_id, workspace, report)
     return report
+
+
+def _workspace_key(workspace: Any) -> str:
+    return str(getattr(workspace, "agent_id", None) or id(workspace))
 
 
 def _scan_one_workspace(
@@ -297,7 +346,22 @@ def _note_owner(
         report.stamped_leaks.append(leak)
 
 
-async def _run(fn: Callable[[Any], Any], workspace: Any) -> None:
+async def _run(fn: Callable[[Any], Any], workspace: Any) -> Any:
     result = fn(workspace)
     if inspect.isawaitable(result):
-        await result
+        return await result
+    return result
+
+
+async def _run_revoke(
+    fn: Callable[..., Any],
+    workspace: Any,
+    token: Any,
+) -> Any:
+    try:
+        result = fn(workspace, token)
+    except TypeError:
+        result = fn(workspace)
+    if inspect.isawaitable(result):
+        return await result
+    return result

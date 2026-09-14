@@ -589,7 +589,8 @@ class TestRegisterSkillProvider:
         dest = workspace / "skills" / "hashed-skill"
         data = load_inventory("test-plugin")
         loc = data["locations"][str(dest)]
-        assert loc["branch"] == "create"
+        assert loc["owned"] is True
+        assert "branch" not in loc
         assert loc["version"] == "3.1.0"
         assert loc["files"]["SKILL.md"]["factory_hash"]
 

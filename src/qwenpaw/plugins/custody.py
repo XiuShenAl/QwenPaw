@@ -11,6 +11,8 @@ import threading
 from pathlib import Path
 from typing import Any, Callable
 
+from ..utils.io_utils import run_sync_io
+
 logger = logging.getLogger(__name__)
 
 TASK_STOP_SECONDS = 5.0
@@ -21,7 +23,7 @@ CONNECTION_STOP_SECONDS = 5.0
 
 
 async def stop_task(task: asyncio.Task[Any], desc: str) -> None:
-    """Cancel *task* and wait until it finishes."""
+    """Cancel *task* and wait until it finishes or the budget expires."""
     if task.done():
         return
     task.cancel()
@@ -31,16 +33,16 @@ async def stop_task(task: asyncio.Task[Any], desc: str) -> None:
         return
     except asyncio.TimeoutError as exc:
         raise TimeoutError(
-            f"task {desc!r} did not stop in {TASK_STOP_SECONDS:.0f}s",
+            f"task {desc!r} did not stop in {TASK_STOP_SECONDS:.0f}s "
+            "(wait_for waited for cancellation to complete)",
         ) from exc
 
 
-def stop_thread(
+def _stop_thread_blocking(
     thread: threading.Thread,
     stop: threading.Event | None,
     desc: str,
 ) -> None:
-    """Signal *stop* and join *thread*."""
     if stop is not None:
         stop.set()
     thread.join(timeout=THREAD_STOP_SECONDS)
@@ -50,8 +52,16 @@ def stop_thread(
         )
 
 
-def stop_subprocess(proc: Any, desc: str) -> None:
-    """Close pipes, terminate, wait, then kill if needed."""
+async def stop_thread(
+    thread: threading.Thread,
+    stop: threading.Event | None,
+    desc: str,
+) -> None:
+    """Signal *stop* and join *thread* off the event loop."""
+    await run_sync_io(_stop_thread_blocking, thread, stop, desc)
+
+
+def _stop_subprocess_blocking(proc: Any, desc: str) -> None:
     for stream in (
         getattr(proc, "stdout", None),
         getattr(proc, "stderr", None),
@@ -80,16 +90,35 @@ def stop_subprocess(proc: Any, desc: str) -> None:
             ) from exc
 
 
+async def stop_subprocess(proc: Any, desc: str) -> None:
+    """Close pipes, terminate, wait, then kill if needed — off the loop."""
+    await run_sync_io(_stop_subprocess_blocking, proc, desc)
+
+
 async def close_connection(client: Any, desc: str) -> None:
-    """Await ``aclose`` / ``close`` on *client*."""
-    closer = getattr(client, "aclose", None) or getattr(client, "close", None)
+    """Close *client*. Await ``aclose``; run sync ``close`` in a thread."""
+    aclose = getattr(client, "aclose", None)
+    if callable(aclose):
+        result = aclose()
+        if inspect.isawaitable(result):
+            try:
+                await asyncio.wait_for(
+                    result,
+                    timeout=CONNECTION_STOP_SECONDS,
+                )
+            except asyncio.TimeoutError as exc:
+                raise TimeoutError(
+                    f"connection {desc!r} did not close "
+                    f"in {CONNECTION_STOP_SECONDS:.0f}s",
+                ) from exc
+        return
+    closer = getattr(client, "close", None)
     if closer is None:
         return
-    result = closer()
-    if inspect.isawaitable(result):
+    if inspect.iscoroutinefunction(closer):
         try:
             await asyncio.wait_for(
-                result,
+                closer(),
                 timeout=CONNECTION_STOP_SECONDS,
             )
         except asyncio.TimeoutError as exc:
@@ -97,6 +126,8 @@ async def close_connection(client: Any, desc: str) -> None:
                 f"connection {desc!r} did not close "
                 f"in {CONNECTION_STOP_SECONDS:.0f}s",
             ) from exc
+        return
+    await run_sync_io(closer)
 
 
 def start_watch(
@@ -141,8 +172,22 @@ def _mtime(path: Path) -> float:
         return 0.0
 
 
+def _coro_owner_module(coro: Any) -> str:
+    """Best-effort module name from frame / code, not ``coro.__module__``."""
+    frame = getattr(coro, "cr_frame", None) or getattr(coro, "gi_frame", None)
+    if frame is not None:
+        name = (frame.f_globals or {}).get("__name__", "") or ""
+        if name:
+            return str(name)
+    code = getattr(coro, "cr_code", None) or getattr(coro, "gi_code", None)
+    if code is None:
+        return ""
+    filename = getattr(code, "co_filename", "") or ""
+    return str(filename)
+
+
 def scan_unhosted_tasks(plugin_id: str) -> list[str]:
-    """List running tasks whose coroutine module belongs to *plugin_id*."""
+    """List running tasks whose coroutine belongs to *plugin_id*."""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -153,10 +198,14 @@ def scan_unhosted_tasks(plugin_id: str) -> list[str]:
         if task.done():
             continue
         coro = task.get_coro()
-        module = getattr(coro, "__module__", "") or ""
-        if module == prefix or module.startswith(prefix + "."):
+        owner = _coro_owner_module(coro)
+        if (
+            owner == prefix
+            or owner.startswith(prefix + ".")
+            or (prefix in owner.replace("-", "_") and owner.endswith(".py"))
+        ):
             leftovers.append(
-                f"unhosted_task:{task.get_name()}:{module}",
+                f"unhosted_task:{task.get_name()}:{owner}",
             )
     return leftovers
 

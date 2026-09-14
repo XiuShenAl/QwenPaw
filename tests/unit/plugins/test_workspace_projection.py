@@ -15,7 +15,7 @@ from qwenpaw.app.workspace.workspace_plugins import WorkspacePlugins
 from qwenpaw.modes.base import AgentMode
 from qwenpaw.plugins.api import PluginApi
 from qwenpaw.plugins.architecture import PluginManifest
-from qwenpaw.plugins.lifecycle import PluginInstance, UnloadMode
+from qwenpaw.plugins.lifecycle import PluginInstance, PluginState, UnloadMode
 from qwenpaw.plugins.loader import PluginLoader
 from qwenpaw.plugins.registry import PluginRegistry
 from qwenpaw.plugins.workspace_projector import (
@@ -325,6 +325,77 @@ async def test_channel_project_respects_three_gates(fresh_registry):
         await instance.dispose(UnloadMode.UNLOAD)
         assert enabled.channel_manager.channels == []
         assert "fake-heart" not in fresh_registry.get_registered_channels()
+
+
+class _StuckChannel:
+    channel = "stuck-ch"
+    uses_manager_queue = False
+
+    def __init__(self) -> None:
+        self.alive = False
+
+    @classmethod
+    def from_config(cls, **_kwargs):
+        return cls()
+
+    async def start(self) -> None:
+        self.alive = True
+
+    async def stop(self) -> None:
+        raise RuntimeError("still connected")
+
+    def set_enqueue(self, _cb) -> None:
+        return None
+
+    def set_workspace(self, _ws, _reg) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_failed_channel_stop_is_not_quiescent(fresh_registry):
+    workspace = FakeWorkspace("on", config=_enabled_config("stuck-ch"))
+    fresh_registry.projector = WorkspaceProjector(
+        live_workspaces=lambda: [workspace],
+    )
+    api = PluginApi("stuck-plug", {}, {"id": "stuck-plug"})
+    api.set_registry(fresh_registry)
+    instance = PluginInstance("stuck-plug")
+    api.bind_instance(instance)
+    from qwenpaw.plugins.registry import ChannelRegistration
+
+    fresh_registry._channels["stuck-ch"] = ChannelRegistration(
+        plugin_id="stuck-plug",
+        channel_key="stuck-ch",
+        channel_class=_StuckChannel,
+    )
+    with (
+        patch(
+            "qwenpaw.plugins.workspace_projector.get_available_channels",
+            return_value=("stuck-ch",),
+        ),
+        patch(
+            "qwenpaw.app.channels.manager.get_channel_registry",
+            return_value={"stuck-ch": _StuckChannel},
+        ),
+        patch(
+            "qwenpaw.app.channels.manager.get_available_channels",
+            return_value=("stuck-ch",),
+        ),
+    ):
+        api._project_channel("stuck-ch")
+        await fresh_registry.projector.project(
+            "channel",
+            "stuck-ch",
+            "stuck-plug",
+        )
+        assert workspace.channel_manager.channels
+        report = await instance.dispose(UnloadMode.UNLOAD)
+        assert report.quiescent is False
+        assert report.needs_restart is True
+        assert instance.state is PluginState.FAILED
+        assert workspace.channel_manager.channels
+        leftover = await workspace.channel_manager.stop_one("stuck-ch")
+        assert leftover.stopped is False
 
 
 @pytest.mark.asyncio

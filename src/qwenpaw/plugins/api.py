@@ -328,6 +328,33 @@ def _write_tool_config(
     )
 
 
+def _remove_tool_config(tool_name: str) -> None:
+    """Remove one BuiltinToolConfig entry from every agent on uninstall."""
+    try:
+        from ..config.utils import load_config
+        from ..config.config import load_agent_config, save_agent_config
+
+        config = load_config()
+        if not config.agents or not config.agents.profiles:
+            return
+        for agent_id in config.agents.profiles:
+            try:
+                agent_cfg = load_agent_config(agent_id)
+                if tool_name not in agent_cfg.tools.builtin_tools:
+                    continue
+                del agent_cfg.tools.builtin_tools[tool_name]
+                save_agent_config(agent_id, agent_cfg)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "Tool config '%s' already gone from agent '%s'",
+                    tool_name,
+                    agent_id,
+                    exc_info=True,
+                )
+    except Exception:  # noqa: BLE001
+        logger.debug("Tool config teardown skipped", exc_info=True)
+
+
 def _tool_factory(
     enabled: bool,
     description: str,
@@ -386,6 +413,8 @@ class PluginApi:  # pylint: disable=too-many-public-methods
 
     def _projection_failed(self, kind: str, exc: Exception) -> None:
         """Fail loudly when a workspace projection cannot be applied."""
+        from .workspace_projector import ProjectionError
+
         message = f"Projection {kind} failed: {exc}"
         logger.error(
             "Plugin '%s' %s",
@@ -394,6 +423,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         )
         if self._instance is not None:
             self._instance.add_diagnostic(message)
+        raise ProjectionError(message) from exc
 
     def _guard_register(self) -> None:
         if self._instance is not None:
@@ -513,13 +543,15 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 None,
             )
             if manager is None:
-                return
+                return None
+            section = _Section()
             try:
-                manager.register(_Section())
+                manager.register(section)
             except (TypeError, ValueError) as exc:
                 self._projection_failed("prompt_section", exc)
+            return section
 
-        def revoke(workspace):
+        def revoke(workspace, token=None):
             manager = getattr(
                 getattr(workspace, "plugins", None),
                 "prompt_manager",
@@ -527,7 +559,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             )
             if manager is None:
                 return
-            manager.unregister(name)
+            manager.unregister(name, expected=token)
 
         self._schedule_workspace_intent(
             "prompt_section",
@@ -619,7 +651,13 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         return bool(inst.owns_commit())
 
     def provision_files(self, src, dest, version: str) -> str:
-        """Copy factory files with three-way merge."""
+        """Copy factory files with three-way merge.
+
+        This call is synchronous and runs on the same thread as
+        ``register()``. Keep the copied tree small. Framework-owned
+        directory swap, crash recovery, and config persistence leave
+        the event loop through ``run_sync_io``.
+        """
         from .provision import provision_files as _provision_files
 
         self._guard_register()
@@ -631,6 +669,8 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             Path(dest),
             version,
         )
+        if self._instance is not None and branch == "create":
+            self._instance.note_created_dest(str(Path(dest)))
         self._note_install(
             f"provision_files:{dest}",
             kind="provision_files",
@@ -639,14 +679,19 @@ class PluginApi:  # pylint: disable=too-many-public-methods
 
     def provision(self, desc: str, setup, teardown) -> None:
         """Escape hatch: leave existing files, delete only on uninstall."""
-        from .provision import record_escape_provision
+        from .provision import load_inventory, record_escape_provision
 
         self._guard_register()
         if not self._owns_commit():
             return
-        record_escape_provision(self.plugin_id, desc)
-        if setup is not None:
-            setup()
+        existing = load_inventory(self.plugin_id)
+        already = any(
+            row.get("desc") == desc for row in existing.get("provisions") or []
+        )
+        if not already:
+            record_escape_provision(self.plugin_id, desc)
+            if setup is not None:
+                setup()
         self._note_install(desc, teardown, kind="provision")
 
     def effect(
@@ -732,8 +777,8 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         )
         thread.start()
 
-        def _teardown():
-            custody.stop_thread(thread, stop, desc)
+        async def _teardown():
+            await custody.stop_thread(thread, stop, desc)
 
         self._instance.record_runtime(
             f"thread:{desc}",
@@ -754,8 +799,8 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             raise RuntimeError("Plugin instance is not bound")
         proc = subprocess.Popen(args)  # noqa: S603
 
-        def _teardown():
-            custody.stop_subprocess(proc, desc)
+        async def _teardown():
+            await custody.stop_subprocess(proc, desc)
 
         self._instance.record_runtime(
             f"subprocess:{desc}",
@@ -782,9 +827,9 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             lambda: instance.generation,
         )
 
-        def _teardown():
+        async def _teardown():
             stop.set()
-            custody.stop_thread(thread, stop, desc)
+            await custody.stop_thread(thread, stop, desc)
 
         self._instance.record_runtime(
             f"watch:{desc}",
@@ -1439,6 +1484,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         if self._instance is not None:
             self._note_install(
                 f"tool_config:{tool_name}",
+                teardown=lambda: _remove_tool_config(tool_name),
                 kind="official",
             )
 
@@ -1486,9 +1532,13 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 workspace.plugins.slash_command_registry.register(spec)
             except ValueError as exc:
                 self._projection_failed("slash_command", exc)
+            return spec
 
-        def revoke(workspace):
-            workspace.plugins.slash_command_registry.unregister(name)
+        def revoke(workspace, token=None):
+            workspace.plugins.slash_command_registry.unregister(
+                name,
+                expected=token,
+            )
 
         self._schedule_workspace_intent(
             "slash_command",
@@ -1528,9 +1578,14 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 workspace.plugins.register_mode(mode, workspace)
             except ValueError as exc:
                 self._projection_failed("mode", exc)
+            return mode
 
-        def revoke(workspace):
-            workspace.plugins.unregister_mode(mode_name, workspace)
+        def revoke(workspace, token=None):
+            workspace.plugins.unregister_mode(
+                mode_name,
+                workspace,
+                expected=token,
+            )
 
         self._schedule_workspace_intent(
             "mode",
@@ -1567,9 +1622,13 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 workspace.plugins.hook_registry.register(hook)
             except (TypeError, ValueError) as exc:
                 self._projection_failed("hook", exc)
+            return hook
 
-        def revoke(workspace):
-            workspace.plugins.hook_registry.unregister(hook.name)
+        def revoke(workspace, token=None):
+            workspace.plugins.hook_registry.unregister(
+                hook.name,
+                expected=token,
+            )
 
         self._schedule_workspace_intent(
             "hook",
@@ -1619,9 +1678,13 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 workspace.plugins.register_stop_handler(reg)
             except ValueError as exc:
                 self._projection_failed("stop_handler", exc)
+            return reg
 
-        def revoke(workspace):
-            workspace.plugins.unregister_stop_handler(reg.name)
+        def revoke(workspace, token=None):
+            workspace.plugins.unregister_stop_handler(
+                reg.name,
+                expected=token,
+            )
 
         self._schedule_workspace_intent(
             "stop_handler",
@@ -1742,23 +1805,24 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         async def apply(workspace):
             self._guard_register()
             if not channel_passes_gates(workspace, channel_key):
-                return
+                return None
             manager = getattr(workspace, "channel_manager", None)
             if manager is None:
-                return
+                return None
             try:
-                await manager.start_one(
+                handle = await manager.start_one(
                     channel_key,
                     getattr(workspace, "_config", None),
                 )
             except Exception as exc:  # noqa: BLE001
                 self._projection_failed("channel", exc)
+            return handle
 
-        async def revoke(workspace):
+        async def revoke(workspace, _token=None):
             manager = getattr(workspace, "channel_manager", None)
             if manager is None:
-                return
-            await manager.stop_one(channel_key)
+                return None
+            return await manager.stop_one(channel_key)
 
         self._schedule_workspace_intent(
             "channel",
@@ -1950,7 +2014,8 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                     ws_skills_dir / skill_name,
                     version,
                 )
-            commit_migrations(self.plugin_id)
+            if self._instance is not None and self._instance.activated:
+                commit_migrations(self.plugin_id)
 
             reconcile_workspace_manifest(workspace_dir)
 
@@ -2041,8 +2106,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
     def _do_uninstall_skills(plugin_id: str, source_tag: str) -> None:
         """Remove skills sourced from a plugin across all workspaces."""
         try:
-            import shutil
-
+            from .safe_fs import safe_remove
             from ..agents.skill_system.store import (
                 get_workspace_skills_dir,
                 get_workspace_skill_manifest_path,
@@ -2082,8 +2146,11 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                         skill_dir = _ws_skills / name
                         if skill_dir.exists():
                             try:
-                                shutil.rmtree(skill_dir)
-                            except OSError as rmtree_exc:
+                                safe_remove(
+                                    skill_dir,
+                                    purpose="remove sourced skill",
+                                )
+                            except (OSError, ValueError) as rmtree_exc:
                                 logger.warning(
                                     "Failed to fully remove skill "
                                     "directory %s: %s",

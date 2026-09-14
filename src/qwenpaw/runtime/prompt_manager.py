@@ -90,10 +90,17 @@ class PromptManager:
         self._contributors.append(contributor)
         self._contributors.sort(key=lambda c: c.priority)
 
-    def unregister(self, name: str) -> bool:
-        """Remove a contributor by name. ``True`` if it was present."""
+    def unregister(self, name: str, expected: Any = None) -> bool:
+        """Remove a contributor only if *expected* still occupies the row."""
         before = len(self._contributors)
-        self._contributors = [c for c in self._contributors if c.name != name]
+        kept = []
+        for contributor in self._contributors:
+            if contributor.name != name:
+                kept.append(contributor)
+                continue
+            if expected is not None and contributor is not expected:
+                kept.append(contributor)
+        self._contributors = kept
         return len(self._contributors) < before
 
     def names(self) -> list[str]:

@@ -472,6 +472,8 @@ def probe_plugin_source(
     plugin_id: str,
     source_path: Path,
     entry_file: Path,
+    *,
+    compiled: bool = False,
 ) -> None:
     """Import *entry_file* under ``plugin_<id>__probe``, then clean up."""
     probe_name = plugin_module_name(plugin_id, probe=True)
@@ -480,7 +482,8 @@ def probe_plugin_source(
     search_paths = [entry_dir]
     if _norm(entry_dir) != _norm(plugin_dir):
         search_paths.append(plugin_dir)
-    compile_plugin_import_closure(entry_file, search_paths)
+    if not compiled:
+        compile_plugin_import_closure(entry_file, search_paths)
     plugin_builtins = build_plugin_builtins(
         probe_name,
         search_paths,

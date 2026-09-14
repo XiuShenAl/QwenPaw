@@ -22,6 +22,16 @@ def is_plugin_enabled(raw: dict[str, Any] | None) -> bool:
     return bool(raw.get(ENABLED_KEY, True))
 
 
+def drop_plugin_settings(plugin_id: str) -> None:
+    """Remove ``config.plugins.<id>`` after a successful uninstall."""
+    from ..config.utils import mutate_config
+
+    def _apply(root) -> None:
+        root.plugins.pop(plugin_id, None)
+
+    mutate_config(_apply)
+
+
 def persist_plugin_settings(
     plugin_id: str,
     *,

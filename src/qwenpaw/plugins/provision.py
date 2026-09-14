@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ..utils.io_utils import write_json_atomic
+from .safe_fs import ensure_deletable, parse_optional_absolute, safe_remove
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,12 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def recorded_tool_names(plugin_id: str) -> list[str]:
+    """Tool names persisted for *plugin_id* when no instance is loaded."""
+    data = load_inventory(plugin_id)
+    return [name for name in (data.get("tools") or {}) if name]
+
+
 def record_tool_factory(
     plugin_id: str,
     tool_name: str,
@@ -104,6 +111,16 @@ def _rel(root: Path, path: Path) -> str:
     return str(path.relative_to(root)).replace("\\", "/")
 
 
+def location_owned(loc: dict[str, Any] | None) -> bool:
+    """Whether the framework created this location and may delete it."""
+    if not loc:
+        return False
+    if "owned" in loc:
+        return bool(loc["owned"])
+    # Read-only interpretation of the previous schema; never write ``branch``.
+    return loc.get("branch") in {"create", "migrate"}
+
+
 def provision_files(
     plugin_id: str,
     src: Path,
@@ -112,7 +129,8 @@ def provision_files(
 ) -> str:
     """Copy factory files with three-way merge. Returns the applied branch.
 
-    Branches: ``create`` (new), ``keep`` (leave user files), ``migrate``.
+    Branches live only in the return value: ``create``, ``keep``, ``migrate``.
+    Durable inventory records ``owned``, never ``applied_branch``.
     """
     src = Path(src)
     dest = Path(dest)
@@ -125,6 +143,7 @@ def provision_files(
     previous = locations.get(dest_key) or {}
     prev_version = previous.get("version")
     prev_files: dict[str, Any] = previous.get("files") or {}
+    owned = location_owned(previous)
 
     if dest.exists() and prev_version == version:
         return "keep"
@@ -134,7 +153,7 @@ def provision_files(
         locations[dest_key] = {
             "src": str(src),
             "version": version,
-            "branch": "keep",
+            "owned": False,
             "files": prev_files,
             "migrating": None,
         }
@@ -142,6 +161,8 @@ def provision_files(
         return "keep"
 
     branch = "create" if not dest.exists() else "migrate"
+    if branch == "create":
+        owned = True
     backup = None
     if branch == "migrate":
         backup = _begin_migration(
@@ -153,11 +174,13 @@ def provision_files(
             prev_version,
             prev_files,
             data,
+            owned=owned,
         )
     new_files = _apply_factory_copy(src, dest, prev_files, branch)
     marker = None
     if branch == "migrate" and backup is not None:
         marker = {
+            "status": "prepared",
             "backup_path": str(backup),
             "target_version": version,
             "prev_version": prev_version,
@@ -169,7 +192,7 @@ def provision_files(
     locations[dest_key] = {
         "src": str(src),
         "version": version,
-        "branch": branch,
+        "owned": owned,
         "files": new_files,
         "migrating": marker,
     }
@@ -186,6 +209,8 @@ def _begin_migration(
     prev_version: Any,
     prev_files: dict[str, Any],
     data: dict[str, Any],
+    *,
+    owned: bool,
 ) -> Path:
     backup = dest.with_name(dest.name + f".{plugin_id}.bak")
     _remove_path(backup)
@@ -196,9 +221,10 @@ def _begin_migration(
     data["locations"][dest_key] = {
         "src": str(src),
         "version": prev_version,
-        "branch": "migrate",
+        "owned": owned,
         "files": prev_files,
         "migrating": {
+            "status": "prepared",
             "backup_path": str(backup),
             "target_version": version,
             "prev_version": prev_version,
@@ -248,12 +274,12 @@ def _apply_factory_copy(
 
 
 def _remove_path(path: Path | None) -> None:
-    if path is None or not path.exists():
+    if path is None:
         return
-    if path.is_dir():
-        shutil.rmtree(path)
+    raw = str(path).strip()
+    if not raw:
         return
-    path.unlink()
+    safe_remove(path, purpose="remove provision path")
 
 
 def _copy_one(
@@ -301,15 +327,28 @@ def recover_migrating_inventory(
             marker = (loc or {}).get("migrating")
             if not marker:
                 continue
-            backup = Path(marker.get("backup_path") or "")
-            dest = Path(dest_key)
-            _restore_backup(backup, dest)
+            if marker.get("status") == "committed":
+                backup = parse_optional_absolute(marker.get("backup_path"))
+                if backup is not None:
+                    _remove_path(backup)
+                loc["migrating"] = None
+                changed = True
+                continue
+            backup = parse_optional_absolute(marker.get("backup_path"))
+            dest = parse_optional_absolute(dest_key)
+            if dest is None:
+                loc["migrating"] = None
+                changed = True
+                continue
+            if backup is not None:
+                _restore_backup(backup, dest)
             loc["version"] = marker.get("prev_version")
             loc["migrating"] = None
             hashes = marker.get("prev_factory_hashes") or {}
             loc["files"] = {
                 rel: {"factory_hash": digest} for rel, digest in hashes.items()
             }
+            loc.pop("pending_factory", None)
             changed = True
         if changed:
             save_inventory(item_id, data)
@@ -325,18 +364,16 @@ def _restore_backup(backup: Path, dest: Path) -> None:
     """Replace *dest* with *backup* if the backup still exists."""
     if not backup.exists():
         return
-    if dest.exists():
-        if dest.is_dir():
-            shutil.rmtree(dest)
-        else:
-            dest.unlink()
+    dest_resolved = ensure_deletable(dest, purpose="restore provision dest")
+    if dest_resolved.exists():
+        _remove_path(dest_resolved)
     if backup.is_dir():
-        shutil.copytree(backup, dest)
-        shutil.rmtree(backup)
+        shutil.copytree(backup, dest_resolved)
+        _remove_path(backup)
         return
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(backup, dest)
-    backup.unlink()
+    dest_resolved.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(backup, dest_resolved)
+    _remove_path(backup)
 
 
 _PLUGIN_OWNED_TOOL_FIELDS = (
@@ -364,7 +401,8 @@ def apply_tool_factory(
     """
     data = load_inventory(plugin_id)
     tools: dict[str, Any] = data["tools"]
-    previous = (tools.get(tool_name) or {}).get("factory") or {}
+    row = tools.get(tool_name) or {}
+    previous = row.get("factory") or {}
     merged = dict(factory)
     if current:
         for field_name in _PLUGIN_OWNED_TOOL_FIELDS:
@@ -376,40 +414,65 @@ def apply_tool_factory(
         for field_name in _USER_OWNED_TOOL_FIELDS:
             if field_name in current:
                 merged[field_name] = current[field_name]
-    tools[tool_name] = {"factory": dict(factory)}
+    if not previous:
+        tools[tool_name] = {"factory": dict(factory)}
+    else:
+        tools[tool_name] = {
+            "factory": dict(previous),
+            "pending_factory": dict(factory),
+        }
     save_inventory(plugin_id, data)
     return merged
 
 
 def commit_migrations(plugin_id: str) -> None:
-    """Clear migrating markers and delete their backups after a good load."""
+    """Persist committed state first, then delete leftover backups."""
     data = load_inventory(plugin_id)
     changed = False
+    backups: list[Path] = []
     for loc in (data.get("locations") or {}).values():
-        marker = (loc or {}).get("migrating")
+        if not loc:
+            continue
+        marker = loc.get("migrating")
         if not marker:
             continue
-        backup = Path(marker.get("backup_path") or "")
-        _remove_path(backup)
+        backup = parse_optional_absolute(marker.get("backup_path"))
+        if backup is not None:
+            backups.append(backup)
         loc["migrating"] = None
+        changed = True
+    for tool_name, row in list((data.get("tools") or {}).items()):
+        pending = (row or {}).get("pending_factory")
+        if pending is None:
+            continue
+        row["factory"] = dict(pending)
+        row.pop("pending_factory", None)
+        data["tools"][tool_name] = row
         changed = True
     if changed:
         save_inventory(plugin_id, data)
+    for backup in backups:
+        _remove_path(backup)
 
 
 def snapshot_created_dests(plugin_id: str) -> list[str]:
-    """Return dest keys this plugin created (uninstall recheck snapshot)."""
+    """Return dest keys this plugin owns (uninstall recheck snapshot)."""
     data = load_inventory(plugin_id)
     dests: list[str] = []
     for dest_key, loc in (data.get("locations") or {}).items():
-        if (loc or {}).get("branch") == "create":
+        if location_owned(loc):
             dests.append(dest_key)
     return dests
 
 
 def leftover_dests(dests: list[str]) -> list[str]:
     """Return snapshot dests that are still on disk."""
-    return [dest for dest in dests if Path(dest).exists()]
+    leftover: list[str] = []
+    for dest in dests:
+        path = parse_optional_absolute(dest)
+        if path is not None and path.exists():
+            leftover.append(dest)
+    return leftover
 
 
 def declared_provision_dests(manifest: dict[str, Any]) -> list[str]:
@@ -437,20 +500,37 @@ def declared_provision_dests(manifest: dict[str, Any]) -> list[str]:
 def teardown_paths(dests: list[str]) -> None:
     """Best-effort delete of declared dests (candidate-level uninstall)."""
     for dest_key in dests:
-        _remove_path(Path(dest_key))
+        dest = parse_optional_absolute(dest_key)
+        if dest is None:
+            continue
+        _remove_path(dest)
+
+
+def undo_created_locations(plugin_id: str, dests: list[str]) -> None:
+    """Remove only destinations created during the current failed load."""
+    if not dests:
+        return
+    data = load_inventory(plugin_id)
+    locations = data.get("locations") or {}
+    wanted = {item for item in dests if str(item).strip()}
+    for dest_key in list(locations):
+        if dest_key not in wanted:
+            continue
+        dest = parse_optional_absolute(dest_key)
+        if dest is not None:
+            _remove_path(dest)
+        locations.pop(dest_key, None)
+    save_inventory(plugin_id, data)
 
 
 def teardown_created_locations(plugin_id: str) -> None:
-    """Remove destinations created by this plugin (uninstall only)."""
+    """Remove destinations owned by this plugin (uninstall only)."""
     data = load_inventory(plugin_id)
     for dest_key, loc in list((data.get("locations") or {}).items()):
-        if (loc or {}).get("branch") != "create":
+        if not location_owned(loc):
             continue
-        dest = Path(dest_key)
-        if not dest.exists():
+        dest = parse_optional_absolute(dest_key)
+        if dest is None:
             continue
-        if dest.is_dir():
-            shutil.rmtree(dest)
-        else:
-            dest.unlink()
+        _remove_path(dest)
     delete_inventory(plugin_id)

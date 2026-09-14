@@ -45,17 +45,22 @@ class AgentMode:
         ``Workspace`` class is defined in a higher layer — by duck-typing
         on ``workspace.plugins`` subclasses stay stable.
         """
+        self._registered: list[tuple[str, object]] = []
         for spec in self.commands():
             workspace.plugins.slash_command_registry.register(spec)
+            self._registered.append(("command", spec))
         for desc in self.tools():
             workspace.plugins.tool_registry.register(desc)
+            self._registered.append(("tool", desc))
         for hook in self.hooks():
             workspace.plugins.hook_registry.register(hook)
+            self._registered.append(("hook", hook))
         for contributor in self.prompt_contributors():
             workspace.plugins.prompt_manager.register(contributor)
+            self._registered.append(("prompt", contributor))
 
     def teardown(self, workspace: object) -> None:
-        """Remove every contribution ``setup`` pushed into ``workspace``.
+        """Remove every contribution this instance successfully registered.
 
         Safe to call when some of those names were never registered
         (partial ``setup`` failure). Subclasses that append extra
@@ -64,26 +69,28 @@ class AgentMode:
         plugins = getattr(workspace, "plugins", None)
         if plugins is None:
             return
-        for spec in self.commands():
-            unregister = getattr(
-                plugins.slash_command_registry,
-                "unregister",
-                None,
-            )
-            if callable(unregister):
-                unregister(spec.name)
-        for desc in self.tools():
-            unregister = getattr(plugins.tool_registry, "unregister", None)
-            if callable(unregister):
-                unregister(desc.name)
-        for hook in self.hooks():
-            unregister = getattr(plugins.hook_registry, "unregister", None)
-            if callable(unregister):
-                unregister(hook.name)
-        for contributor in self.prompt_contributors():
-            unregister = getattr(plugins.prompt_manager, "unregister", None)
-            if callable(unregister):
-                unregister(contributor.name)
+        for kind, obj in reversed(getattr(self, "_registered", [])):
+            if kind == "command":
+                plugins.slash_command_registry.unregister(
+                    getattr(obj, "name", ""),
+                    expected=obj,
+                )
+            elif kind == "tool":
+                plugins.tool_registry.unregister(
+                    getattr(obj, "name", ""),
+                    expected=obj,
+                )
+            elif kind == "hook":
+                plugins.hook_registry.unregister(
+                    getattr(obj, "name", ""),
+                    expected=obj,
+                )
+            elif kind == "prompt":
+                plugins.prompt_manager.unregister(
+                    getattr(obj, "name", ""),
+                    expected=obj,
+                )
+        self._registered = []
 
     def commands(self) -> list["CommandSpec"]:
         return []

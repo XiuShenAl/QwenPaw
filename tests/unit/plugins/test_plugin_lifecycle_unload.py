@@ -546,21 +546,24 @@ async def test_startup_failure_marks_failed_and_continues(
     assert "ok-p" in leftover_hooks
 
 
-def test_delegate_default_owns_commit():
+@pytest.mark.asyncio
+async def test_delegate_default_owns_commit():
     delegate = LifecycleDelegate()
     assert delegate.owns_commit("any") is True
     assert delegate.owns_dependency_env("any") is True
-    receipt = delegate.notify_unload("any", UnloadMode.UNLOAD)
+    receipt = await delegate.notify_unload("any", UnloadMode.UNLOAD)
     assert receipt.ok
 
 
 def test_projection_failed_records_diagnostic(fresh_registry):
     from qwenpaw.plugins.api import PluginApi
+    from qwenpaw.plugins.workspace_projector import ProjectionError
 
     api = PluginApi("p", {}, {"id": "p"})
     api.set_registry(fresh_registry)
     inst = PluginInstance("p")
     api.bind_instance(inst)
-    api._projection_failed("slash_command", ValueError("taken"))
+    with pytest.raises(ProjectionError, match="slash_command"):
+        api._projection_failed("slash_command", ValueError("taken"))
     assert inst.diagnostics
     assert "slash_command" in inst.diagnostics[0]

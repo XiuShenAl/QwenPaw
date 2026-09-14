@@ -11,6 +11,7 @@ from pathlib import Path
 
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _dist_version
+from packaging.markers import default_environment
 from packaging.requirements import Requirement
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,14 @@ _IMPORT_NAME_OVERRIDES = {
 
 
 @dataclass
+class ParsedRequirements:
+    """Installable requirements plus declarations this gate refuses."""
+
+    requirements: list[Requirement] = field(default_factory=list)
+    unsupported: list[str] = field(default_factory=list)
+
+
+@dataclass
 class GateDecision:
     """Result of evaluating a plugin's requirements.txt."""
 
@@ -46,6 +55,7 @@ class GateDecision:
     already_satisfied: bool
     missing: list[str] = field(default_factory=list)
     host_conflicts: list[str] = field(default_factory=list)
+    unsupported: list[str] = field(default_factory=list)
     require_restart: bool = False
     reason: str = ""
 
@@ -56,17 +66,30 @@ def _is_frozen() -> bool:
 
 def parse_requirement_lines(requirements_file: Path) -> list[Requirement]:
     """Parse installable requirement lines, skipping comments and flags."""
+    return parse_requirements_file(requirements_file).requirements
+
+
+def parse_requirements_file(requirements_file: Path) -> ParsedRequirements:
+    """Parse requirements, recording unsupported declarations."""
+    parsed = ParsedRequirements()
     if not requirements_file.is_file():
-        return []
-    parsed: list[Requirement] = []
+        return parsed
     for raw in requirements_file.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
-        if not line or line.startswith("#") or line.startswith("-"):
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("-"):
+            parsed.unsupported.append(line)
             continue
         try:
-            parsed.append(Requirement(line))
+            req = Requirement(line)
         except Exception:  # noqa: BLE001
+            parsed.unsupported.append(line)
             continue
+        if req.url or req.extras:
+            parsed.unsupported.append(line)
+            continue
+        parsed.requirements.append(req)
     return parsed
 
 
@@ -79,8 +102,20 @@ def _import_name(req: Requirement) -> str:
     return _IMPORT_NAME_OVERRIDES.get(dist, req.name.replace("-", "_"))
 
 
+def requirement_applies(req: Requirement) -> bool:
+    """False when a PEP 508 marker excludes the current environment."""
+    if req.marker is None:
+        return True
+    try:
+        return bool(req.marker.evaluate(default_environment()))
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def is_requirement_satisfied(req: Requirement) -> bool:
-    """Return True if *req* is already importable / in-spec."""
+    """Return True if *req* is importable, in-spec, or not applicable."""
+    if not requirement_applies(req):
+        return True
     try:
         installed = _dist_version(req.name)
     except PackageNotFoundError:
@@ -93,7 +128,7 @@ def is_requirement_satisfied(req: Requirement) -> bool:
         except Exception:  # noqa: BLE001
             return True
     import_name = _import_name(req)
-    top = import_name.split(".")[0]
+    top = import_name.split(".", 1)[0]
     try:
         return importlib.util.find_spec(top) is not None
     except (ImportError, ValueError):
@@ -102,11 +137,13 @@ def is_requirement_satisfied(req: Requirement) -> bool:
 
 def hits_imported_host_package(req: Requirement) -> bool:
     """True when installing *req* would overwrite a host-owned package."""
+    if not requirement_applies(req):
+        return False
     dist = _dist_key(req)
     if _is_frozen():
         return dist in HOST_PACKAGE_NAMES
     if dist in HOST_PACKAGE_NAMES:
-        top = _import_name(req).split(".")[0]
+        top = _import_name(req).split(".", 1)[0]
         if top in sys.modules:
             return True
         try:
@@ -135,7 +172,18 @@ class DependencyGate:
                 install / update / repair.
             plugin_id: Plugin id (for messages).
         """
-        reqs = parse_requirement_lines(requirements_file)
+        parsed = parse_requirements_file(requirements_file)
+        if parsed.unsupported:
+            return GateDecision(
+                allow_install=False,
+                already_satisfied=False,
+                unsupported=list(parsed.unsupported),
+                reason=(
+                    f"Plugin '{plugin_id}' uses unsupported requirement "
+                    f"syntax: {', '.join(parsed.unsupported)}"
+                ),
+            )
+        reqs = parsed.requirements
         missing = [
             str(req) for req in reqs if not is_requirement_satisfied(req)
         ]

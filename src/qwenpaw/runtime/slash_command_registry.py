@@ -79,11 +79,17 @@ class SlashCommandRegistry:
         for nm in names:
             self._by_name[nm.lower()] = spec
 
-    def unregister(self, name: str) -> bool:
-        """Remove a command and its aliases. ``True`` if it was present."""
+    def unregister(
+        self,
+        name: str,
+        expected: CommandSpec | None = None,
+    ) -> bool:
+        """Remove a command only if *expected* still occupies the row."""
         key = name.lower()
         spec = self._by_name.get(key)
         if spec is None:
+            return False
+        if expected is not None and spec is not expected:
             return False
         for nm in (spec.name, *spec.aliases):
             self._by_name.pop(nm.lower(), None)

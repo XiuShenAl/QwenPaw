@@ -76,10 +76,17 @@ class WorkspacePlugins:
             raise
         self.modes.append(mode)
 
-    def unregister_mode(self, name: str, workspace: object) -> bool:
-        """Remove a mode by name and run ``teardown``. ``True`` if present."""
+    def unregister_mode(
+        self,
+        name: str,
+        workspace: object,
+        expected: object | None = None,
+    ) -> bool:
+        """Remove a mode only if *expected* still occupies the row."""
         for index, mode in enumerate(self.modes):
             if mode.name != name:
+                continue
+            if expected is not None and mode is not expected:
                 continue
             self.modes.pop(index)
             _safe_mode_teardown(mode, workspace)
@@ -99,12 +106,21 @@ class WorkspacePlugins:
             )
         self.stop_handlers.append(reg)
 
-    def unregister_stop_handler(self, name: str) -> bool:
-        """Remove a stop handler by name. ``True`` if it was present."""
+    def unregister_stop_handler(
+        self,
+        name: str,
+        expected: object | None = None,
+    ) -> bool:
+        """Remove a stop handler only if *expected* still occupies the row."""
         before = len(self.stop_handlers)
-        self.stop_handlers = [
-            item for item in self.stop_handlers if item.name != name
-        ]
+        kept = []
+        for item in self.stop_handlers:
+            if item.name != name:
+                kept.append(item)
+                continue
+            if expected is not None and item is not expected:
+                kept.append(item)
+        self.stop_handlers = kept
         return len(self.stop_handlers) < before
 
     def active_mode_names(self, ctx: "HookContext") -> set[str]:

@@ -46,6 +46,14 @@ class PluginState(str, Enum):
     DISPOSED = "disposed"
 
 
+class QuiescenceError(RuntimeError):
+    """A hosted resource or channel did not stop."""
+
+    def __init__(self, message: str, *, receipt: Any = None) -> None:
+        super().__init__(message)
+        self.receipt = receipt
+
+
 @dataclass
 class UnloadReceipt:
     """Reply from ``LifecycleDelegate.notify_unload``."""
@@ -67,6 +75,7 @@ class UnloadReport:
     workspace_leaks: list[str] = field(default_factory=list)
     receipt: UnloadReceipt | None = None
     quiescent: bool = True
+    needs_restart: bool = False
 
     def absorb(self, other: "UnloadReport") -> None:
         """Merge errors and flags from another report into this one."""
@@ -74,6 +83,8 @@ class UnloadReport:
             self.clean = False
         if not other.quiescent:
             self.quiescent = False
+        if other.needs_restart:
+            self.needs_restart = True
         self.errors.extend(other.errors)
         self.leftovers.extend(other.leftovers)
         self.workspace_leaks.extend(other.workspace_leaks)
@@ -90,6 +101,7 @@ class ReloadReport:
     unchanged: bool = False
     errors: list[str] = field(default_factory=list)
     generation: int = 0
+    needs_restart: bool = False
 
 
 @dataclass
@@ -130,7 +142,7 @@ class LifecycleDelegate:
         del plugin_id
         return True
 
-    def notify_unload(
+    async def notify_unload(
         self,
         plugin_id: str,
         mode: UnloadMode,
@@ -142,18 +154,32 @@ class LifecycleDelegate:
 class PluginInstance:
     """One loaded plugin: state, generation, two-layer ledger."""
 
-    def __init__(self, plugin_id: str) -> None:
+    def __init__(self, plugin_id: str, *, generation: int = 0) -> None:
         self.plugin_id = plugin_id
         self.delegate: LifecycleDelegate | None = None
         self.state = PluginState.ACTIVE
-        self.generation = 0
+        self.generation = generation
+        self.activated = False
         self.diagnostics: list[str] = []
         self.source_path: Any = None
         self.config: dict[str, Any] = {}
         self._runtime: list[LedgerEntry] = []
         self._install: list[LedgerEntry] = []
+        self._created_dests: list[str] = []
         self._dispose_task: asyncio.Task[UnloadReport] | None = None
         _LIVE_INSTANCES[plugin_id] = self
+
+    def note_created_dest(self, dest: str) -> None:
+        """Record a destination created during this load transaction."""
+        if dest and dest not in self._created_dests:
+            self._created_dests.append(dest)
+
+    def created_dests(self) -> list[str]:
+        return list(self._created_dests)
+
+    def clear_created_dests(self) -> None:
+        """Drop this-txn create list after the load transaction commits."""
+        self._created_dests.clear()
 
     def legacy_uninstall_descs(self) -> list[str]:
         """Return runtime rows recorded as legacy uninstall hooks."""
@@ -164,10 +190,10 @@ class PluginInstance:
         ]
 
     def guard_register(self) -> None:
-        """Refuse new long-lived registrations while unloading."""
-        if self.state is PluginState.UNLOADING:
+        """Refuse new long-lived registrations while unloading or disposed."""
+        if self.state in {PluginState.UNLOADING, PluginState.DISPOSED}:
             raise RuntimeError(
-                f"Plugin '{self.plugin_id}' is unloading; "
+                f"Plugin '{self.plugin_id}' is {self.state.value}; "
                 "new registrations are forbidden",
             )
 
@@ -227,16 +253,18 @@ class PluginInstance:
         """Undo runtime ledger rows; keep modules and this instance.
 
         Does not run the install layer, does not mark the instance
-        disposed, and does not touch ``sys.modules``.
+        disposed, and does not touch ``sys.modules``. Rows stay on
+        the ledger until every teardown succeeds so a later retry
+        can stop leftover handles.
         """
         report = UnloadReport(
             plugin_id=self.plugin_id,
             mode=UnloadMode.UNLOAD,
         )
         previous = self.state
+        self.activated = False
         self.state = PluginState.UNLOADING
         entries = list(self._runtime)
-        self._runtime.clear()
         try:
             for entry in reversed(entries):
                 if entry.teardown is None:
@@ -246,16 +274,10 @@ class PluginInstance:
                     if inspect.isawaitable(result):
                         await result
                 except Exception as exc:  # noqa: BLE001
-                    report.clean = False
-                    report.errors.append(f"{entry.desc}: {exc}")
-                    logger.error(
-                        "Runtime teardown '%s' failed for plugin '%s': %s",
-                        entry.desc,
-                        self.plugin_id,
-                        exc,
-                        exc_info=True,
-                    )
+                    _record_teardown_failure(report, entry, exc)
         finally:
+            if report.quiescent:
+                self._runtime.clear()
             if previous is PluginState.FAILED:
                 self.state = PluginState.FAILED
             else:
@@ -283,6 +305,7 @@ class PluginInstance:
 
     async def _dispose_body(self, mode: UnloadMode) -> UnloadReport:
         self.state = PluginState.UNLOADING
+        self.activated = False
         report = UnloadReport(plugin_id=self.plugin_id, mode=mode)
         try:
             entries = _entries_for_mode(self._runtime, self._install, mode)
@@ -293,34 +316,48 @@ class PluginInstance:
                     result = entry.teardown()
                     if inspect.isawaitable(result):
                         await result
-                except TimeoutError as exc:
-                    report.clean = False
-                    report.quiescent = False
-                    report.errors.append(f"{entry.desc}: {exc}")
-                    logger.error(
-                        "Teardown '%s' did not go quiescent for "
-                        "plugin '%s': %s",
-                        entry.desc,
-                        self.plugin_id,
-                        exc,
-                    )
                 except Exception as exc:  # noqa: BLE001
-                    report.clean = False
-                    report.errors.append(f"{entry.desc}: {exc}")
-                    logger.error(
-                        "Teardown '%s' failed for plugin '%s': %s",
-                        entry.desc,
-                        self.plugin_id,
-                        exc,
-                        exc_info=True,
-                    )
+                    _record_teardown_failure(report, entry, exc)
         finally:
-            if mode is UnloadMode.SHUTDOWN:
-                # Process is dying; leave tables/modules in place.
-                self.state = PluginState.DISPOSED
+            if not report.quiescent:
+                self.state = PluginState.FAILED
             else:
                 self.state = PluginState.DISPOSED
         return report
+
+
+def _record_teardown_failure(
+    report: UnloadReport,
+    entry: "LedgerEntry",
+    exc: BaseException,
+) -> None:
+    """Mark *report* from a teardown exception."""
+    report.clean = False
+    report.errors.append(f"{entry.desc}: {exc}")
+    if isinstance(exc, (TimeoutError, QuiescenceError)):
+        report.quiescent = False
+        report.needs_restart = True
+        receipt = getattr(exc, "receipt", None)
+        if receipt is not None:
+            report.receipt = UnloadReceipt(
+                ok=False,
+                detail=str(exc),
+                leftovers=[str(receipt)],
+            )
+        logger.error(
+            "Teardown '%s' did not go quiescent for plugin '%s': %s",
+            entry.desc,
+            report.plugin_id,
+            exc,
+        )
+        return
+    logger.error(
+        "Teardown '%s' failed for plugin '%s': %s",
+        entry.desc,
+        report.plugin_id,
+        exc,
+        exc_info=True,
+    )
 
 
 def _entries_for_mode(
@@ -357,10 +394,18 @@ class PluginLifecycle:
     def get_instance(self, plugin_id: str) -> PluginInstance | None:
         return self._instances.get(plugin_id)
 
-    def ensure_instance(self, plugin_id: str) -> PluginInstance:
+    def ensure_instance(
+        self,
+        plugin_id: str,
+        *,
+        generation: int | None = None,
+    ) -> PluginInstance:
         inst = self._instances.get(plugin_id)
         if inst is None or inst.state is PluginState.DISPOSED:
-            inst = PluginInstance(plugin_id)
+            inst = PluginInstance(
+                plugin_id,
+                generation=0 if generation is None else generation,
+            )
             self._instances[plugin_id] = inst
         inst.delegate = self.delegate
         return inst
@@ -409,7 +454,7 @@ class PluginLifecycle:
         delete_files: bool,
     ) -> UnloadReport:
         if not self.delegate.owns_commit(plugin_id):
-            receipt = self.delegate.notify_unload(plugin_id, mode)
+            receipt = await self.delegate.notify_unload(plugin_id, mode)
             report = UnloadReport(
                 plugin_id=plugin_id,
                 mode=mode,
@@ -435,7 +480,7 @@ class PluginLifecycle:
             instance=inst,
             delete_files=delete_files,
         )
-        if mode is not UnloadMode.SHUTDOWN:
+        if mode is not UnloadMode.SHUTDOWN and report.quiescent:
             self.drop_instance(plugin_id)
         return report
 
@@ -521,18 +566,25 @@ class PluginLifecycle:
             )
         incoming = runtime_config(new_config)
         previous = dict(inst.config or {})
-        await inst.teardown_runtime()
+        teardown_report = await inst.teardown_runtime()
+        if not teardown_report.quiescent:
+            return ConfigUpdateReport(
+                plugin_id=plugin_id,
+                ok=False,
+                errors=list(teardown_report.errors)
+                or ["hosted resources did not go quiescent"],
+            )
         self._loader.registry.unregister_plugin(plugin_id)
         try:
             await self._loader.reregister_unlocked(plugin_id, incoming)
-            await self._loader.run_plugin_startup_hooks(plugin_id)
+            await self._loader.activate_plugin_unlocked(plugin_id)
         except Exception as exc:  # noqa: BLE001
             await inst.teardown_runtime()
             self._loader.registry.unregister_plugin(plugin_id)
             restore_error = ""
             try:
                 await self._loader.reregister_unlocked(plugin_id, previous)
-                await self._loader.run_plugin_startup_hooks(plugin_id)
+                await self._loader.activate_plugin_unlocked(plugin_id)
                 inst.config = previous
             except Exception as restore_exc:  # noqa: BLE001
                 restore_error = str(restore_exc)
@@ -549,7 +601,13 @@ class PluginLifecycle:
                 errors=errors,
             )
         inst.config = incoming
-        persist_plugin_settings(plugin_id, config=incoming)
+        from ..utils.io_utils import run_sync_io
+
+        await run_sync_io(
+            persist_plugin_settings,
+            plugin_id,
+            config=incoming,
+        )
         return ConfigUpdateReport(plugin_id=plugin_id, ok=True)
 
     async def set_enabled(
@@ -560,7 +618,9 @@ class PluginLifecycle:
         """Persist ``enabled`` and load or unload the instance."""
         from .settings import persist_plugin_settings
 
-        persist_plugin_settings(plugin_id, enabled=enabled)
+        from ..utils.io_utils import run_sync_io
+
+        await run_sync_io(persist_plugin_settings, plugin_id, enabled=enabled)
         async with self._loader.plugin_lifecycle(plugin_id):
             loaded = plugin_id in self._loader.get_all_loaded_plugins()
             if not enabled and loaded:
