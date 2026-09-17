@@ -114,6 +114,7 @@ class ConfigUpdateReport:
     errors: list[str] = field(default_factory=list)
     requires_confirmation: bool = False
     legacy_hooks: list[str] = field(default_factory=list)
+    needs_restart: bool = False
 
 
 @dataclass
@@ -265,6 +266,7 @@ class PluginInstance:
         self.activated = False
         self.state = PluginState.UNLOADING
         entries = list(self._runtime)
+        interrupted = False
         try:
             for entry in reversed(entries):
                 if entry.teardown is None:
@@ -275,13 +277,21 @@ class PluginInstance:
                         await result
                 except Exception as exc:  # noqa: BLE001
                     _record_teardown_failure(report, entry, exc)
+        except BaseException:
+            interrupted = True
+            report.clean = False
+            report.quiescent = False
+            report.needs_restart = True
+            raise
         finally:
-            if report.quiescent:
-                self._runtime.clear()
-            if previous is PluginState.FAILED:
+            if interrupted or not report.quiescent:
                 self.state = PluginState.FAILED
             else:
-                self.state = PluginState.ACTIVE
+                self._runtime.clear()
+                if previous is PluginState.FAILED:
+                    self.state = PluginState.FAILED
+                else:
+                    self.state = PluginState.ACTIVE
             self._dispose_task = None
         return report
 
@@ -301,12 +311,22 @@ class PluginInstance:
             )
         loop = asyncio.get_running_loop()
         self._dispose_task = loop.create_task(self._dispose_body(mode))
-        return await self._dispose_task
+        try:
+            return await self._dispose_task
+        except asyncio.CancelledError:
+            if not self._dispose_task.done():
+                self._dispose_task.cancel()
+                try:
+                    await self._dispose_task
+                except asyncio.CancelledError:
+                    pass
+            raise
 
     async def _dispose_body(self, mode: UnloadMode) -> UnloadReport:
         self.state = PluginState.UNLOADING
         self.activated = False
         report = UnloadReport(plugin_id=self.plugin_id, mode=mode)
+        interrupted = False
         try:
             entries = _entries_for_mode(self._runtime, self._install, mode)
             for entry in reversed(entries):
@@ -318,8 +338,14 @@ class PluginInstance:
                         await result
                 except Exception as exc:  # noqa: BLE001
                     _record_teardown_failure(report, entry, exc)
+        except BaseException:
+            interrupted = True
+            report.clean = False
+            report.quiescent = False
+            report.needs_restart = True
+            raise
         finally:
-            if not report.quiescent:
+            if interrupted or not report.quiescent:
                 self.state = PluginState.FAILED
             else:
                 self.state = PluginState.DISPOSED
@@ -532,6 +558,7 @@ class PluginLifecycle:
                 confirm_legacy=confirm_legacy,
             )
 
+    # pylint: disable=too-many-return-statements
     async def _update_config_unlocked(
         self,
         plugin_id: str,
@@ -577,6 +604,7 @@ class PluginLifecycle:
             return ConfigUpdateReport(
                 plugin_id=plugin_id,
                 ok=False,
+                needs_restart=True,
                 errors=list(teardown_report.errors)
                 or ["hosted resources did not go quiescent"],
             )
@@ -584,26 +612,49 @@ class PluginLifecycle:
         try:
             await self._loader.reregister_unlocked(plugin_id, incoming)
             await self._loader.activate_plugin_unlocked(plugin_id)
-        except Exception as exc:  # noqa: BLE001
-            await inst.teardown_runtime()
+        except BaseException as exc:
+            undo_report = await inst.teardown_runtime()
+            if not undo_report.quiescent:
+                inst.mark_failed(
+                    str(exc) or "config update did not go quiescent",
+                )
+                record.status = "failed"
+                record.diagnostics = list(inst.diagnostics)
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                return ConfigUpdateReport(
+                    plugin_id=plugin_id,
+                    ok=False,
+                    needs_restart=True,
+                    errors=[str(exc)]
+                    + list(
+                        undo_report.errors
+                        or ["hosted resources did not go quiescent"],
+                    ),
+                )
             self._loader.registry.unregister_plugin(plugin_id)
             restore_error = ""
             try:
                 await self._loader.reregister_unlocked(plugin_id, previous)
                 await self._loader.activate_plugin_unlocked(plugin_id)
                 inst.config = previous
-            except Exception as restore_exc:  # noqa: BLE001
+            except BaseException as restore_exc:
                 restore_error = str(restore_exc)
                 logger.exception(
                     "Failed to restore config for plugin '%s'",
                     plugin_id,
                 )
+                if isinstance(restore_exc, asyncio.CancelledError):
+                    raise
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             errors = [str(exc)]
             if restore_error:
                 errors.append(f"restore failed: {restore_error}")
             return ConfigUpdateReport(
                 plugin_id=plugin_id,
                 ok=False,
+                needs_restart=bool(restore_error),
                 errors=errors,
             )
         inst.config = incoming
@@ -621,23 +672,39 @@ class PluginLifecycle:
         plugin_id: str,
         enabled: bool,
     ) -> Any:
-        """Persist ``enabled`` and load or unload the instance."""
+        """Load or unload first; persist ``enabled`` only when it is true."""
         from .settings import persist_plugin_settings
 
         from ..utils.io_utils import run_sync_io
 
-        await run_sync_io(persist_plugin_settings, plugin_id, enabled=enabled)
         async with self._loader.plugin_lifecycle(plugin_id):
             loaded = plugin_id in self._loader.get_all_loaded_plugins()
             if not enabled and loaded:
-                return await self._unload_unlocked(
+                report = await self._unload_unlocked(
                     plugin_id,
                     UnloadMode.UNLOAD,
                     delete_files=False,
                 )
+                if report.quiescent:
+                    await run_sync_io(
+                        persist_plugin_settings,
+                        plugin_id,
+                        enabled=False,
+                    )
+                return report
             if enabled and not loaded:
+                await run_sync_io(
+                    persist_plugin_settings,
+                    plugin_id,
+                    enabled=True,
+                )
                 return await self._loader.load_installed_unlocked(plugin_id)
-        return self._loader.get_loaded_plugin(plugin_id)
+            await run_sync_io(
+                persist_plugin_settings,
+                plugin_id,
+                enabled=enabled,
+            )
+            return self._loader.get_loaded_plugin(plugin_id)
 
     async def unload_all(self, mode: UnloadMode) -> list[UnloadReport]:
         """Unload every known instance (used at process shutdown)."""

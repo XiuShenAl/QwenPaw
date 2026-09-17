@@ -820,6 +820,7 @@ class PluginLoader:
             )
 
     # pylint: disable=too-many-statements,too-many-return-statements
+    # pylint: disable=too-many-branches
     async def _load_plugin_unlocked(
         self,
         manifest: PluginManifest,
@@ -830,11 +831,17 @@ class PluginLoader:
         activate: bool = False,
         generation: int | None = None,
         saved_plugin_def: Any = None,
+        allow_existing: bool = True,
     ) -> PluginRecord:
         """Load a plugin; caller must hold :meth:`plugin_lifecycle`."""
         plugin_id = manifest.id
 
         if plugin_id in self._loaded_plugins:
+            if not allow_existing:
+                raise RuntimeError(
+                    f"Plugin '{plugin_id}' is still loaded; "
+                    "refuse to restore over an existing record",
+                )
             logger.warning(f"Plugin '{plugin_id}' already loaded")
             return self._loaded_plugins[plugin_id]
 
@@ -970,7 +977,11 @@ class PluginLoader:
         if activate:
             try:
                 await self.activate_plugin_unlocked(plugin_id)
-            except Exception as exc:  # noqa: BLE001
+            except BaseException as exc:
+                if instance.activated or record.status == "active":
+                    raise
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
                 instance.mark_failed(str(exc))
                 record.status = "failed"
                 record.enabled = False
@@ -1386,6 +1397,8 @@ class PluginLoader:
             return failed
         snapshot = snapshot_plugin_import_state(plugin_id, old_path)
         swapped: Path | None = None
+        activated_new = False
+        cleanup_errors: list[str] = []
         try:
             unload_report = await self._unload_plugin_unlocked(
                 plugin_id,
@@ -1426,22 +1439,20 @@ class PluginLoader:
                     if new_record.diagnostics
                     else f"Plugin '{plugin_id}' failed to load",
                 )
-            from ..utils.io_utils import run_sync_io
-            from .updates import clear_updating_marker, mark_update_committed
-
-            await run_sync_io(mark_update_committed, plugin_id)
-            if swapped:
-                await run_sync_io(_remove_dir, swapped)
-            await run_sync_io(clear_updating_marker, plugin_id)
-            return ReloadReport(
-                plugin_id=plugin_id,
-                ok=True,
-                generation=old_generation + 1,
+            activated_new = True
+            cleanup_errors = await self._finish_committed_reload(
+                plugin_id,
+                swapped,
             )
         except BaseException as exc:
             occupied = "restart required" in str(exc)
-            if not occupied or old_path.exists():
-                await self._rollback_reload(
+            committed = self._reload_already_committed(
+                plugin_id,
+                activated_new,
+            )
+            restore: ReloadReport | None = None
+            if not committed and (not occupied or old_path.exists()):
+                restore = await self._rollback_reload(
                     plugin_id,
                     old_path,
                     old_config,
@@ -1452,15 +1463,82 @@ class PluginLoader:
                     saved_plugin_def=old_plugin_def,
                     generation=old_generation,
                 )
+            if committed:
+                await self._finish_committed_reload(plugin_id, swapped)
             if isinstance(exc, asyncio.CancelledError):
                 raise
+            if committed:
+                return ReloadReport(
+                    plugin_id=plugin_id,
+                    ok=True,
+                    needs_restart=True,
+                    errors=[str(exc)],
+                    generation=old_generation + 1,
+                )
+            errors = [str(exc)]
+            needs_restart = occupied
+            if restore is not None:
+                errors.extend(restore.errors)
+                needs_restart = needs_restart or (
+                    restore.needs_restart or not restore.ok
+                )
             return ReloadReport(
                 plugin_id=plugin_id,
                 ok=False,
-                needs_restart=occupied,
-                errors=[str(exc)],
+                needs_restart=needs_restart,
+                errors=errors,
                 generation=old_generation,
             )
+        return ReloadReport(
+            plugin_id=plugin_id,
+            ok=True,
+            needs_restart=bool(cleanup_errors),
+            errors=cleanup_errors,
+            generation=old_generation + 1,
+        )
+
+    def _reload_already_committed(
+        self,
+        plugin_id: str,
+        activated_new: bool,
+    ) -> bool:
+        """Whether the new version is already the committed service."""
+        if activated_new:
+            return True
+        instance = self.lifecycle.get_instance(plugin_id)
+        if instance is not None and instance.activated:
+            return True
+        current = self._loaded_plugins.get(plugin_id)
+        if current is not None and current.status == "active":
+            return True
+        from .updates import STATUS_COMMITTED, update_marker_status
+
+        return update_marker_status(plugin_id) == STATUS_COMMITTED
+
+    async def _finish_committed_reload(
+        self,
+        plugin_id: str,
+        swapped: Path | None,
+    ) -> list[str]:
+        """Persist committed and drop leftovers. Never rolls back."""
+        from ..utils.io_utils import run_sync_io
+        from .updates import clear_updating_marker, mark_update_committed
+
+        errors: list[str] = []
+        try:
+            await run_sync_io(mark_update_committed, plugin_id)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"mark committed failed: {exc}")
+        if swapped is not None:
+            try:
+                await run_sync_io(_remove_dir, swapped)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"committed backup cleanup failed: {exc}")
+        try:
+            await run_sync_io(clear_updating_marker, plugin_id)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"committed marker cleanup failed: {exc}")
+        return errors
 
     async def _swap_plugin_dir(
         self,
@@ -1569,25 +1647,46 @@ class PluginLoader:
         in_place: bool = False,
         saved_plugin_def: Any = None,
         generation: int = 0,
-    ) -> None:
-        """Restore runtime, directory, modules, and the previous load."""
+    ) -> ReloadReport:
+        """Restore the previous service after a failed reload.
+
+        Unquiescent leftover handles abort restore. The updating marker
+        stays until the old version is active again.
+        """
         from ..utils.io_utils import run_sync_io
         from .provision import recover_migrating_inventory
         from .updates import clear_updating_marker
 
+        failed = ReloadReport(
+            plugin_id=plugin_id,
+            ok=False,
+            needs_restart=True,
+            generation=generation,
+        )
         if plugin_id in self._loaded_plugins:
             try:
-                await self._unload_plugin_unlocked(
+                unload_report = await self._unload_plugin_unlocked(
                     plugin_id,
                     delete_files=False,
                     mode=UnloadMode.UNLOAD,
                     skip_legacy=True,
                 )
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 logger.exception(
                     "Rollback unload failed for plugin '%s'",
                     plugin_id,
                 )
+                failed.errors.append(f"rollback unload failed: {exc}")
+                return failed
+            if (
+                not unload_report.quiescent
+                or plugin_id in self._loaded_plugins
+            ):
+                failed.errors.extend(
+                    unload_report.errors
+                    or ["rollback unload did not go quiescent"],
+                )
+                return failed
         await run_sync_io(recover_migrating_inventory, plugin_id)
         if backup is not None and backup.exists():
 
@@ -1597,11 +1696,9 @@ class PluginLoader:
                 shutil.move(str(backup), str(old_path))
 
             await run_sync_io(_restore_dir)
-        if old_path.exists():
-            await run_sync_io(clear_updating_marker, plugin_id)
         restore_plugin_import_state(snapshot)
         try:
-            await self._load_plugin_unlocked(
+            record = await self._load_plugin_unlocked(
                 incoming_manifest,
                 old_path,
                 old_config,
@@ -1609,12 +1706,33 @@ class PluginLoader:
                 activate=True,
                 generation=generation,
                 saved_plugin_def=saved_plugin_def if in_place else None,
+                allow_existing=False,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             logger.exception(
                 "Failed to restore previous plugin '%s' after reload",
                 plugin_id,
             )
+            failed.errors.append(f"restore failed: {exc}")
+            return failed
+        instance = self.lifecycle.get_instance(plugin_id)
+        if (
+            record.status != "active"
+            or instance is None
+            or not instance.activated
+        ):
+            failed.errors.append(
+                f"restore load returned status={record.status}",
+            )
+            failed.errors.extend(list(record.diagnostics or []))
+            return failed
+        if old_path.exists():
+            await run_sync_io(clear_updating_marker, plugin_id)
+        return ReloadReport(
+            plugin_id=plugin_id,
+            ok=True,
+            generation=generation,
+        )
 
     async def load_plugin_from_path(
         self,
@@ -2554,6 +2672,13 @@ class PluginLoader:
                     instance.created_dests(),
                 )
             await run_sync_io(recover_migrating_inventory, plugin_id)
+            try:
+                await instance.teardown_runtime()
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Failed to undo partial register() for plugin '%s'",
+                    plugin_id,
+                )
             raise
 
     async def activate_plugin_unlocked(self, plugin_id: str) -> None:
@@ -2570,40 +2695,63 @@ class PluginLoader:
         tools_before = snapshot_tool_inventory(plugin_id)
         agent_tools_before = snapshot_agent_tool_configs(tools_before)
         location_keys_before = snapshot_location_keys(plugin_id)
+        committed: list[list[str] | None] = [None]
+        cancelled = False
+        cleanup_errors: list[str] = []
         try:
             await self._project_external_runtime(plugin_id)
             await self.run_plugin_startup_hooks(plugin_id)
-            await self._commit_plugin_transaction(plugin_id, tools_before)
-        except BaseException as exc:
-            from ..utils.io_utils import run_sync_io
-            from .api import rollback_activate_install
-
-            created = instance.created_dests() if instance is not None else []
-            await run_sync_io(
-                rollback_activate_install,
+            cleanup_errors = await self._commit_plugin_transaction(
                 plugin_id,
-                tools_before=tools_before,
-                agent_tools_before=agent_tools_before,
-                location_keys_before=location_keys_before,
-                created_dests=created,
+                tools_before,
+                committed=committed,
             )
-            try:
-                await self._fail_after_startup(
-                    plugin_id,
-                    str(exc) or type(exc).__name__,
+        except BaseException as exc:
+            if committed[0] is not None:
+                cleanup_errors = committed[0]
+                cancelled = isinstance(exc, asyncio.CancelledError)
+                if not cancelled:
+                    logger.warning(
+                        "Activate already committed for '%s': %s",
+                        plugin_id,
+                        exc,
+                    )
+            else:
+                from ..utils.io_utils import run_sync_io
+                from .api import rollback_activate_install
+
+                created = (
+                    instance.created_dests() if instance is not None else []
                 )
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "Activate rollback failed for plugin '%s'",
+                await run_sync_io(
+                    rollback_activate_install,
                     plugin_id,
+                    tools_before=tools_before,
+                    agent_tools_before=agent_tools_before,
+                    location_keys_before=location_keys_before,
+                    created_dests=created,
                 )
-            raise
+                try:
+                    await self._fail_after_startup(
+                        plugin_id,
+                        str(exc) or type(exc).__name__,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "Activate rollback failed for plugin '%s'",
+                        plugin_id,
+                    )
+                raise
         if instance is not None:
             instance.activated = True
             instance.clear_created_dests()
+            for item in cleanup_errors:
+                instance.add_diagnostic(f"post-commit cleanup: {item}")
         record = self._loaded_plugins.get(plugin_id)
         if record is not None and record.status == "registered":
             record.status = "active"
+        if cancelled:
+            raise asyncio.CancelledError
 
     async def activate_all_loaded(self) -> None:
         """Activate every registered plugin that has not been activated yet."""
@@ -2630,7 +2778,8 @@ class PluginLoader:
         self,
         plugin_id: str,
         tools_before: dict | None = None,
-    ) -> None:
+        committed: list | None = None,
+    ) -> list[str]:
         from ..utils.io_utils import run_sync_io
         from .api import _remove_tool_config
         from .provision import (
@@ -2641,21 +2790,28 @@ class PluginLoader:
         )
 
         before = tools_before or {}
+        box = committed if committed is not None else [None]
 
-        def _commit() -> None:
+        def _commit() -> list[str]:
             written = tool_names_written_this_txn(plugin_id, before)
             commit_migrations(plugin_id)
-            owned = recorded_tool_names(plugin_id)
-            stale = [name for name in owned if name not in written]
-            for name in stale:
-                _remove_tool_config(
-                    name,
-                    plugin_id,
-                    owned_names=owned,
-                )
-            drop_tool_rows(plugin_id, stale)
+            errors: list[str] = []
+            box[0] = errors
+            try:
+                owned = recorded_tool_names(plugin_id)
+                stale = [name for name in owned if name not in written]
+                for name in stale:
+                    _remove_tool_config(
+                        name,
+                        plugin_id,
+                        owned_names=owned,
+                    )
+                drop_tool_rows(plugin_id, stale)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(str(exc) or type(exc).__name__)
+            return errors
 
-        await run_sync_io(_commit)
+        return await run_sync_io(_commit)
 
     async def _project_external_runtime(self, plugin_id: str) -> None:
         """Project providers and control commands for *plugin_id*."""

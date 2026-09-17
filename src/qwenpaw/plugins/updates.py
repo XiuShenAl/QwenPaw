@@ -66,6 +66,19 @@ def mark_update_committed(plugin_id: str) -> None:
     write_json_atomic(path, data)
 
 
+def update_marker_status(plugin_id: str) -> str | None:
+    """Return the on-disk update-marker status, if any."""
+    path = marker_path(plugin_id)
+    if not path.is_file():
+        return None
+    try:
+        data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    status = str(data.get("status") or "").strip()
+    return status or None
+
+
 def clear_updating_marker(plugin_id: str) -> None:
     path = marker_path(plugin_id)
     if path.is_file():

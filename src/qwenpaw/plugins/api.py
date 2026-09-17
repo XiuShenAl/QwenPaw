@@ -1362,6 +1362,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             RuntimeError: If the registry has no HTTP parent router.
             ValueError: If *prefix* is invalid or already taken.
         """
+        self._guard_register()
         if self._registry:
             self._registry.register_http_router(
                 self.plugin_id,
@@ -1386,6 +1387,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 (BaseControlCommandHandler)
             priority_level: Command priority (default: 10 = high)
         """
+        self._guard_register()
         if self._registry:
             try:
                 self._registry.register_control_command(
@@ -1428,6 +1430,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             ...     return MyMiddleware()
             >>> api.register_middleware(my_factory, priority=50)
         """
+        self._guard_register()
         if self._registry:
             self._registry.register_middleware(
                 plugin_id=self.plugin_id,
@@ -1504,6 +1507,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             ...     ],
             ... )
         """
+        self._guard_register()
         if not self._registry:
             logger.warning(
                 f"Plugin '{self.plugin_id}' cannot register channel: "

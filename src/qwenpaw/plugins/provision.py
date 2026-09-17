@@ -618,7 +618,14 @@ def commit_migrations(plugin_id: str) -> None:
             continue
         loc["migrating"] = None
     for backup in backups:
-        _remove_path(backup)
+        try:
+            _remove_path(backup)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Could not remove committed provision backup %s",
+                backup,
+                exc_info=True,
+            )
     if changed:
         save_inventory(plugin_id, data)
 

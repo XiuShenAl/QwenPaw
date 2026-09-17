@@ -892,11 +892,31 @@ async def set_plugin_enabled(
         if not body.enabled:
             result = await loader.lifecycle.set_enabled(plugin_id, False)
             clean = getattr(result, "clean", True)
-            return {
+            quiescent = getattr(result, "quiescent", True)
+            needs_restart = getattr(result, "needs_restart", False)
+            still_loaded = loader.get_loaded_plugin(plugin_id) is not None
+            payload = {
                 "id": plugin_id,
-                "enabled": False,
-                "loaded": False,
+                "enabled": not still_loaded,
+                "loaded": still_loaded,
                 "clean": clean,
+                "quiescent": quiescent,
+                "needs_restart": needs_restart,
+                "errors": list(getattr(result, "errors", []) or []),
+            }
+            if not quiescent or still_loaded:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        **payload,
+                        "enabled": True,
+                        "message": (
+                            f"Plugin '{plugin_id}' did not go quiescent."
+                        ),
+                    },
+                )
+            return {
+                **payload,
                 "message": f"Plugin '{plugin_id}' disabled.",
             }
         record = await loader.lifecycle.set_enabled(plugin_id, True)
@@ -907,6 +927,8 @@ async def set_plugin_enabled(
             "status": getattr(record, "status", "inactive"),
             "message": f"Plugin '{plugin_id}' enabled.",
         }
+    except HTTPException:
+        raise
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:

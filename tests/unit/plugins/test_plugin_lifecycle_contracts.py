@@ -23,7 +23,7 @@ from qwenpaw.app.routers.plugins import (
     update_plugin_config,
 )
 from qwenpaw.plugins.architecture import PluginManifest
-from qwenpaw.plugins.custody import close_connection
+from qwenpaw.plugins.custody import close_connection, stop_task
 from qwenpaw.plugins.lifecycle import (
     PluginInstance,
     PluginState,
@@ -45,8 +45,10 @@ from qwenpaw.plugins.safe_fs import (
     same_location,
 )
 from qwenpaw.plugins.updates import (
+    STATUS_PREPARED,
     marker_path,
     recover_interrupted_updates,
+    update_marker_status,
     updates_dir,
 )
 from qwenpaw.plugins.workspace_projector import WorkspaceProjector
@@ -892,7 +894,7 @@ async def test_teardown_timeout_is_not_quiescent():
     assert report.clean is False
     assert report.quiescent is False
     assert report.needs_restart is True
-    assert inst.state is PluginState.ACTIVE
+    assert inst.state is PluginState.FAILED
     assert inst._runtime
 
 
@@ -1946,3 +1948,452 @@ async def test_force_install_drops_unregistered_tools_without_meta(
         load_inventory("force-drop").get("tools") or {}
     )
     _clear_tool_owners()
+
+
+@pytest.mark.asyncio
+async def test_reload_cleanup_failure_after_commit_keeps_new_version(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    loader, workspace, installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "keep-new",
+        "api.register_slash_command('ping', lambda c, a: None)",
+    )
+    old_text = (installed / "main.py").read_text(encoding="utf-8")
+    incoming = _write_plugin(
+        tmp_path / "incoming-keep-new",
+        "keep-new",
+        body="api.register_slash_command('pong', lambda c, a: None)",
+    )
+    (incoming / "v2.txt").write_text("v2", encoding="utf-8")
+
+    def _fail_remove(path):
+        raise PermissionError("sharing violation")
+
+    monkeypatch.setattr("qwenpaw.plugins.loader._remove_dir", _fail_remove)
+    report = await loader.lifecycle.reload("keep-new", new_source=incoming)
+    assert report.ok
+    assert report.needs_restart
+    assert (installed / "main.py").read_text(encoding="utf-8") != old_text
+    assert "pong" in (installed / "main.py").read_text(encoding="utf-8")
+    assert "pong" in workspace.plugins.slash_command_registry.names()
+    assert "ping" not in workspace.plugins.slash_command_registry.names()
+    record = loader.get_loaded_plugin("keep-new")
+    assert record is not None
+    assert record.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_reload_cancel_after_activate_commit_keeps_new_version(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    loader, workspace, installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "cancel-committed",
+        "api.register_slash_command('ping', lambda c, a: None)",
+    )
+    incoming = _write_plugin(
+        tmp_path / "incoming-cancel-committed",
+        "cancel-committed",
+        body="api.register_slash_command('pong', lambda c, a: None)",
+    )
+    rollbacks: list[bool] = []
+    real_commit = loader._commit_plugin_transaction
+    real_rollback = loader._rollback_reload
+
+    async def _commit_then_cancel(*args, **kwargs):
+        await real_commit(*args, **kwargs)
+        raise asyncio.CancelledError
+
+    async def _spy_rollback(*args, **kwargs):
+        rollbacks.append(True)
+        return await real_rollback(*args, **kwargs)
+
+    monkeypatch.setattr(
+        loader,
+        "_commit_plugin_transaction",
+        _commit_then_cancel,
+    )
+    monkeypatch.setattr(loader, "_rollback_reload", _spy_rollback)
+    with pytest.raises(asyncio.CancelledError):
+        await loader.lifecycle.reload(
+            "cancel-committed",
+            new_source=incoming,
+        )
+    assert not rollbacks
+    assert "pong" in workspace.plugins.slash_command_registry.names()
+    assert "ping" not in workspace.plugins.slash_command_registry.names()
+    assert "pong" in (installed / "main.py").read_text(encoding="utf-8")
+    record = loader.get_loaded_plugin("cancel-committed")
+    assert record is not None
+    assert record.status == "active"
+    inst = loader.lifecycle.get_instance("cancel-committed")
+    assert inst is not None
+    assert inst.activated
+    assert update_marker_status("cancel-committed") != STATUS_PREPARED
+
+
+@pytest.mark.asyncio
+async def test_unquiescent_new_version_does_not_restore_old(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    loader, workspace, _installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "sticky-new",
+        "api.register_slash_command('ping', lambda c, a: None)",
+    )
+    initial_gen = loader.lifecycle.get_instance("sticky-new").generation
+    incoming = _write_plugin(
+        tmp_path / "incoming-sticky-new",
+        "sticky-new",
+        body=(
+            "api.register_slash_command('pong', lambda c, a: None)\n"
+            "        def _boom():\n"
+            "            raise RuntimeError('startup boom')\n"
+            "        api.register_startup_hook('boom', _boom, priority=90)"
+        ),
+    )
+    real_dispose = PluginInstance.dispose
+
+    async def _sticky(self, mode):
+        if self.generation > initial_gen:
+            report = UnloadReport(
+                plugin_id=self.plugin_id,
+                mode=mode,
+                clean=False,
+                quiescent=False,
+                needs_restart=True,
+                errors=["channel stop failed"],
+            )
+            self.state = PluginState.FAILED
+            self.activated = False
+            return report
+        return await real_dispose(self, mode)
+
+    monkeypatch.setattr(PluginInstance, "dispose", _sticky)
+    report = await loader.lifecycle.reload("sticky-new", new_source=incoming)
+    assert not report.ok
+    assert report.needs_restart
+    assert marker_path("sticky-new").is_file()
+    inst = loader.lifecycle.get_instance("sticky-new")
+    assert inst is not None
+    assert inst.activated is False
+    assert inst.state is not PluginState.DISPOSED
+    assert loader.get_loaded_plugin("sticky-new") is not None
+    names = workspace.plugins.slash_command_registry.names()
+    assert "ping" not in names
+
+
+@pytest.mark.asyncio
+async def test_restore_failed_load_is_reported(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    loader, _workspace, _installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "restore-fail",
+        "api.register_slash_command('ping', lambda c, a: None)",
+    )
+    incoming = _write_plugin(
+        tmp_path / "incoming-restore-fail",
+        "restore-fail",
+        body=(
+            "api.register_slash_command('pong', lambda c, a: None)\n"
+            "        def _boom():\n"
+            "            raise RuntimeError('startup boom')\n"
+            "        api.register_startup_hook('boom', _boom, priority=90)"
+        ),
+    )
+    restoring = {"on": False}
+    real_rollback = loader._rollback_reload
+    real_load = loader._load_plugin_unlocked
+
+    async def _rollback(*args, **kwargs):
+        restoring["on"] = True
+        try:
+            return await real_rollback(*args, **kwargs)
+        finally:
+            restoring["on"] = False
+
+    async def _load_wrap(*args, **kwargs):
+        record = await real_load(*args, **kwargs)
+        if restoring["on"]:
+            record.status = "failed"
+            record.diagnostics = list(record.diagnostics or [])
+            record.diagnostics.append("forced restore failure")
+            inst = loader.lifecycle.get_instance(record.manifest.id)
+            if inst is not None:
+                inst.activated = False
+        return record
+
+    monkeypatch.setattr(loader, "_rollback_reload", _rollback)
+    monkeypatch.setattr(loader, "_load_plugin_unlocked", _load_wrap)
+    report = await loader.lifecycle.reload(
+        "restore-fail",
+        new_source=incoming,
+    )
+    assert not report.ok
+    assert report.needs_restart
+    assert any("restore" in item for item in report.errors)
+    inst = loader.lifecycle.get_instance("restore-fail")
+    assert inst is None or inst.activated is False
+
+
+@pytest.mark.asyncio
+async def test_teardown_runtime_cancel_keeps_ledger():
+    inst = PluginInstance("cancel-teardown")
+    started = asyncio.Event()
+    blocker = asyncio.get_running_loop().create_future()
+
+    def _slow():
+        started.set()
+        return blocker
+
+    inst.record_runtime("slow", teardown=_slow)
+    task = asyncio.create_task(inst.teardown_runtime())
+    await asyncio.wait_for(started.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert inst.state is PluginState.FAILED
+    assert inst._runtime
+    for entry in inst._runtime:
+        entry.teardown = None
+    report = await inst.teardown_runtime()
+    assert report.quiescent
+    assert not inst._runtime
+
+
+@pytest.mark.asyncio
+async def test_dispose_cancel_does_not_mark_disposed():
+    inst = PluginInstance("cancel-dispose")
+    started = asyncio.Event()
+    blocker = asyncio.get_running_loop().create_future()
+
+    def _slow():
+        started.set()
+        return blocker
+
+    inst.record_runtime("slow", teardown=_slow, kind="custody")
+    task = asyncio.create_task(inst.dispose(UnloadMode.UNLOAD))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert inst.state is not PluginState.DISPOSED
+    assert inst.state is PluginState.FAILED
+    assert inst._runtime
+    for entry in inst._runtime:
+        entry.teardown = None
+    report = await inst.dispose(UnloadMode.UNLOAD)
+    assert report.quiescent
+    assert inst.state is PluginState.DISPOSED
+
+
+@pytest.mark.asyncio
+async def test_stop_task_reraises_parent_cancel():
+    started = asyncio.Event()
+
+    async def _work():
+        started.set()
+        await asyncio.Event().wait()
+
+    hosted = asyncio.create_task(_work())
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    async def _stop():
+        await stop_task(hosted, "work")
+
+    stopper = asyncio.create_task(_stop())
+    await asyncio.sleep(0)
+    stopper.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await stopper
+    if not hosted.done():
+        hosted.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await hosted
+
+
+@pytest.mark.asyncio
+async def test_update_config_cancel_restores_old_when_quiescent(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "qwenpaw.plugins.settings.persist_plugin_settings",
+        lambda *args, **kwargs: None,
+    )
+    loader, workspace, _installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "cfg-cancel",
+        "api.register_slash_command('old', lambda c, a: None)",
+    )
+    started = asyncio.Event()
+    real_reg = loader.reregister_unlocked
+    calls = {"n": 0}
+
+    async def _hang_once(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            started.set()
+            await asyncio.Event().wait()
+        return await real_reg(*args, **kwargs)
+
+    monkeypatch.setattr(loader, "reregister_unlocked", _hang_once)
+    task = asyncio.create_task(
+        loader.lifecycle.update_config("cfg-cancel", {"cmd": "new"}),
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    inst = loader.lifecycle.get_instance("cfg-cancel")
+    assert inst is not None
+    assert inst.state is not PluginState.DISPOSED
+    assert "old" in workspace.plugins.slash_command_registry.names()
+
+
+@pytest.mark.asyncio
+async def test_update_config_unquiescent_failure_does_not_setup_old(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "qwenpaw.plugins.settings.persist_plugin_settings",
+        lambda *args, **kwargs: None,
+    )
+    body = (
+        "api.register_slash_command(\n"
+        "            api.config.get('cmd', 'old'), lambda c, a: None,\n"
+        "        )\n"
+        "        if api.config.get('boom'):\n"
+        "            def _boom():\n"
+        "                raise RuntimeError('startup boom')\n"
+        "            api.register_startup_hook('boom', _boom, priority=90)"
+    )
+    loader, workspace, _installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "cfg-sticky",
+        body,
+        config={"cmd": "old"},
+    )
+    teardowns = {"n": 0}
+    real_teardown = PluginInstance.teardown_runtime
+
+    async def _counted(self):
+        report = await real_teardown(self)
+        teardowns["n"] += 1
+        if teardowns["n"] >= 2:
+            report.quiescent = False
+            report.needs_restart = True
+            report.clean = False
+            self.state = PluginState.FAILED
+        return report
+
+    configs: list[dict] = []
+    real_reg = loader.reregister_unlocked
+
+    async def _spy(plugin_id, config=None):
+        configs.append(dict(config or {}))
+        return await real_reg(plugin_id, config)
+
+    monkeypatch.setattr(PluginInstance, "teardown_runtime", _counted)
+    monkeypatch.setattr(loader, "reregister_unlocked", _spy)
+    report = await loader.lifecycle.update_config(
+        "cfg-sticky",
+        {"cmd": "new", "boom": True},
+    )
+    assert not report.ok
+    assert report.needs_restart
+    assert len(configs) == 1
+    names = workspace.plugins.slash_command_registry.names()
+    assert not ("old" in names and "new" in names)
+    inst = loader.lifecycle.get_instance("cfg-sticky")
+    assert inst is not None
+    assert inst.state is PluginState.FAILED
+
+
+@pytest.mark.asyncio
+async def test_disable_unquiescent_does_not_persist_or_lie(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    persisted: list[tuple[str, dict]] = []
+
+    def _persist(plugin_id, **kwargs):
+        persisted.append((plugin_id, kwargs))
+
+    monkeypatch.setattr(
+        "qwenpaw.plugins.settings.persist_plugin_settings",
+        _persist,
+    )
+    loader, _workspace, _installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "stay-on",
+        "api.register_slash_command('ping', lambda c, a: None)",
+    )
+
+    async def _busy(*_args, **_kwargs):
+        return UnloadReport(
+            plugin_id="stay-on",
+            mode=UnloadMode.UNLOAD,
+            clean=False,
+            quiescent=False,
+            needs_restart=True,
+            errors=["channel stop failed"],
+        )
+
+    monkeypatch.setattr(loader, "_unload_plugin_unlocked", _busy)
+    report = await loader.lifecycle.set_enabled("stay-on", False)
+    assert not report.quiescent
+    assert report.needs_restart
+    assert loader.get_loaded_plugin("stay-on") is not None
+    assert not any(
+        plugin_id == "stay-on" and item.get("enabled") is False
+        for plugin_id, item in persisted
+    )
+
+    from qwenpaw.app.routers.plugins import router as plugins_router
+
+    app = FastAPI()
+    app.include_router(plugins_router, prefix="/api")
+    app.state.plugin_loader = loader
+    client = TestClient(app)
+    response = client.post(
+        "/api/plugins/stay-on/enabled",
+        json={"enabled": False},
+    )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["loaded"] is True
+    assert detail["needs_restart"] is True
+    assert detail["enabled"] is True
+    assert detail["quiescent"] is False
+    assert loader.get_loaded_plugin("stay-on") is not None
+    assert not any(
+        plugin_id == "stay-on" and item.get("enabled") is False
+        for plugin_id, item in persisted
+    )
