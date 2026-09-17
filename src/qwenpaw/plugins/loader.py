@@ -791,6 +791,7 @@ class PluginLoader:
         config: Optional[Dict] = None,
         *,
         allow_install: bool = False,
+        activate: bool = True,
     ) -> PluginRecord:
         """Load a single plugin.
 
@@ -798,6 +799,8 @@ class PluginLoader:
             manifest: Plugin manifest
             source_path: Path to plugin directory
             config: Optional plugin configuration
+            activate: When True (default), project and start before
+                reporting success. Boot two-phase load must pass False.
 
         Returns:
             PluginRecord instance
@@ -813,9 +816,11 @@ class PluginLoader:
                 source_path,
                 config,
                 allow_install=allow_install,
+                activate=activate,
             )
 
-    async def _load_plugin_unlocked(  # pylint: disable=too-many-statements
+    # pylint: disable=too-many-statements,too-many-return-statements
+    async def _load_plugin_unlocked(
         self,
         manifest: PluginManifest,
         source_path: Path,
@@ -959,7 +964,7 @@ class PluginLoader:
             enabled=True,
             instance=plugin_def,
             diagnostics=list(instance.diagnostics),
-            status="active",
+            status="registered",
         )
         self._loaded_plugins[plugin_id] = record
         if activate:
@@ -970,7 +975,7 @@ class PluginLoader:
                 record.status = "failed"
                 record.enabled = False
                 record.diagnostics = list(instance.diagnostics)
-                raise
+                return record
         logger.info(f"✓ Loaded plugin '{plugin_id}' successfully")
         return record
 
@@ -978,6 +983,8 @@ class PluginLoader:
         self,
         configs: Optional[Dict[str, Dict]] = None,
         types: Optional[List[str]] = None,
+        *,
+        activate: bool = False,
     ) -> Dict[str, PluginRecord]:
         """Discover and load all plugins.
 
@@ -988,6 +995,10 @@ class PluginLoader:
                 Plugins already loaded are always skipped (see
                 :meth:`load_plugin`), so calling this twice — first
                 with ``types`` then without — is safe.
+            activate: Boot two-phase load keeps this False so register
+                happens before workspace projection. Other callers that
+                want a ready plugin should pass True or call
+                :meth:`load_plugin` instead.
 
         Returns:
             Dictionary of plugin_id -> PluginRecord
@@ -1026,6 +1037,7 @@ class PluginLoader:
                     manifest,
                     plugin_dir,
                     runtime_config(config),
+                    activate=activate,
                 )
             except Exception as e:
                 logger.error(f"Failed to load plugin '{manifest.id}': {e}")
@@ -1707,7 +1719,7 @@ class PluginLoader:
                     pawport_owner=pawport_owner,
                     recover_incomplete=recover_incomplete,
                 )
-                if record.status == "active":
+                if record.status in {"active", "registered"}:
                     await self.activate_plugin_unlocked(plugin_id)
                 if after_load is not None:
                     maybe_loaded = after_load(record)
@@ -1783,7 +1795,9 @@ class PluginLoader:
             )
 
         # Copy files when source is not already the target (off the loop).
-        if source_path != target_dir:
+        # Identity, not string equality: a case-alias of the same
+        # directory must not be deleted then copied onto itself.
+        if not same_location(source_path, target_dir):
 
             def _copy_tree() -> None:
                 if target_dir.exists():
@@ -1946,7 +1960,14 @@ class PluginLoader:
                 saved_config = dict(inst.config or {})
             if record is not None and record.status == "failed":
                 if inst is not None:
-                    await inst.teardown_runtime()
+                    teardown = await inst.teardown_runtime()
+                    if not teardown.quiescent:
+                        record.diagnostics = list(inst.diagnostics)
+                        record.diagnostics.append(
+                            "Repair refused: hosted resources did "
+                            "not go quiescent; restart required.",
+                        )
+                        return record
                 self.registry.unregister_plugin(plugin_id)
                 self.registry.projector.drop_plugin(plugin_id)
                 self._loaded_plugins.pop(plugin_id, None)
@@ -2539,25 +2560,33 @@ class PluginLoader:
         """Project, start, then commit. Raises on failure."""
         instance = self.lifecycle.get_instance(plugin_id)
         if instance is not None and instance.activated:
+            record = self._loaded_plugins.get(plugin_id)
+            if record is not None and record.status == "registered":
+                record.status = "active"
             return
+        from .api import snapshot_agent_tool_configs
+        from .provision import snapshot_location_keys, snapshot_tool_inventory
+
+        tools_before = snapshot_tool_inventory(plugin_id)
+        agent_tools_before = snapshot_agent_tool_configs(tools_before)
+        location_keys_before = snapshot_location_keys(plugin_id)
         try:
             await self._project_external_runtime(plugin_id)
             await self.run_plugin_startup_hooks(plugin_id)
-            await self._commit_plugin_transaction(plugin_id)
+            await self._commit_plugin_transaction(plugin_id, tools_before)
         except BaseException as exc:
             from ..utils.io_utils import run_sync_io
-            from .provision import (
-                recover_migrating_inventory,
-                undo_created_locations,
-            )
+            from .api import rollback_activate_install
 
-            if instance is not None:
-                await run_sync_io(
-                    undo_created_locations,
-                    plugin_id,
-                    instance.created_dests(),
-                )
-            await run_sync_io(recover_migrating_inventory, plugin_id)
+            created = instance.created_dests() if instance is not None else []
+            await run_sync_io(
+                rollback_activate_install,
+                plugin_id,
+                tools_before=tools_before,
+                agent_tools_before=agent_tools_before,
+                location_keys_before=location_keys_before,
+                created_dests=created,
+            )
             try:
                 await self._fail_after_startup(
                     plugin_id,
@@ -2572,14 +2601,19 @@ class PluginLoader:
         if instance is not None:
             instance.activated = True
             instance.clear_created_dests()
+        record = self._loaded_plugins.get(plugin_id)
+        if record is not None and record.status == "registered":
+            record.status = "active"
 
     async def activate_all_loaded(self) -> None:
-        """Activate every active plugin that has not been activated yet."""
+        """Activate every registered plugin that has not been activated yet."""
         for plugin_id, record in list(self._loaded_plugins.items()):
-            if record.status != "active":
+            if record.status not in {"registered", "active"}:
                 continue
             instance = self.lifecycle.get_instance(plugin_id)
             if instance is not None and instance.activated:
+                if record.status == "registered":
+                    record.status = "active"
                 continue
             try:
                 await self.activate_plugin_unlocked(plugin_id)
@@ -2592,11 +2626,36 @@ class PluginLoader:
                 )
                 await self._fail_after_startup(plugin_id, str(exc))
 
-    async def _commit_plugin_transaction(self, plugin_id: str) -> None:
+    async def _commit_plugin_transaction(
+        self,
+        plugin_id: str,
+        tools_before: dict | None = None,
+    ) -> None:
         from ..utils.io_utils import run_sync_io
-        from .provision import commit_migrations
+        from .api import _remove_tool_config
+        from .provision import (
+            commit_migrations,
+            drop_tool_rows,
+            recorded_tool_names,
+            tool_names_written_this_txn,
+        )
 
-        await run_sync_io(commit_migrations, plugin_id)
+        before = tools_before or {}
+
+        def _commit() -> None:
+            written = tool_names_written_this_txn(plugin_id, before)
+            commit_migrations(plugin_id)
+            owned = recorded_tool_names(plugin_id)
+            stale = [name for name in owned if name not in written]
+            for name in stale:
+                _remove_tool_config(
+                    name,
+                    plugin_id,
+                    owned_names=owned,
+                )
+            drop_tool_rows(plugin_id, stale)
+
+        await run_sync_io(_commit)
 
     async def _project_external_runtime(self, plugin_id: str) -> None:
         """Project providers and control commands for *plugin_id*."""

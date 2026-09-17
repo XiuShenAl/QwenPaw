@@ -69,7 +69,7 @@ def test_tool_names_from_meta_tolerates_malformed_tools():
 
 
 def test_force_reinstall_removed_tools_are_old_minus_new():
-    """Only tools dropped by the new manifest should be cleaned up."""
+    """Legacy helper still parses meta; upgrade delete does not use it."""
     old_tools = set(
         _tool_names_from_meta(
             {"tools": [{"name": "old_tool"}, {"name": "shared"}]},
@@ -124,10 +124,7 @@ async def test_force_reinstall_removes_obsolete_tools_without_reload():
             old_tools={"old_tool", "shared"},
         )
 
-    assert order == [
-        "post_load_setup",
-        "remove:old_tool",
-    ]
+    assert order == ["post_load_setup"]
 
 
 def test_norm_realpath_applies_normcase(tmp_path: Path):

@@ -452,10 +452,11 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
                 f"Loading plugins with {len(plugin_configs)} config(s)",
             )
 
-            # Phase 1: load startup-critical plugins before agents start
+            # Phase 1: register only; projection waits for activate_all
             await plugin_loader.load_all_plugins(
                 configs=plugin_configs,
                 types=["channel", "memory"],
+                activate=False,
             )
             logger.debug("Phase 1: channel and memory plugins loaded")
 
@@ -495,6 +496,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
             # loaded — load_plugin skips them automatically)
             loaded_plugins = await plugin_loader.load_all_plugins(
                 configs=plugin_configs,
+                activate=False,
             )
             logger.debug(f"Loaded {len(loaded_plugins)} plugin(s)")
 

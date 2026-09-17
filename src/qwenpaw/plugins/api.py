@@ -281,6 +281,29 @@ def _unbridge_from_runtime(
             ]
 
 
+def _agent_ids_for_tool_write() -> list[str]:
+    """Agent profiles that should receive a registered tool."""
+    from ..app.agent_context import get_current_agent_id
+    from ..config.utils import load_config
+
+    agent_ids: list[str] = []
+    try:
+        config = load_config()
+        if config.agents and config.agents.profiles:
+            agent_ids.extend(
+                str(agent_id) for agent_id in config.agents.profiles
+            )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "Failed to list agent profiles for tool write",
+            exc_info=True,
+        )
+    current = get_current_agent_id()
+    if current and current not in agent_ids:
+        agent_ids.append(current)
+    return agent_ids
+
+
 def _write_tool_config(
     tool_name: str,
     enabled: bool,
@@ -288,49 +311,70 @@ def _write_tool_config(
     icon: str,
     plugin_id: str,
 ) -> None:
-    """Persist BuiltinToolConfig, migrating plugin-owned fields."""
+    """Persist BuiltinToolConfig on every agent profile this host knows."""
     from ..config.config import (
         BuiltinToolConfig,
+        ToolsConfig,
         load_agent_config,
         save_agent_config,
     )
-    from ..app.agent_context import get_current_agent_id
-    from .provision import apply_tool_factory
+    from .provision import apply_tool_factory, merge_tool_factory
 
-    agent_id = get_current_agent_id()
-    if not agent_id:
+    agent_ids = _agent_ids_for_tool_write()
+    if not agent_ids:
         logger.warning(
-            "No current agent ID; tool '%s' "
-            "will be available after restart",
+            "No agent profiles; tool '%s' will be available after restart",
             tool_name,
         )
         return
 
-    agent_config = load_agent_config(agent_id)
-
-    if not agent_config.tools:
-        from ..config.config import ToolsConfig
-
-        agent_config.tools = ToolsConfig()
-
-    existing = agent_config.tools.builtin_tools.get(tool_name)
-    current = None
-    if existing is not None:
-        current = existing.model_dump()
-        current.pop("name", None)
     factory = _tool_factory(enabled, description, icon)
-    merged = apply_tool_factory(plugin_id, tool_name, factory, current)
-    merged.pop("name", None)
-    agent_config.tools.builtin_tools[tool_name] = BuiltinToolConfig(
-        name=tool_name,
-        **merged,
-    )
-    save_agent_config(agent_id, agent_config)
-    logger.info(
-        "Wrote tool '%s' into agent '%s' config",
-        tool_name,
-        agent_id,
-    )
+    persisted = False
+    previous_factory: dict | None = None
+    for agent_id in agent_ids:
+        try:
+            agent_config = load_agent_config(agent_id)
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "Skip tool '%s' write for agent '%s'",
+                tool_name,
+                agent_id,
+                exc_info=True,
+            )
+            continue
+        if not agent_config.tools:
+            agent_config.tools = ToolsConfig()
+        existing = agent_config.tools.builtin_tools.get(tool_name)
+        current = None
+        if existing is not None:
+            dumped = getattr(existing, "model_dump", None)
+            if callable(dumped):
+                raw = dumped()
+                if isinstance(raw, dict):
+                    current = raw
+                    current.pop("name", None)
+        if not persisted:
+            merged = apply_tool_factory(plugin_id, tool_name, factory, current)
+            persisted = True
+            from .provision import load_inventory
+
+            row = (load_inventory(plugin_id).get("tools") or {}).get(
+                tool_name,
+            ) or {}
+            previous_factory = dict(row.get("factory") or factory)
+        else:
+            merged = merge_tool_factory(factory, current, previous_factory)
+        merged.pop("name", None)
+        agent_config.tools.builtin_tools[tool_name] = BuiltinToolConfig(
+            name=tool_name,
+            **merged,
+        )
+        save_agent_config(agent_id, agent_config)
+        logger.info(
+            "Wrote tool '%s' into agent '%s' config",
+            tool_name,
+            agent_id,
+        )
 
 
 def _remove_tool_config(
@@ -372,6 +416,117 @@ def _remove_tool_config(
                 )
     except Exception:  # noqa: BLE001
         logger.debug("Tool config teardown skipped", exc_info=True)
+
+
+def snapshot_agent_tool_configs(
+    tool_names: Collection[str],
+) -> dict[str, dict[str, dict[str, Any] | None]]:
+    """Snapshot BuiltinToolConfig dumps for *tool_names* on every agent."""
+    names = [name for name in tool_names if name]
+    snapped: dict[str, dict[str, dict[str, Any] | None]] = {}
+    if not names:
+        return snapped
+    try:
+        from ..config.utils import load_config
+        from ..config.config import load_agent_config
+
+        config = load_config()
+        if not config.agents or not config.agents.profiles:
+            return snapped
+        for agent_id in config.agents.profiles:
+            try:
+                agent_cfg = load_agent_config(str(agent_id))
+            except Exception:  # noqa: BLE001
+                continue
+            row: dict[str, dict[str, Any] | None] = {}
+            for name in names:
+                existing = agent_cfg.tools.builtin_tools.get(name)
+                if existing is None:
+                    row[name] = None
+                    continue
+                dumped = getattr(existing, "model_dump", None)
+                if callable(dumped):
+                    raw = dumped()
+                    row[name] = raw if isinstance(raw, dict) else None
+                else:
+                    row[name] = None
+            snapped[str(agent_id)] = row
+    except Exception:  # noqa: BLE001
+        logger.debug("Agent tool snapshot skipped", exc_info=True)
+    return snapped
+
+
+def _restore_agent_tools_from_snapshot(
+    names: Collection[str],
+    agent_before: dict[str, dict[str, dict[str, Any] | None]],
+) -> None:
+    """Put existing tool rows back without ``merge_tool_factory``."""
+    from ..config.config import (
+        BuiltinToolConfig,
+        ToolsConfig,
+        load_agent_config,
+        save_agent_config,
+    )
+
+    for agent_id, snap in agent_before.items():
+        try:
+            agent_cfg = load_agent_config(agent_id)
+        except Exception:  # noqa: BLE001
+            continue
+        if not agent_cfg.tools:
+            agent_cfg.tools = ToolsConfig()
+        changed = False
+        for name in names:
+            if name not in snap:
+                continue
+            previous = snap[name]
+            if previous is None:
+                if name in agent_cfg.tools.builtin_tools:
+                    del agent_cfg.tools.builtin_tools[name]
+                    changed = True
+                continue
+            payload = dict(previous)
+            payload.pop("name", None)
+            agent_cfg.tools.builtin_tools[name] = BuiltinToolConfig(
+                name=name,
+                **payload,
+            )
+            changed = True
+        if changed:
+            save_agent_config(agent_id, agent_cfg)
+
+
+def rollback_activate_install(
+    plugin_id: str,
+    *,
+    tools_before: dict[str, Any],
+    agent_tools_before: dict[str, dict[str, dict[str, Any] | None]],
+    location_keys_before: set[str],
+    created_dests: Collection[str] | None = None,
+) -> None:
+    """Undo install-layer writes from a failed activate transaction."""
+    from .provision import (
+        recover_migrating_inventory,
+        rollback_created_locations,
+        rollback_uncommitted_tools,
+        undo_created_locations,
+    )
+
+    new_names = rollback_uncommitted_tools(plugin_id, tools_before)
+    for name in new_names:
+        _remove_tool_config(
+            name,
+            plugin_id,
+            owned_names=tuple(new_names),
+        )
+    _restore_agent_tools_from_snapshot(
+        tools_before,
+        agent_tools_before,
+    )
+    rollback_created_locations(plugin_id, location_keys_before)
+    if created_dests:
+        undo_created_locations(plugin_id, list(created_dests))
+    recover_migrating_inventory(plugin_id)
 
 
 def _tool_factory(
@@ -2072,11 +2227,11 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 f"does not exist: {skills_dir}",
             )
             return []
-        return [
+        return sorted(
             d.name
             for d in skills_dir.iterdir()
             if d.is_dir() and (d / "SKILL.md").exists()
-        ]
+        )
 
     def _install_skills_into_workspace(
         self,
@@ -2099,7 +2254,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 default_workspace_manifest,
                 mutate_json,
             )
-            from .provision import commit_migrations, provision_files
+            from .provision import commit_migrations
             from ..agents.skill_system.registry import (
                 reconcile_workspace_manifest,
             )
@@ -2114,8 +2269,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
 
             version = str(self.manifest.get("version") or "0")
             for skill_name in skill_names:
-                provision_files(
-                    self.plugin_id,
+                self.provision_files(
                     skills_dir / skill_name,
                     ws_skills_dir / skill_name,
                     version,
@@ -2165,6 +2319,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 f"'{workspace_info.get('agent_id', '?')}': {exc}",
                 exc_info=True,
             )
+            raise
 
     def _do_install_skills(
         self,
@@ -2202,6 +2357,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 f"'{self.plugin_id}': {exc}",
                 exc_info=True,
             )
+            raise
 
     @staticmethod
     def cleanup_sourced_skills(plugin_id: str) -> None:

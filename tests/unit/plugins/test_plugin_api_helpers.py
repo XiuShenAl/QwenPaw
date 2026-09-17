@@ -124,9 +124,17 @@ class TestGetWorkspaceFromInfo:
 
 class TestWriteToolConfig:
     def test_no_agent_id_skips_write(self, caplog):
-        with patch(
-            "qwenpaw.app.agent_context.get_current_agent_id",
-            return_value=None,
+        host = MagicMock()
+        host.agents = None
+        with (
+            patch(
+                "qwenpaw.app.agent_context.get_current_agent_id",
+                return_value=None,
+            ),
+            patch(
+                "qwenpaw.config.utils.load_config",
+                return_value=host,
+            ),
         ):
             plugins_api._write_tool_config(
                 "my_tool",
@@ -135,15 +143,22 @@ class TestWriteToolConfig:
                 icon="icon.png",
                 plugin_id="test-plugin",
             )
-        assert "No current agent ID" in caplog.text
+        assert "No agent profiles" in caplog.text
 
-    def test_writes_to_agent_config(self):
+    def test_writes_to_agent_config(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
         fake_config = MagicMock()
         fake_config.tools = None
+        host = MagicMock()
+        host.agents.profiles = {"agent-1": object()}
         with (
             patch(
                 "qwenpaw.app.agent_context.get_current_agent_id",
                 return_value="agent-1",
+            ),
+            patch(
+                "qwenpaw.config.utils.load_config",
+                return_value=host,
             ),
             patch(
                 "qwenpaw.config.config.load_agent_config",
@@ -160,16 +175,23 @@ class TestWriteToolConfig:
             )
         save_mock.assert_called_once()
 
-    def test_updates_existing_tool_entry(self):
+    def test_updates_existing_tool_entry(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
         fake_config = MagicMock()
         from qwenpaw.config.config import ToolsConfig
 
         fake_config.tools = ToolsConfig()
         fake_config.tools.builtin_tools["existing_tool"] = MagicMock()
+        host = MagicMock()
+        host.agents.profiles = {"agent-1": object()}
         with (
             patch(
                 "qwenpaw.app.agent_context.get_current_agent_id",
                 return_value="agent-1",
+            ),
+            patch(
+                "qwenpaw.config.utils.load_config",
+                return_value=host,
             ),
             patch(
                 "qwenpaw.config.config.load_agent_config",

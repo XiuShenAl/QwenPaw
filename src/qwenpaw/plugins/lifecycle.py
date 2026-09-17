@@ -422,13 +422,19 @@ class PluginLifecycle:
         config: dict[str, Any] | None = None,
         *,
         allow_install: bool = False,
+        activate: bool = True,
     ) -> Any:
-        """Load one plugin under the loader lock."""
+        """Load one plugin under the loader lock.
+
+        Defaults to activating (project + start) before success.
+        Boot two-phase load must pass ``activate=False``.
+        """
         return await self._loader.load_plugin(
             manifest,
             source_path,
             config,
             allow_install=allow_install,
+            activate=activate,
         )
 
     async def unload(

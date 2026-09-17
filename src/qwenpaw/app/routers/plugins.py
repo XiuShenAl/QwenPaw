@@ -142,26 +142,17 @@ def _find_plugin_dir(base: Path) -> Path:
     )
 
 
-async def _post_load_setup(  # pylint: disable=too-many-branches
+async def _post_load_setup(
     request: Request,
     plugin_id: str,
 ) -> None:
-    """Sync tool entries after lifecycle has already activated the plugin.
+    """No-op after lifecycle activate.
 
-    Providers, control commands, and startup hooks belong to
-    ``PluginLoader.activate_plugin_unlocked``. This helper only updates
-    agent config files (force-reinstall obsolete-tool cleanup still
-    happens in the caller).
+    Tools are written only by ``register_tool`` into the provision
+    inventory. Manifest ``meta.tools`` is not write authority.
+    Force-reinstall obsolete-tool cleanup still happens in the caller.
     """
-    loader = getattr(request.app.state, "plugin_loader", None)
-    if loader is None:
-        return
-    if plugin_id not in loader.get_all_loaded_plugins():
-        return
-    record = loader.get_loaded_plugin(plugin_id)
-    if record is None or getattr(record, "status", "") != "active":
-        return
-    await asyncio.to_thread(_sync_plugin_tools_to_agents, loader, plugin_id)
+    del request, plugin_id
 
 
 def _tool_names_from_meta(meta: dict) -> list[str]:
@@ -191,61 +182,6 @@ def _tool_names_from_meta(meta: dict) -> list[str]:
             continue
         _add(tool.get("name"))
     return tool_names
-
-
-def _sync_plugin_tools_to_agents(loader, plugin_id: str) -> None:
-    """Add plugin tool entries to all existing agents.
-
-    Supports both old (``meta.tool_name``) and new (``meta.tools[]``)
-    manifest formats.
-
-    Args:
-        loader: PluginLoader instance
-        plugin_id: Plugin whose tools should be synced
-    """
-    record = loader.get_loaded_plugin(plugin_id)
-    if record is None:
-        return
-
-    tool_names = _tool_names_from_meta(record.manifest.meta or {})
-    if not tool_names:
-        return
-
-    try:
-        from ...config.utils import load_config
-        from ...config.config import (
-            BuiltinToolConfig,
-            load_agent_config,
-            save_agent_config,
-        )
-
-        config = load_config()
-        if not config.agents or not config.agents.profiles:
-            return
-
-        for agent_id in config.agents.profiles:
-            try:
-                agent_cfg = load_agent_config(agent_id)
-                changed = False
-                for tool_name in tool_names:
-                    if tool_name in agent_cfg.tools.builtin_tools:
-                        continue
-                    agent_cfg.tools.builtin_tools[
-                        tool_name
-                    ] = BuiltinToolConfig(
-                        name=tool_name,
-                        enabled=False,
-                        config={},
-                    )
-                    changed = True
-                if changed:
-                    save_agent_config(agent_id, agent_cfg)
-            except Exception as exc:
-                logger.warning(
-                    f"Failed to sync tools to agent '{agent_id}': {exc}",
-                )
-    except Exception as exc:
-        logger.warning(f"Tool sync skipped: {exc}")
 
 
 def _remove_named_tools_from_agents(
@@ -319,33 +255,22 @@ async def _load_plugin_with_optional_force_reinstall(
     :func:`_post_load_setup` — runs under one
     :meth:`PluginLoader.plugin_lifecycle` critical section.
 
-    On force-reinstall, tools present in the old manifest but absent from
-    the new one are removed from agent configs (``old - new`` only).
+    Dropped tools are removed at the activate commit point from the
+    provision inventory, not from ``plugin.json`` meta.
     """
     from ...config.utils import get_plugins_dir
-
-    collected: dict = {
-        "old_tools": set(),
-    }
 
     def _before_force_unload(plugin_id: str) -> None:
         logger.info(
             "Force-reinstall: unloading '%s' before re-installing",
             plugin_id,
         )
-        # Snapshot under the lifecycle lock (caller holds it).
-        old_record = loader.get_loaded_plugin(plugin_id)
-        if old_record is not None:
-            collected["old_tools"] = set(
-                _tool_names_from_meta(old_record.manifest.meta or {}),
-            )
+        del plugin_id
 
     async def _after_load(record) -> None:
         await _finish_plugin_install_after_load(
             request,
             record,
-            force=force,
-            old_tools=collected["old_tools"],
             reload_agents=reload_agents,
         )
 
@@ -364,28 +289,13 @@ async def _finish_plugin_install_after_load(
     request: Request,
     record,
     *,
-    force: bool,
-    old_tools: set,
+    force: bool = False,
+    old_tools: set | None = None,
     reload_agents: bool = True,
 ) -> None:
-    """Post-load setup with force-reinstall tool cleanup.
-
-    Workspace contributions are projected by startup hooks; agents
-    are not rebuilt.
-    """
+    """Post-load hook. Tool cleanup belongs to activate commit."""
+    del force, old_tools, reload_agents
     await _post_load_setup(request, record.manifest.id)
-    if force:
-        new_tools = set(
-            _tool_names_from_meta(record.manifest.meta or {}),
-        )
-        removed_tools = sorted(old_tools - new_tools)
-        if removed_tools:
-            await asyncio.to_thread(
-                _remove_named_tools_from_agents,
-                record.manifest.id,
-                removed_tools,
-            )
-    del reload_agents
 
 
 def _extract_plugin_zip_bytes(content: bytes, temp_dir: Path) -> Path:

@@ -445,6 +445,117 @@ _USER_OWNED_TOOL_FIELDS = (
 )
 
 
+def merge_tool_factory(
+    factory: dict[str, Any],
+    current: dict[str, Any] | None,
+    previous: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Merge one BuiltinToolConfig by field ownership without I/O."""
+    merged = dict(factory)
+    prev = previous or {}
+    if current:
+        for field_name in _PLUGIN_OWNED_TOOL_FIELDS:
+            if field_name in current and field_name in prev:
+                if current.get(field_name) != prev.get(field_name):
+                    merged[field_name] = current[field_name]
+            elif field_name in current and field_name not in prev:
+                merged[field_name] = current[field_name]
+        for field_name in _USER_OWNED_TOOL_FIELDS:
+            if field_name in current:
+                merged[field_name] = current[field_name]
+    return merged
+
+
+def snapshot_tool_inventory(plugin_id: str) -> dict[str, Any]:
+    """Return a copy of persisted tool rows before an activate transaction."""
+    tools = load_inventory(plugin_id).get("tools") or {}
+    return {
+        name: dict(row)
+        for name, row in tools.items()
+        if name and isinstance(row, dict)
+    }
+
+
+def rollback_uncommitted_tools(
+    plugin_id: str,
+    before: dict[str, Any],
+) -> list[str]:
+    """Restore tool inventory to *before* and return names created after it."""
+    data = load_inventory(plugin_id)
+    now = data.get("tools") or {}
+    new_names = [name for name in now if name and name not in before]
+    data["tools"] = {
+        name: dict(row)
+        for name, row in before.items()
+        if name and isinstance(row, dict)
+    }
+    save_inventory(plugin_id, data)
+    return new_names
+
+
+def snapshot_location_keys(plugin_id: str) -> set[str]:
+    """Return dest keys present before an activate transaction."""
+    return {
+        key
+        for key in (load_inventory(plugin_id).get("locations") or {})
+        if key
+    }
+
+
+def rollback_created_locations(
+    plugin_id: str,
+    before_keys: set[str],
+) -> list[str]:
+    """Delete dests created after *before_keys*; leave migrate to recover."""
+    data = load_inventory(plugin_id)
+    locations = data.get("locations") or {}
+    created = [
+        key for key in list(locations) if key and key not in before_keys
+    ]
+    for dest_key in created:
+        dest = parse_optional_absolute(dest_key)
+        if dest is not None:
+            _remove_path(dest)
+        locations.pop(dest_key, None)
+    if created:
+        data["locations"] = locations
+        save_inventory(plugin_id, data)
+    return created
+
+
+def tool_names_written_this_txn(
+    plugin_id: str,
+    before: dict[str, Any],
+) -> set[str]:
+    """Names ``apply_tool_factory`` wrote during the current activate."""
+    now = load_inventory(plugin_id).get("tools") or {}
+    written: set[str] = set()
+    for name, row in now.items():
+        if not name or not isinstance(row, dict):
+            continue
+        if name not in before:
+            written.add(name)
+        elif row.get("pending_factory") is not None:
+            written.add(name)
+    return written
+
+
+def drop_tool_rows(plugin_id: str, names: list[str]) -> None:
+    """Remove inventory tool rows after agent.json has been updated."""
+    if not names:
+        return
+    data = load_inventory(plugin_id)
+    tools = data.get("tools") or {}
+    changed = False
+    for name in names:
+        if name in tools:
+            tools.pop(name, None)
+            changed = True
+    if changed:
+        data["tools"] = tools
+        save_inventory(plugin_id, data)
+
+
 def apply_tool_factory(
     plugin_id: str,
     tool_name: str,
@@ -460,17 +571,7 @@ def apply_tool_factory(
     tools: dict[str, Any] = data["tools"]
     row = tools.get(tool_name) or {}
     previous = row.get("factory") or {}
-    merged = dict(factory)
-    if current:
-        for field_name in _PLUGIN_OWNED_TOOL_FIELDS:
-            if field_name in current and field_name in previous:
-                if current.get(field_name) != previous.get(field_name):
-                    merged[field_name] = current[field_name]
-            elif field_name in current and field_name not in previous:
-                merged[field_name] = current[field_name]
-        for field_name in _USER_OWNED_TOOL_FIELDS:
-            if field_name in current:
-                merged[field_name] = current[field_name]
+    merged = merge_tool_factory(factory, current, previous)
     if not previous:
         tools[tool_name] = {"factory": dict(factory)}
     else:
