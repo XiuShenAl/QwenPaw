@@ -538,20 +538,6 @@ async def uninstall_plugin_source(
     if loader is None:
         raise RuntimeError("Plugin loader is not ready yet.")
     async with loader.plugin_lifecycle(plugin_id):
-        record = loader.get_loaded_plugin(plugin_id)
-        meta: dict = {}
-        if record is not None:
-            meta = record.manifest.meta or {}
-        else:
-            source = loader.find_installed_plugin_dir(plugin_id)
-            if source is not None:
-                _path, manifest = await asyncio.to_thread(
-                    loader.read_source_manifest,
-                    source,
-                )
-                del _path
-                meta = manifest.meta or {}
-
         from ...plugins.lifecycle import UnloadMode
 
         report = await loader.unload_plugin(
@@ -563,11 +549,6 @@ async def uninstall_plugin_source(
             raise RuntimeError(
                 f"Plugin '{plugin_id}' did not go quiescent.",
             )
-        await asyncio.to_thread(
-            _remove_plugin_tools_from_agents,
-            plugin_id,
-            meta,
-        )
 
 
 @router.post(
@@ -882,6 +863,16 @@ async def get_plugin_status(plugin_id: str, request: Request):
         status_code=404,
         detail=f"Plugin '{plugin_id}' not found.",
     )
+
+
+@router.get(
+    "/{plugin_id}",
+    summary="Get a plugin",
+    description="Return one plugin's runtime status, or 404 if missing.",
+)
+async def get_plugin(plugin_id: str, request: Request):
+    """Return one plugin. Missing ids are 404, never 405."""
+    return await get_plugin_status(plugin_id, request)
 
 
 class UpdatePluginConfigRequest(BaseModel):

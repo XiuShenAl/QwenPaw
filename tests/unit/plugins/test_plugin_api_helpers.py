@@ -133,6 +133,7 @@ class TestWriteToolConfig:
                 enabled=True,
                 description="desc",
                 icon="icon.png",
+                plugin_id="test-plugin",
             )
         assert "No current agent ID" in caplog.text
 
@@ -155,6 +156,7 @@ class TestWriteToolConfig:
                 enabled=True,
                 description="A tool",
                 icon="icon.png",
+                plugin_id="test-plugin",
             )
         save_mock.assert_called_once()
 
@@ -180,6 +182,7 @@ class TestWriteToolConfig:
                 enabled=False,
                 description="updated",
                 icon="new.png",
+                plugin_id="test-plugin",
             )
         # Entry should be updated, not duplicated
         assert "existing_tool" in fake_config.tools.builtin_tools

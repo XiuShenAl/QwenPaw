@@ -492,6 +492,8 @@ class CloudPawPlugin:
             "cloudpaw_agents",
             setup=None,
             teardown=_cleanup_cloudpaw_agents,
+            kind="cloudpaw_agents",
+            teardown_ref="agents_setup:uninstall_agents",
         )
         api.register_startup_hook(
             hook_name="cloudpaw_init",

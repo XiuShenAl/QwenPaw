@@ -760,6 +760,30 @@ class PluginRegistry:  # pylint:disable=too-many-public-methods
             handler: Control command handler instance
             priority_level: Command priority (default: 10 = high)
         """
+        from ..runtime.occupancy import occupancy_conflict
+        from ..runtime.commands.control import command_owner
+
+        name = str(getattr(handler, "command_name", "") or "")
+        normalized = name.lstrip("/").lower()
+        for item in self._control_commands:
+            other = str(item.handler.command_name or "").lstrip("/").lower()
+            if other == normalized and item.plugin_id != plugin_id:
+                raise ValueError(
+                    occupancy_conflict(
+                        "control_command",
+                        normalized,
+                        item.plugin_id,
+                    ),
+                )
+        live_owner = command_owner(normalized)
+        if live_owner and live_owner != plugin_id:
+            raise ValueError(
+                occupancy_conflict(
+                    "control_command",
+                    normalized,
+                    live_owner,
+                ),
+            )
         cmd_reg = ControlCommandRegistration(
             plugin_id=plugin_id,
             handler=handler,
@@ -954,12 +978,14 @@ class PluginRegistry:  # pylint:disable=too-many-public-methods
 
     def drop_control_command(self, plugin_id: str, command_name: str) -> None:
         """Remove one control-command registration."""
+        wanted = str(command_name or "").lstrip("/").lower()
         self._control_commands = [
             item
             for item in self._control_commands
             if not (
                 item.plugin_id == plugin_id
-                and item.handler.command_name == command_name
+                and str(item.handler.command_name or "").lstrip("/").lower()
+                == wanted
             )
         ]
 

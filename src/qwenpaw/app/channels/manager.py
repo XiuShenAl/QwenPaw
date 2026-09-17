@@ -681,8 +681,6 @@ class ChannelManager:
         channel.set_enqueue(None)
         try:
             await channel.stop()
-        except asyncio.CancelledError:
-            return StopReceipt(key=key, stopped=False, detail="cancelled")
         except Exception as exc:  # noqa: BLE001
             logger.exception("Failed to stop channel '%s'", key)
             return StopReceipt(key=key, stopped=False, detail=str(exc))

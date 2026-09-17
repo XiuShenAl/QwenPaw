@@ -6,7 +6,7 @@ import logging
 import threading
 import warnings
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Type
+from typing import Any, Callable, Collection, Dict, List, Optional, Type
 
 logger = logging.getLogger(__name__)
 
@@ -197,14 +197,18 @@ def _bridge_to_runtime(
             if tool_name in tr:
                 existing = tr.get(tool_name) if hasattr(tr, "get") else None
                 owner = getattr(existing, "owner_plugin_id", "") or ""
-                if owner and owner != plugin_id:
+                if owner != plugin_id:
                     from ..runtime.occupancy import occupancy_conflict
 
                     raise ValueError(
-                        occupancy_conflict("tool", tool_name, owner),
+                        occupancy_conflict(
+                            "tool",
+                            tool_name,
+                            owner or "unknown",
+                        ),
                     )
                 if hasattr(tr, "unregister"):
-                    tr.unregister(tool_name)
+                    tr.unregister(tool_name, expected=existing)
             tr.register(desc)
             logger.info(
                 "Injected '%s' into workspace '%s' ToolRegistry",
@@ -236,6 +240,7 @@ def _unbridge_from_runtime(
     tool_name: str,
     tool_func: Callable | None,
     registry,
+    expected: Any = None,
 ) -> None:
     """Undo :func:`_bridge_to_runtime` for failed expose or plugin unload."""
     if registry is None:
@@ -254,8 +259,8 @@ def _unbridge_from_runtime(
             continue
         try:
             if hasattr(tr, "unregister"):
-                tr.unregister(tool_name)
-            elif tool_name in tr:
+                tr.unregister(tool_name, expected=expected)
+            elif expected is None and tool_name in tr:
                 # Fallback for registries without unregister().
                 # pylint: disable-next=protected-access
                 tr._descs.pop(tool_name, None)
@@ -328,8 +333,22 @@ def _write_tool_config(
     )
 
 
-def _remove_tool_config(tool_name: str) -> None:
-    """Remove one BuiltinToolConfig entry from every agent on uninstall."""
+def _remove_tool_config(
+    tool_name: str,
+    plugin_id: str = "",
+    *,
+    owned_names: Collection[str] | None = None,
+) -> None:
+    """Remove a BuiltinToolConfig this plugin successfully wrote.
+
+    *owned_names* is the caller-authorized snapshot taken before
+    ``delete_inventory``. This function must not re-read the live
+    provision list: after uninstall teardown the inventory is gone.
+    """
+    if not plugin_id or owned_names is None:
+        return
+    if tool_name not in owned_names:
+        return
     try:
         from ..config.utils import load_config
         from ..config.config import load_agent_config, save_agent_config
@@ -516,7 +535,10 @@ class PluginApi:  # pylint: disable=too-many-public-methods
 
         return _teardown
 
-    def _drop_control_command(self, command_name: str):
+    def _drop_control_command(self, handler: Any):
+        command_name = getattr(handler, "command_name", "") or ""
+        prefix = "/" + str(command_name).lstrip("/")
+
         def _teardown():
             if self._registry is not None:
                 self._registry.drop_control_command(
@@ -529,8 +551,15 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 )
                 from ..app.channels.command_registry import CommandRegistry
 
-                unregister_handler(command_name)
-                CommandRegistry().unregister_command(f"/{command_name}")
+                unregister_handler(
+                    command_name,
+                    expected=handler,
+                    owner=self.plugin_id,
+                )
+                CommandRegistry().unregister_command(
+                    prefix,
+                    owner=self.plugin_id,
+                )
             except Exception:  # noqa: BLE001
                 logger.debug(
                     "Live control command '%s' already gone",
@@ -726,7 +755,15 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         )
         return branch
 
-    def provision(self, desc: str, setup, teardown) -> None:
+    def provision(
+        self,
+        desc: str,
+        setup,
+        teardown,
+        *,
+        kind: str = "provision",
+        teardown_ref: str | None = None,
+    ) -> None:
         """Escape hatch: leave existing files, delete only on uninstall."""
         from .provision import load_inventory, record_escape_provision
 
@@ -738,10 +775,15 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             row.get("desc") == desc for row in existing.get("provisions") or []
         )
         if not already:
-            record_escape_provision(self.plugin_id, desc)
+            record_escape_provision(
+                self.plugin_id,
+                desc,
+                kind=kind if kind != "provision" else "escape",
+                teardown_ref=teardown_ref,
+            )
             if setup is not None:
                 setup()
-        self._note_install(desc, teardown, kind="provision")
+        self._note_install(desc, teardown, kind=kind)
 
     def effect(
         self,
@@ -1190,18 +1232,21 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             priority_level: Command priority (default: 10 = high)
         """
         if self._registry:
-            self._registry.register_control_command(
-                plugin_id=self.plugin_id,
-                handler=handler,
-                priority_level=priority_level,
-            )
+            try:
+                self._registry.register_control_command(
+                    plugin_id=self.plugin_id,
+                    handler=handler,
+                    priority_level=priority_level,
+                )
+            except ValueError as exc:
+                self._projection_failed("control_command", exc)
             logger.info(
                 f"Plugin '{self.plugin_id}' registered control command "
                 f"'{handler.command_name}' (priority={priority_level})",
             )
             self._note_runtime(
                 f"control_command:{handler.command_name}",
-                self._drop_control_command(handler.command_name),
+                self._drop_control_command(handler),
             )
 
     def register_middleware(
@@ -1431,7 +1476,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         """
         self._guard_register()
 
-        def _startup_register():
+        async def _startup_register():
             # Ownership + governance first: fail closed before exposing
             # the tool in toolkit/UI/runtime (avoids #6114-style
             # visible-but-denied, and cross-plugin name collisions).
@@ -1452,15 +1497,11 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             except Exception as exc:
                 if claimed:
                     _release_tool_registration(tool_name, self.plugin_id)
-                logger.error(
-                    f"Failed to register tool '{tool_name}' into "
-                    f"governance (not exposing tool): {exc}",
-                    exc_info=True,
-                )
-                return
+                self._projection_failed("tool", exc)
 
             try:
                 from ..agents import tools as tools_module
+                from ..utils.io_utils import run_sync_io
 
                 setattr(tools_module, tool_name, tool_func)
                 if tool_name not in tools_module.__all__:
@@ -1479,7 +1520,8 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                     self._registry,
                     self.plugin_id,
                 )
-                _write_tool_config(
+                await run_sync_io(
+                    _write_tool_config,
                     tool_name,
                     enabled,
                     description,
@@ -1493,11 +1535,13 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                         delattr(tools_module, tool_name)
                     if appended_to_all and tool_name in tools_module.__all__:
                         tools_module.__all__.remove(tool_name)
+                failed_desc = getattr(tool_func, "_tool_descriptor", None)
                 try:
                     _unbridge_from_runtime(
                         tool_name,
                         tool_func,
                         self._registry,
+                        expected=failed_desc,
                     )
                 except Exception:  # noqa: BLE001
                     logger.debug(
@@ -1511,7 +1555,28 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                     f"governance sync (rolled back): {exc}",
                     exc_info=True,
                 )
-                raise
+                self._projection_failed("tool", exc)
+
+            desc = getattr(tool_func, "_tool_descriptor", None)
+            self._note_runtime(
+                f"tool:{tool_name}",
+                teardown=lambda: _unbridge_from_runtime(
+                    tool_name,
+                    tool_func,
+                    self._registry,
+                    expected=desc,
+                ),
+            )
+            if self._instance is not None:
+                self._note_install(
+                    f"tool_config:{tool_name}",
+                    teardown=lambda: _remove_tool_config(
+                        tool_name,
+                        plugin_id=self.plugin_id,
+                        owned_names=(tool_name,),
+                    ),
+                    kind="official",
+                )
 
         self.register_startup_hook(
             hook_name=(f"register_tool_{self.plugin_id}_{tool_name}"),
@@ -1522,20 +1587,6 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             f"Plugin '{self.plugin_id}' scheduled tool "
             f"'{tool_name}' for registration on startup",
         )
-        self._note_runtime(
-            f"tool:{tool_name}",
-            teardown=lambda: _unbridge_from_runtime(
-                tool_name,
-                tool_func,
-                self._registry,
-            ),
-        )
-        if self._instance is not None:
-            self._note_install(
-                f"tool_config:{tool_name}",
-                teardown=lambda: _remove_tool_config(tool_name),
-                kind="official",
-            )
 
     def register_slash_command(
         self,
@@ -1931,8 +1982,11 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         resolved_channels = channels or ["all"]
         source_tag = f"plugin:{self.plugin_id}"
 
-        def _install_skills():
-            self._do_install_skills(
+        async def _install_skills():
+            from ..utils.io_utils import run_sync_io
+
+            await run_sync_io(
+                self._do_install_skills,
                 skills_dir,
                 source_tag,
                 enabled_by_default,
@@ -1943,9 +1997,12 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             """Remove skills sourced from this plugin on uninstall."""
             self._do_uninstall_skills(self.plugin_id, source_tag)
 
-        def _on_workspace_created(workspace_info: dict):
+        async def _on_workspace_created(workspace_info: dict):
             """Install plugin skills into a newly created workspace."""
-            self._install_skills_into_workspace(
+            from ..utils.io_utils import run_sync_io
+
+            await run_sync_io(
+                self._install_skills_into_workspace,
                 workspace_info,
                 skills_dir,
                 source_tag,

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
+import importlib.util
 import json
 import logging
 import shutil
@@ -91,12 +93,67 @@ def record_tool_factory(
     save_inventory(plugin_id, data)
 
 
-def record_escape_provision(plugin_id: str, desc: str) -> None:
+def record_escape_provision(
+    plugin_id: str,
+    desc: str,
+    *,
+    kind: str = "escape",
+    teardown_ref: str | None = None,
+) -> None:
     data = load_inventory(plugin_id)
     rows = data["provisions"]
     if not any(row.get("desc") == desc for row in rows):
-        rows.append({"desc": desc, "kind": "escape"})
+        row: dict[str, Any] = {"desc": desc, "kind": kind or "escape"}
+        if teardown_ref:
+            row["teardown_ref"] = teardown_ref
+        rows.append(row)
     save_inventory(plugin_id, data)
+
+
+def replay_persisted_provisions(
+    plugin_id: str,
+    source_path: Path | None,
+) -> None:
+    """Rebuild official install-layer teardowns after the process restarts."""
+    data = load_inventory(plugin_id)
+    for row in data.get("provisions") or []:
+        if not isinstance(row, dict):
+            continue
+        ref = str(row.get("teardown_ref") or "").strip()
+        kind = str(row.get("kind") or "")
+        if kind == "cloudpaw_agents" and not ref:
+            ref = "agents_setup:uninstall_agents"
+        if not ref:
+            continue
+        _call_teardown_ref(source_path, ref)
+
+
+def _call_teardown_ref(source_path: Path | None, ref: str) -> None:
+    module_name, _, func_name = ref.partition(":")
+    if not module_name or not func_name:
+        return
+    module = None
+    if source_path is not None:
+        module_file = Path(source_path) / f"{module_name.replace('.', '/')}.py"
+        if module_file.is_file():
+            spec = importlib.util.spec_from_file_location(
+                f"plugin_teardown_{module_file.stem}",
+                module_file,
+            )
+            if spec is not None and spec.loader is not None:
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+    if module is None:
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            logger.warning("Cannot import teardown %s", ref)
+            return
+    callback = getattr(module, func_name, None)
+    if not callable(callback):
+        logger.warning("Teardown %s is not callable", ref)
+        return
+    callback()
 
 
 def _iter_files(root: Path) -> list[Path]:
@@ -439,7 +496,10 @@ def commit_migrations(plugin_id: str) -> None:
         backup = parse_optional_absolute(marker.get("backup_path"))
         if backup is not None:
             backups.append(backup)
-        loc["migrating"] = None
+        loc["migrating"] = {
+            **marker,
+            "status": "committed",
+        }
         changed = True
     for tool_name, row in list((data.get("tools") or {}).items()):
         pending = (row or {}).get("pending_factory")
@@ -451,8 +511,15 @@ def commit_migrations(plugin_id: str) -> None:
         changed = True
     if changed:
         save_inventory(plugin_id, data)
+    for loc in (data.get("locations") or {}).values():
+        marker = (loc or {}).get("migrating") or {}
+        if marker.get("status") != "committed":
+            continue
+        loc["migrating"] = None
     for backup in backups:
         _remove_path(backup)
+    if changed:
+        save_inventory(plugin_id, data)
 
 
 def snapshot_created_dests(plugin_id: str) -> list[str]:

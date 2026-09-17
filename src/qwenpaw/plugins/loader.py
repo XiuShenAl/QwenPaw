@@ -476,7 +476,9 @@ class PluginLoader:
             len(decision.missing),
             ", ".join(decision.missing),
         )
-        await asyncio.to_thread(
+        from ..utils.io_utils import run_sync_io
+
+        await run_sync_io(
             self._install_requirements_locked,
             requirements_file,
             plugin_id,
@@ -1424,7 +1426,7 @@ class PluginLoader:
                 ok=True,
                 generation=old_generation + 1,
             )
-        except Exception as exc:  # noqa: BLE001
+        except BaseException as exc:
             occupied = "restart required" in str(exc)
             if not occupied or old_path.exists():
                 await self._rollback_reload(
@@ -1438,6 +1440,8 @@ class PluginLoader:
                     saved_plugin_def=old_plugin_def,
                     generation=old_generation,
                 )
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             return ReloadReport(
                 plugin_id=plugin_id,
                 ok=False,
@@ -1835,7 +1839,9 @@ class PluginLoader:
                             purpose="clear plugin install staging",
                         )
 
-            await asyncio.to_thread(_copy_tree)
+            from ..utils.io_utils import run_sync_io
+
+            await run_sync_io(_copy_tree)
             logger.info(
                 f"Copied plugin '{plugin_id}' to {target_dir}",
             )
@@ -2234,6 +2240,11 @@ class PluginLoader:
                         tool_name,
                         tool_func,
                         self.registry,
+                        expected=getattr(
+                            tool_func,
+                            "_tool_descriptor",
+                            None,
+                        ),
                     )
                 except Exception as unbridge_exc:  # noqa: BLE001
                     logger.debug(
@@ -2381,6 +2392,15 @@ class PluginLoader:
                 )
 
         tool_names = recorded_tool_names(plugin_id)
+        from ..utils.io_utils import run_sync_io
+        from .provision import replay_persisted_provisions
+
+        await run_sync_io(
+            replay_persisted_provisions,
+            plugin_id,
+            source_path,
+        )
+        await self._drop_uninstalled_settings(plugin_id, tool_names)
         teardown_created_locations(plugin_id)
         if candidate:
             teardown_paths(declared)
@@ -2394,13 +2414,9 @@ class PluginLoader:
             report.errors.append(f"{prefix}: {dest}")
             report.clean = False
 
-        await self._drop_uninstalled_settings(plugin_id, tool_names)
-
         if source_path is not None and await asyncio.to_thread(
             source_path.exists,
         ):
-            from ..utils.io_utils import run_sync_io
-
             await run_sync_io(
                 safe_remove,
                 source_path,
@@ -2421,18 +2437,17 @@ class PluginLoader:
         """Clear persisted plugin settings and recorded tool configs."""
         from ..utils.io_utils import run_sync_io
         from .api import _remove_tool_config
-        from .provision import recorded_tool_names
         from .settings import drop_plugin_settings
 
-        names = (
-            list(tool_names)
-            if tool_names is not None
-            else recorded_tool_names(plugin_id)
-        )
+        names = list(tool_names) if tool_names is not None else []
 
         def _apply() -> None:
             for name in names:
-                _remove_tool_config(name)
+                _remove_tool_config(
+                    name,
+                    plugin_id=plugin_id,
+                    owned_names=names,
+                )
             drop_plugin_settings(plugin_id)
 
         await run_sync_io(_apply)
@@ -2504,23 +2519,7 @@ class PluginLoader:
                 what="register()",
                 plugin_id=plugin_id,
             )
-        except Exception:
-            from ..utils.io_utils import run_sync_io
-            from .provision import recover_migrating_inventory
-
-            await run_sync_io(recover_migrating_inventory, plugin_id)
-            raise
-
-    async def activate_plugin_unlocked(self, plugin_id: str) -> None:
-        """Project, start, then commit. Raises on failure."""
-        instance = self.lifecycle.get_instance(plugin_id)
-        if instance is not None and instance.activated:
-            return
-        try:
-            await self._project_external_runtime(plugin_id)
-            await self.run_plugin_startup_hooks(plugin_id)
-            await self._commit_plugin_transaction(plugin_id)
-        except Exception:
+        except BaseException:
             from ..utils.io_utils import run_sync_io
             from .provision import (
                 recover_migrating_inventory,
@@ -2534,6 +2533,41 @@ class PluginLoader:
                     instance.created_dests(),
                 )
             await run_sync_io(recover_migrating_inventory, plugin_id)
+            raise
+
+    async def activate_plugin_unlocked(self, plugin_id: str) -> None:
+        """Project, start, then commit. Raises on failure."""
+        instance = self.lifecycle.get_instance(plugin_id)
+        if instance is not None and instance.activated:
+            return
+        try:
+            await self._project_external_runtime(plugin_id)
+            await self.run_plugin_startup_hooks(plugin_id)
+            await self._commit_plugin_transaction(plugin_id)
+        except BaseException as exc:
+            from ..utils.io_utils import run_sync_io
+            from .provision import (
+                recover_migrating_inventory,
+                undo_created_locations,
+            )
+
+            if instance is not None:
+                await run_sync_io(
+                    undo_created_locations,
+                    plugin_id,
+                    instance.created_dests(),
+                )
+            await run_sync_io(recover_migrating_inventory, plugin_id)
+            try:
+                await self._fail_after_startup(
+                    plugin_id,
+                    str(exc) or type(exc).__name__,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Activate rollback failed for plugin '%s'",
+                    plugin_id,
+                )
             raise
         if instance is not None:
             instance.activated = True
@@ -2595,11 +2629,17 @@ class PluginLoader:
 
         command_registry = CommandRegistry()
         for cmd_reg in commands:
-            register_command(cmd_reg.handler)
-            command_registry.register_command(
-                f"/{cmd_reg.handler.command_name}",
-                priority_level=cmd_reg.priority_level,
-            )
+            try:
+                register_command(cmd_reg.handler, owner=plugin_id)
+                command_registry.register_command(
+                    f"/{str(cmd_reg.handler.command_name).lstrip('/')}",
+                    priority_level=cmd_reg.priority_level,
+                    owner=plugin_id,
+                )
+            except ValueError as exc:
+                from .workspace_projector import ProjectionError
+
+                raise ProjectionError(str(exc)) from exc
 
     async def run_plugin_startup_hooks(self, plugin_id: str) -> None:
         """Run startup hooks that currently belong to *plugin_id*.

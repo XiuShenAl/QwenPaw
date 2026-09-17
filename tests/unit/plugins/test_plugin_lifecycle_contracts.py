@@ -6,21 +6,25 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from qwenpaw.app.channels.manager import ChannelManager
 from qwenpaw.app.routers.plugins import (
     UpdatePluginConfigRequest,
+    uninstall_plugin_source,
     update_plugin_config,
 )
 from qwenpaw.plugins.architecture import PluginManifest
 from qwenpaw.plugins.custody import close_connection
-from qwenpaw.plugins.lifecycle import PluginInstance, PluginState
+from qwenpaw.plugins.lifecycle import PluginInstance, PluginState, UnloadMode
 from qwenpaw.plugins.dependency_gate import DependencyGate
 from qwenpaw.plugins.loader import PluginLoader
 from qwenpaw.plugins.provision import (
@@ -42,6 +46,7 @@ from qwenpaw.plugins.updates import (
 )
 from qwenpaw.plugins.workspace_projector import WorkspaceProjector
 from qwenpaw.runtime.slash_command_registry import SlashCommandRegistry
+from qwenpaw.runtime.tool_registry import ToolRegistry
 
 
 @pytest.fixture()
@@ -92,7 +97,104 @@ def _slash_workspace():
         agent_id="talk",
         plugins=SimpleNamespace(
             slash_command_registry=SlashCommandRegistry(),
+            tool_registry=ToolRegistry(),
         ),
+    )
+
+
+def _isolate_working_dir(tmp_path: Path, monkeypatch) -> Path:
+    work = tmp_path / "work"
+    work.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", work)
+    monkeypatch.setattr("qwenpaw.config.utils.WORKING_DIR", work)
+    from qwenpaw.config import utils as config_utils
+
+    config_utils._config_cache = None
+    config_utils._config_mtime = None
+    config_utils._agent_config_cache.clear()
+    return work
+
+
+def _seed_talk_agent(tmp_path: Path, monkeypatch) -> Path:
+    from qwenpaw.config.config import AgentProfileRef, AgentsConfig, Config
+    from qwenpaw.config.utils import save_config
+
+    work = _isolate_working_dir(tmp_path, monkeypatch)
+    workspace = work / "workspaces" / "talk"
+    workspace.mkdir(parents=True, exist_ok=True)
+    save_config(
+        Config(
+            agents=AgentsConfig(
+                active_agent="talk",
+                agent_order=["talk"],
+                profiles={
+                    "talk": AgentProfileRef(
+                        id="talk",
+                        workspace_dir=str(workspace),
+                    ),
+                },
+            ),
+        ),
+        work / "config.json",
+    )
+    monkeypatch.setattr(
+        "qwenpaw.app.agent_context.get_current_agent_id",
+        lambda: "talk",
+    )
+    return workspace
+
+
+def _agent_tool_names() -> set[str]:
+    from qwenpaw.config.config import load_agent_config
+
+    return set(load_agent_config("talk").tools.builtin_tools)
+
+
+def _patch_agent_tools(monkeypatch):
+    boxes = {
+        "talk": SimpleNamespace(tools=SimpleNamespace(builtin_tools={})),
+    }
+
+    def _load(agent_id):
+        return boxes[agent_id]
+
+    def _save(agent_id, cfg):
+        boxes[agent_id] = cfg
+
+    monkeypatch.setattr(
+        "qwenpaw.app.agent_context.get_current_agent_id",
+        lambda: "talk",
+    )
+    monkeypatch.setattr(
+        "qwenpaw.config.config.load_agent_config",
+        _load,
+    )
+    monkeypatch.setattr(
+        "qwenpaw.config.config.save_agent_config",
+        _save,
+    )
+    return boxes
+
+
+def _control_body(name: str) -> str:
+    return (
+        "from qwenpaw.runtime.commands.control.base import "
+        "BaseControlCommandHandler\n"
+        "        class _H(BaseControlCommandHandler):\n"
+        f"            command_name = '{name}'\n"
+        "            async def handle(self, context):\n"
+        "                return 'ok'\n"
+        "        api.register_control_command(_H())"
+    )
+
+
+def _tool_body(name: str) -> str:
+    return (
+        f"def _{name}():\n"
+        "            return 'ok'\n"
+        "        api.register_tool(\n"
+        f"            '{name}', _{name}, description='shared',\n"
+        "        )"
     )
 
 
@@ -434,7 +536,7 @@ async def test_unquiescent_reload_does_not_reregister(
     )
 
     async def _busy_unload(*_args, **_kwargs):
-        from qwenpaw.plugins.lifecycle import UnloadMode, UnloadReport
+        from qwenpaw.plugins.lifecycle import UnloadReport
 
         return UnloadReport(
             plugin_id="busy",
@@ -731,8 +833,6 @@ async def test_occupied_swap_keeps_marker_and_needs_restart(
     fresh_registry,
     monkeypatch,
 ):
-    import shutil
-
     monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
     loader, _workspace, installed = await _load(
         tmp_path,
@@ -765,3 +865,541 @@ async def test_occupied_swap_keeps_marker_and_needs_restart(
     assert report.needs_restart
     assert marker_path("busyfs").is_file()
     del installed
+
+
+def _clear_tool_owners():
+    from qwenpaw.plugins.api import (
+        _TOOL_PLUGIN_OWNERS,
+        _TOOL_PLUGIN_OWNERS_LOCK,
+    )
+
+    with _TOOL_PLUGIN_OWNERS_LOCK:
+        _TOOL_PLUGIN_OWNERS.clear()
+
+
+@pytest.mark.asyncio
+async def test_tool_collision_does_not_revoke_other_owner(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    boxes = _patch_agent_tools(monkeypatch)
+    _clear_tool_owners()
+    loader, workspace, _installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "owner-a",
+        _tool_body("shared_tool"),
+    )
+    assert "shared_tool" in workspace.plugins.tool_registry.names()
+    assert "shared_tool" in boxes["talk"].tools.builtin_tools
+    from qwenpaw.plugins.api import _TOOL_PLUGIN_OWNERS
+
+    assert _TOOL_PLUGIN_OWNERS.get("shared_tool") == "owner-a"
+    _write_plugin(
+        tmp_path / "plugins" / "owner-b",
+        "owner-b",
+        body=_tool_body("shared_tool"),
+    )
+    manifest_b = PluginManifest.from_dict(
+        json.loads(
+            (tmp_path / "plugins" / "owner-b" / "plugin.json").read_text(
+                encoding="utf-8",
+            ),
+        ),
+    )
+    await loader.load_plugin(manifest_b, tmp_path / "plugins" / "owner-b")
+    with pytest.raises(Exception, match="Projection|already|owned"):
+        await loader.activate_plugin_unlocked("owner-b")
+    record_b = loader.get_loaded_plugin("owner-b")
+    assert record_b is None or record_b.status != "active"
+    await loader.unload_plugin(
+        "owner-b",
+        delete_files=True,
+        mode=UnloadMode.UNINSTALL,
+    )
+    assert "shared_tool" in workspace.plugins.tool_registry.names()
+    assert "shared_tool" in boxes["talk"].tools.builtin_tools
+    assert _TOOL_PLUGIN_OWNERS.get("shared_tool") == "owner-a"
+    _clear_tool_owners()
+
+
+@pytest.mark.asyncio
+async def test_control_command_collision_does_not_revoke_other_owner(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    from qwenpaw.runtime.commands.control import (
+        command_owner,
+        unregister_command,
+    )
+
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    loader, _workspace, _installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "cmd-a",
+        _control_body("sharedcmd"),
+    )
+    assert command_owner("sharedcmd") == "cmd-a"
+    _write_plugin(
+        tmp_path / "plugins" / "cmd-b",
+        "cmd-b",
+        body=_control_body("sharedcmd"),
+    )
+    manifest_b = PluginManifest.from_dict(
+        json.loads(
+            (tmp_path / "plugins" / "cmd-b" / "plugin.json").read_text(
+                encoding="utf-8",
+            ),
+        ),
+    )
+    record_b = await loader.load_plugin(
+        manifest_b,
+        tmp_path / "plugins" / "cmd-b",
+    )
+    assert record_b.status != "active"
+    if loader.get_loaded_plugin("cmd-b") is not None:
+        await loader.unload_plugin("cmd-b", delete_files=False)
+    assert command_owner("sharedcmd") == "cmd-a"
+    await loader.unload_plugin("cmd-a", delete_files=False)
+    unregister_command("sharedcmd", owner="cmd-a")
+
+
+@pytest.mark.asyncio
+async def test_stop_one_propagates_cancelled_error():
+    class _Ch:
+        channel = "x"
+
+        def set_enqueue(self, _enqueue):
+            return None
+
+        async def stop(self):
+            raise asyncio.CancelledError()
+
+    manager = ChannelManager([])
+    manager.channels = [_Ch()]
+    with pytest.raises(asyncio.CancelledError):
+        await manager.stop_one("x")
+    assert manager.channels
+
+
+@pytest.mark.asyncio
+async def test_reload_cancel_after_unload_restores_old(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    loader, workspace, installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "svc-cancel",
+        "api.register_slash_command('ping', lambda c, a: None)",
+    )
+    incoming = _write_plugin(
+        tmp_path / "incoming-svc-cancel",
+        "svc-cancel",
+        body="api.register_slash_command('pong', lambda c, a: None)",
+    )
+
+    async def _cancel_swap(*_args, **_kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(loader, "_swap_plugin_dir", _cancel_swap)
+    with pytest.raises(asyncio.CancelledError):
+        await loader.reload_plugin_unlocked(
+            "svc-cancel",
+            new_source=incoming,
+            allow_install=False,
+            owns_dependency_env=True,
+        )
+    assert "ping" in workspace.plugins.slash_command_registry.names()
+    record = loader.get_loaded_plugin("svc-cancel")
+    assert record is not None
+    assert record.status == "active"
+    assert (installed / "main.py").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_reload_cancel_after_swap_restores_old(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    loader, workspace, installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "svc-swap-cancel",
+        "api.register_slash_command('ping', lambda c, a: None)",
+    )
+    incoming = _write_plugin(
+        tmp_path / "incoming-svc-swap-cancel",
+        "svc-swap-cancel",
+        body="api.register_slash_command('pong', lambda c, a: None)",
+    )
+    calls = {"n": 0}
+    real_load = loader._load_plugin_unlocked
+
+    async def _load_once(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise asyncio.CancelledError()
+        return await real_load(*args, **kwargs)
+
+    monkeypatch.setattr(loader, "_load_plugin_unlocked", _load_once)
+    with pytest.raises(asyncio.CancelledError):
+        await loader.reload_plugin_unlocked(
+            "svc-swap-cancel",
+            new_source=incoming,
+            allow_install=False,
+            owns_dependency_env=True,
+        )
+    assert "ping" in workspace.plugins.slash_command_registry.names()
+    record = loader.get_loaded_plugin("svc-swap-cancel")
+    assert record is not None
+    assert record.status == "active"
+    assert "pong" not in (installed / "main.py").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_install_cancel_waits_for_copy_before_next_load(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    source = _write_plugin(tmp_path / "src-copier", "copier", body="pass")
+    install_dir = tmp_path / "plugins"
+    install_dir.mkdir(parents=True, exist_ok=True)
+    loader = PluginLoader(plugin_dirs=[install_dir])
+    loader.registry = fresh_registry
+    finished = {"done": False}
+    real_copy = shutil.copytree
+
+    def _slow_copy(src, dst, *args, **kwargs):
+        time.sleep(0.12)
+        result = real_copy(src, dst, *args, **kwargs)
+        finished["done"] = True
+        return result
+
+    monkeypatch.setattr("qwenpaw.plugins.loader.shutil.copytree", _slow_copy)
+    task = asyncio.create_task(
+        loader.load_plugin_from_path(source, install_dir=install_dir),
+    )
+    await asyncio.sleep(0.02)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished["done"]
+    record = await loader.load_plugin_from_path(
+        source,
+        install_dir=install_dir,
+        force=True,
+    )
+    assert record.manifest.id == "copier"
+
+
+@pytest.mark.asyncio
+async def test_provision_replay_without_instance(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    flag = tmp_path / "cleared.txt"
+    plugin_dir = tmp_path / "plugins" / "cloud-lite"
+    _write_plugin(
+        plugin_dir,
+        "cloud-lite",
+        body=(
+            "api.provision(\n"
+            "            'cloudpaw_agents',\n"
+            "            setup=None,\n"
+            "            teardown=None,\n"
+            "            kind='cloudpaw_agents',\n"
+            "            teardown_ref='agents_setup:uninstall_agents',\n"
+            "        )"
+        ),
+    )
+    (plugin_dir / "agents_setup.py").write_text(
+        "from pathlib import Path\n"
+        f"FLAG = Path({str(flag)!r})\n"
+        "def uninstall_agents():\n"
+        "    FLAG.write_text('cleared', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    loader, _workspace, _installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "cloud-lite",
+        (
+            "api.provision(\n"
+            "            'cloudpaw_agents',\n"
+            "            setup=None,\n"
+            "            teardown=None,\n"
+            "            kind='cloudpaw_agents',\n"
+            "            teardown_ref='agents_setup:uninstall_agents',\n"
+            "        )"
+        ),
+    )
+    await loader.unload_plugin(
+        "cloud-lite",
+        delete_files=False,
+        mode=UnloadMode.UNLOAD,
+    )
+    assert loader.get_loaded_plugin("cloud-lite") is None
+    assert plugin_dir.is_dir()
+    report = await loader.unload_plugin(
+        "cloud-lite",
+        delete_files=True,
+        mode=UnloadMode.UNINSTALL,
+    )
+    assert report.quiescent
+    assert flag.read_text(encoding="utf-8") == "cleared"
+
+
+@pytest.mark.asyncio
+async def test_pawapp_disable_then_delete_uses_lifecycle(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    from qwenpaw.app.routers.pawapps import uninstall_pawapp
+
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    monkeypatch.setattr(
+        "qwenpaw.config.utils.get_plugins_dir",
+        lambda: tmp_path / "plugins",
+    )
+    loader, _workspace, installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "paw-app",
+        "pass",
+    )
+    await loader.unload_plugin(
+        "paw-app",
+        delete_files=False,
+        mode=UnloadMode.UNLOAD,
+    )
+    assert loader.get_loaded_plugin("paw-app") is None
+    assert installed.is_dir()
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(plugin_loader=loader)),
+    )
+    result = await uninstall_pawapp("paw-app", request)
+    assert result["id"] == "paw-app"
+    assert not installed.exists()
+
+
+@pytest.mark.asyncio
+async def test_http_uninstall_does_not_delete_tools_from_meta(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    boxes = _patch_agent_tools(monkeypatch)
+    _clear_tool_owners()
+    loader, workspace, _installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "owner-a",
+        _tool_body("shared_tool"),
+    )
+    _write_plugin(tmp_path / "plugins" / "meta-b", "meta-b", body="pass")
+    plugin_json = tmp_path / "plugins" / "meta-b" / "plugin.json"
+    data = json.loads(plugin_json.read_text(encoding="utf-8"))
+    data["meta"] = {"tools": [{"name": "shared_tool"}]}
+    plugin_json.write_text(json.dumps(data), encoding="utf-8")
+    manifest_b = PluginManifest.from_dict(data)
+    await loader.load_plugin(manifest_b, tmp_path / "plugins" / "meta-b")
+    await loader.activate_plugin_unlocked("meta-b")
+    removed = []
+    monkeypatch.setattr(
+        "qwenpaw.app.routers.plugins._remove_plugin_tools_from_agents",
+        lambda plugin_id, meta: removed.append((plugin_id, meta)),
+    )
+    app = SimpleNamespace(state=SimpleNamespace(plugin_loader=loader))
+    await uninstall_plugin_source("meta-b", app=app)
+    assert not removed
+    assert "shared_tool" in workspace.plugins.tool_registry.names()
+    assert "shared_tool" in boxes["talk"].tools.builtin_tools
+    _clear_tool_owners()
+
+
+@pytest.mark.asyncio
+async def test_activate_skill_copy_does_not_block_event_loop(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    from qwenpaw.plugins.api import PluginApi
+
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+
+    def _slow(self, *_args, **_kwargs):
+        del self
+        time.sleep(0.12)
+
+    monkeypatch.setattr(PluginApi, "_do_install_skills", _slow)
+    beats: list[float] = []
+
+    async def _heart() -> None:
+        for _ in range(8):
+            beats.append(time.monotonic())
+            await asyncio.sleep(0.01)
+
+    heart = asyncio.create_task(_heart())
+    await _load(
+        tmp_path,
+        fresh_registry,
+        "skiller",
+        "from pathlib import Path\n"
+        "        api.register_skill_provider(Path('.'))",
+    )
+    await heart
+    gaps = [later - earlier for earlier, later in zip(beats, beats[1:])]
+    assert gaps
+    assert min(gaps) < 0.05
+
+
+@pytest.mark.asyncio
+async def test_activate_tool_config_write_does_not_block_event_loop(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    _patch_agent_tools(monkeypatch)
+    _clear_tool_owners()
+
+    def _slow(*_args, **_kwargs):
+        time.sleep(0.12)
+
+    monkeypatch.setattr("qwenpaw.plugins.api._write_tool_config", _slow)
+    beats: list[float] = []
+
+    async def _heart() -> None:
+        for _ in range(8):
+            beats.append(time.monotonic())
+            await asyncio.sleep(0.01)
+
+    heart = asyncio.create_task(_heart())
+    await _load(
+        tmp_path,
+        fresh_registry,
+        "tool-io",
+        _tool_body("io_tool"),
+    )
+    await heart
+    gaps = [later - earlier for earlier, later in zip(beats, beats[1:])]
+    assert gaps
+    assert min(gaps) < 0.05
+    _clear_tool_owners()
+
+
+def test_plugins_get_missing_id_is_404_not_405():
+    from qwenpaw.app.routers.plugins import router as plugins_router
+
+    app = FastAPI()
+    app.include_router(plugins_router, prefix="/api")
+    app.state.plugin_loader = None
+    client = TestClient(app)
+    response = client.get("/api/plugins/nonexistent-plugin-12345")
+    assert response.status_code == 404
+    assert response.status_code != 405
+
+
+@pytest.mark.asyncio
+async def test_disable_then_uninstall_removes_owned_agent_tool(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    _seed_talk_agent(tmp_path, monkeypatch)
+    _clear_tool_owners()
+    loader, _workspace, _installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "keep-a",
+        _tool_body("keep_tool"),
+    )
+    _write_plugin(
+        tmp_path / "plugins" / "solo-b",
+        "solo-b",
+        body=_tool_body("solo_tool"),
+    )
+    manifest_b = PluginManifest.from_dict(
+        json.loads(
+            (tmp_path / "plugins" / "solo-b" / "plugin.json").read_text(
+                encoding="utf-8",
+            ),
+        ),
+    )
+    await loader.load_plugin(manifest_b, tmp_path / "plugins" / "solo-b")
+    await loader.activate_plugin_unlocked("solo-b")
+    assert {"keep_tool", "solo_tool"} <= _agent_tool_names()
+    await loader.unload_plugin(
+        "solo-b",
+        delete_files=False,
+        mode=UnloadMode.UNLOAD,
+    )
+    assert loader.get_loaded_plugin("solo-b") is None
+    assert {"keep_tool", "solo_tool"} <= _agent_tool_names()
+    await loader.unload_plugin(
+        "solo-b",
+        delete_files=True,
+        mode=UnloadMode.UNINSTALL,
+    )
+    names = _agent_tool_names()
+    assert "solo_tool" not in names
+    assert "keep_tool" in names
+    _clear_tool_owners()
+
+
+@pytest.mark.asyncio
+async def test_inventory_only_uninstall_removes_owned_agent_tool(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    from qwenpaw.config.config import BuiltinToolConfig, load_agent_config
+    from qwenpaw.config.config import save_agent_config
+    from qwenpaw.plugins.provision import save_inventory
+
+    _seed_talk_agent(tmp_path, monkeypatch)
+    agent_cfg = load_agent_config("talk")
+    agent_cfg.tools.builtin_tools["solo_tool"] = BuiltinToolConfig(
+        name="solo_tool",
+        description="solo",
+    )
+    agent_cfg.tools.builtin_tools["keep_tool"] = BuiltinToolConfig(
+        name="keep_tool",
+        description="keep",
+    )
+    save_agent_config("talk", agent_cfg)
+    save_inventory(
+        "solo-only",
+        {
+            "plugin_id": "solo-only",
+            "locations": {},
+            "tools": {"solo_tool": {"factory": {"description": "solo"}}},
+            "provisions": [],
+        },
+    )
+    loader = PluginLoader(plugin_dirs=[tmp_path / "plugins"])
+    loader.registry = fresh_registry
+    assert loader.get_loaded_plugin("solo-only") is None
+    await loader.unload_plugin(
+        "solo-only",
+        delete_files=True,
+        mode=UnloadMode.UNINSTALL,
+    )
+    names = _agent_tool_names()
+    assert "solo_tool" not in names
+    assert "keep_tool" in names
