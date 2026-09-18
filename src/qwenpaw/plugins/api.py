@@ -708,17 +708,18 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 from ..runtime.commands.control import (
                     unregister_command as unregister_handler,
                 )
-                from ..app.channels.command_registry import CommandRegistry
+                from .workspace_projector import live_channel_managers
 
                 unregister_handler(
                     command_name,
                     expected=handler,
                     owner=self.plugin_id,
                 )
-                CommandRegistry().unregister_command(
-                    prefix,
-                    owner=self.plugin_id,
-                )
+                for manager in live_channel_managers():
+                    manager.unregister_control_command(
+                        prefix,
+                        owner=self.plugin_id,
+                    )
             except Exception:  # noqa: BLE001
                 logger.debug(
                     "Live control command '%s' already gone",
@@ -832,6 +833,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         """Remember an intent, project it, and record revoke on the ledger."""
         if self._registry is None:
             return
+        self._guard_register()
         projector = self._registry.projector
         projector.intend(kind, name, self.plugin_id, apply, revoke)
 
@@ -1181,6 +1183,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             ...     priority=0,  # Execute first
             ... )
         """
+        self._guard_register()
         if self._registry:
             self._registry.register_startup_hook(
                 plugin_id=self.plugin_id,
@@ -1221,6 +1224,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             ...     priority=100,
             ... )
         """
+        self._guard_register()
         warnings.warn(
             "register_shutdown_hook is deprecated; use hosted teardown "
             "via api.effect or the runtime ledger",
@@ -1278,6 +1282,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             ...     callback=self.on_uninstall,
             ... )
         """
+        self._guard_register()
         warnings.warn(
             "register_uninstall_hook is deprecated; use api.provision "
             "or install-layer teardown",
@@ -1329,6 +1334,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             ...     callback=self.on_workspace_created,
             ... )
         """
+        self._guard_register()
         if self._registry:
             self._registry.register_workspace_created_hook(
                 plugin_id=self.plugin_id,
@@ -1409,6 +1415,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 f"Plugin '{self.plugin_id}' registered control command "
                 f"'{handler.command_name}' (priority={priority_level})",
             )
+            self._project_control_command(handler, priority_level)
             self._note_runtime(
                 f"control_command:{handler.command_name}",
                 self._drop_control_command(handler),
@@ -1990,6 +1997,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             condition: Optional ``(ctx) -> bool`` gate.
             agent_id: Optional agent filter; None = global.
         """
+        self._guard_register()
         if condition is not None:
             original_provider = provider
 
@@ -2060,6 +2068,47 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 exc,
             )
             return None
+
+    def _project_control_command(
+        self,
+        handler: Any,
+        priority_level: int,
+    ) -> None:
+        """Project a control command onto live ChannelManager registries."""
+        command_name = str(getattr(handler, "command_name", "") or "")
+        prefix = "/" + command_name.lstrip("/")
+
+        def apply(workspace):
+            self._guard_register()
+            manager = getattr(workspace, "channel_manager", None)
+            if manager is None:
+                return None
+            try:
+                manager.register_control_command(
+                    prefix,
+                    priority_level=priority_level,
+                    owner=self.plugin_id,
+                )
+            except ValueError as exc:
+                self._projection_failed("control_command", exc)
+            return prefix
+
+        def revoke(workspace, token=None):
+            manager = getattr(workspace, "channel_manager", None)
+            if manager is None:
+                return None
+            return manager.unregister_control_command(
+                token or prefix,
+                owner=self.plugin_id,
+            )
+
+        self._schedule_workspace_intent(
+            "control_command",
+            command_name,
+            apply,
+            revoke,
+            priority=70,
+        )
 
     def _project_channel(self, channel_key: str) -> None:
         """Project a registered channel onto live workspaces."""

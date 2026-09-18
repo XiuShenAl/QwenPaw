@@ -186,6 +186,22 @@ def default_live_workspaces() -> list[Any]:
         return []
 
 
+def live_channel_managers() -> list[Any]:
+    """ChannelManager instances on the current live workspace set."""
+    managers: list[Any] = []
+    seen: set[int] = set()
+    for workspace in default_live_workspaces():
+        manager = getattr(workspace, "channel_manager", None)
+        if manager is None:
+            continue
+        ident = id(manager)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        managers.append(manager)
+    return managers
+
+
 def channel_passes_gates(workspace: Any, key: str) -> bool:
     """Three-gate: available, has a config section, and enabled."""
     available = get_available_channels()

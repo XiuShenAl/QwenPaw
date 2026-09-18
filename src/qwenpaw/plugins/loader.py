@@ -739,31 +739,64 @@ class PluginLoader:
                 plugin_id=plugin_id,
             )
         except BaseException as exc:
-            instance.mark_failed(str(exc))
-            from ..utils.io_utils import run_sync_io
-            from .provision import (
-                recover_migrating_inventory,
-                undo_created_locations,
-                undo_this_txn_escapes,
-            )
+            instance.mark_failed(str(exc) or type(exc).__name__)
+            await self._dispose_then_undo_txn_disk(plugin_id, instance)
+            raise
 
-            await run_sync_io(
-                undo_this_txn_escapes,
-                plugin_id,
-                instance.txn_escapes(),
-            )
-            await run_sync_io(
-                undo_created_locations,
-                plugin_id,
-                instance.created_dests(),
-            )
+    async def _dispose_then_undo_txn_disk(
+        self,
+        plugin_id: str,
+        instance,
+        *,
+        use_teardown: bool = False,
+        undo_disk=None,
+    ) -> None:
+        """Dispose first; only then undo this-txn create/migrate."""
+        if instance is None:
+            return
+        try:
+            if use_teardown:
+                report = await instance.teardown_runtime()
+            else:
+                report = await instance.dispose(UnloadMode.UNLOAD)
+        except BaseException:
+            instance.add_diagnostic("needs_restart")
+            raise
+        if not report.quiescent:
+            instance.add_diagnostic("needs_restart")
+            return
+        try:
+            if undo_disk is not None:
+                maybe = undo_disk()
+                if inspect.isawaitable(maybe):
+                    await maybe
+            else:
+                await self._undo_failed_txn_disk(plugin_id, instance)
             instance.clear_txn_escapes()
             instance.clear_created_dests()
-            report = await instance.dispose(UnloadMode.UNLOAD)
-            await run_sync_io(recover_migrating_inventory, plugin_id)
-            if not report.quiescent:
-                instance.add_diagnostic("needs_restart")
-            raise
+        except Exception as undo_exc:  # noqa: BLE001
+            instance.add_diagnostic(
+                str(undo_exc) or type(undo_exc).__name__,
+            )
+
+    async def _undo_failed_txn_disk(self, plugin_id: str, instance) -> None:
+        """Undo this-txn create/migrate after a quiescent dispose."""
+        from ..utils.io_utils import run_sync_io
+        from .provision import (
+            recover_migrating_inventory,
+            undo_created_locations,
+            undo_this_txn_escapes,
+        )
+
+        dests = instance.created_dests() if instance is not None else []
+        escapes = instance.txn_escapes() if instance is not None else []
+
+        def _undo() -> None:
+            undo_this_txn_escapes(plugin_id, escapes)
+            undo_created_locations(plugin_id, dests)
+            recover_migrating_inventory(plugin_id)
+
+        await run_sync_io(_undo)
 
     def _record_failed_backend(
         self,
@@ -1492,6 +1525,14 @@ class PluginLoader:
                 plugin_id,
                 swapped,
             )
+            live = self.lifecycle.get_instance(plugin_id)
+            if live is not None:
+                for item in live.diagnostics:
+                    if (
+                        item.startswith("post-commit cleanup:")
+                        and item not in cleanup_errors
+                    ):
+                        cleanup_errors.append(item)
         except BaseException as exc:
             occupied = "restart required" in str(exc)
             committed = self._reload_already_committed(
@@ -1568,8 +1609,14 @@ class PluginLoader:
         plugin_id: str,
         swapped: Path | None,
     ) -> list[str]:
-        """Persist committed and drop leftovers. Never rolls back."""
+        """Persist committed and drop leftovers. Never rolls back.
+
+        Prepared provision rows must be finished before the update
+        marker is unlinked. Otherwise boot recovery treats leftover
+        ``migrating=prepared`` as uncommitted and restores old dests.
+        """
         from ..utils.io_utils import run_sync_io
+        from .provision import commit_prepared_migrations
         from .updates import clear_updating_marker, mark_update_committed
 
         errors: list[str] = []
@@ -1577,6 +1624,11 @@ class PluginLoader:
             await run_sync_io(mark_update_committed, plugin_id)
         except Exception as exc:  # noqa: BLE001
             errors.append(f"mark committed failed: {exc}")
+        try:
+            await run_sync_io(commit_prepared_migrations, plugin_id)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"commit prepared migrations failed: {exc}")
+            return errors
         if swapped is not None:
             try:
                 await run_sync_io(_remove_dir, swapped)
@@ -1943,7 +1995,12 @@ class PluginLoader:
         recover_incomplete: bool = False,
     ) -> PluginRecord:
         """Install+load from path; caller must hold lifecycle for id."""
+        # pylint: disable=too-many-statements,too-many-branches
         plugin_id = manifest.id
+        if not self.lifecycle.delegate.owns_commit(plugin_id):
+            raise RuntimeError(
+                f"Plugin '{plugin_id}' commit is not owned by this process",
+            )
 
         if plugin_id in self._loaded_plugins:
             raise ValueError(
@@ -1982,36 +2039,32 @@ class PluginLoader:
         # Copy files when source is not already the target (off the loop).
         # Identity, not string equality: a case-alias of the same
         # directory must not be deleted then copied onto itself.
+        # An existing unique install uses the same swap as reload:
+        # never rmtree the only copy, then copytree.
+        swapped = None
         if not same_location(source_path, target_dir):
+            from ..utils.io_utils import run_sync_io
 
-            def _copy_tree() -> None:
-                if target_dir.exists():
-                    marker_path = target_dir / _PAWPORT_MARKER
-                    try:
-                        marker = json.loads(marker_path.read_text())
-                    except (OSError, ValueError, TypeError):
-                        marker = {}
-                    if (
-                        recover_incomplete
-                        and pawport_owner is not None
-                        and marker.get("state") == "prepared"
-                        and _marker_matches(marker, pawport_owner)
-                    ):
-                        safe_remove(
-                            target_dir,
-                            purpose="recover incomplete pawport plugin",
-                        )
-                    if not replace_files:
-                        if target_dir.exists():
-                            raise ValueError(
-                                f"Plugin installation target already exists: "
-                                f"{target_dir}",
-                            )
-                    elif target_dir.exists():
-                        safe_remove(
-                            target_dir,
-                            purpose="replace plugin install dir",
-                        )
+            def _recover_incomplete() -> None:
+                if not target_dir.exists():
+                    return
+                marker_file = target_dir / _PAWPORT_MARKER
+                try:
+                    marker = json.loads(marker_file.read_text())
+                except (OSError, ValueError, TypeError):
+                    marker = {}
+                if (
+                    recover_incomplete
+                    and pawport_owner is not None
+                    and marker.get("state") == "prepared"
+                    and _marker_matches(marker, pawport_owner)
+                ):
+                    safe_remove(
+                        target_dir,
+                        purpose="recover incomplete pawport plugin",
+                    )
+
+            def _first_install() -> None:
                 target_dir.parent.mkdir(parents=True, exist_ok=True)
                 stage_root = Path(
                     tempfile.mkdtemp(
@@ -2038,34 +2091,91 @@ class PluginLoader:
                             purpose="clear plugin install staging",
                         )
 
-            from ..utils.io_utils import run_sync_io
+            def _write_pawport() -> None:
+                owner = pawport_owner
+                if owner is None:
+                    return
+                (target_dir / _PAWPORT_MARKER).write_text(
+                    json.dumps(
+                        {**owner, "state": "prepared"},
+                        sort_keys=True,
+                    ),
+                    encoding="utf-8",
+                )
 
-            await run_sync_io(_copy_tree)
+            await run_sync_io(_recover_incomplete)
+            target_exists = await asyncio.to_thread(target_dir.exists)
+            if target_exists and not replace_files:
+                raise ValueError(
+                    f"Plugin installation target already exists: "
+                    f"{target_dir}",
+                )
+            if target_exists and replace_files:
+                swapped = await self._swap_plugin_dir(
+                    plugin_id,
+                    target_dir,
+                    source_path,
+                )
+                if pawport_owner is not None:
+                    await run_sync_io(_write_pawport)
+            else:
+                await run_sync_io(_first_install)
             logger.info(
                 f"Copied plugin '{plugin_id}' to {target_dir}",
             )
 
-        # Re-read manifest from the installed location so that
-        # source_path in the record points to the correct directory
-        _installed_path, installed_manifest = await asyncio.to_thread(
-            self._read_source_manifest,
-            target_dir,
+        staging_hint = target_dir.with_name(
+            target_dir.name + f".{plugin_id}.staging",
         )
-        del _installed_path
-        record = await self.load_plugin(
-            installed_manifest,
-            target_dir,
-            config,
-            allow_install=True,
-        )
-        if record.status == "failed":
-            reason = (
-                record.diagnostics[0]
-                if record.diagnostics
-                else f"Plugin '{plugin_id}' failed to load"
+        try:
+            # Re-read manifest from the installed location so that
+            # source_path in the record points to the correct directory
+            _installed_path, installed_manifest = await asyncio.to_thread(
+                self._read_source_manifest,
+                target_dir,
             )
-            raise RuntimeError(reason)
-        return record
+            del _installed_path
+            record = await self.load_plugin(
+                installed_manifest,
+                target_dir,
+                config,
+                allow_install=True,
+            )
+            if record.status == "failed":
+                reason = (
+                    record.diagnostics[0]
+                    if record.diagnostics
+                    else f"Plugin '{plugin_id}' failed to load"
+                )
+                raise RuntimeError(reason)
+            if swapped is not None:
+                await self._finish_committed_reload(plugin_id, swapped)
+            return record
+        except BaseException:
+            instance = self.lifecycle.get_instance(plugin_id)
+            current = self._loaded_plugins.get(plugin_id)
+            committed = (
+                current is not None and current.status == "active"
+            ) or (instance is not None and instance.activated)
+            live = instance is not None and instance.has_runtime_ledger()
+            if swapped is not None and not committed and live:
+                instance.add_diagnostic("needs_restart")
+            elif swapped is not None and not committed:
+                try:
+                    await self._restore_failed_swap(
+                        plugin_id,
+                        target_dir,
+                        swapped,
+                        staging_hint,
+                        clear_marker_if_restored=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "Failed to restore plugin '%s' after "
+                        "unloaded force install",
+                        plugin_id,
+                    )
+            raise
 
     def _remove_incomplete_pawport_plugin(
         self,
@@ -2265,7 +2375,20 @@ class PluginLoader:
                 report,
                 delete_files=delete_files or mode is UnloadMode.UNINSTALL,
             )
+        was_committed = record.status == "active" or bool(
+            instance is not None and instance.activated,
+        )
         report.absorb(await instance.dispose(mode))
+        if report.quiescent and not was_committed:
+            try:
+                await self._undo_failed_txn_disk(plugin_id, instance)
+                instance.clear_txn_escapes()
+                instance.clear_created_dests()
+            except Exception as undo_exc:  # noqa: BLE001
+                report.clean = False
+                report.errors.append(
+                    str(undo_exc) or type(undo_exc).__name__,
+                )
         if not report.quiescent and mode is not UnloadMode.SHUTDOWN:
             record.status = "failed"
             record.diagnostics = list(
@@ -2324,7 +2447,7 @@ class PluginLoader:
             from .provision import recorded_tool_names
 
             tool_names = recorded_tool_names(plugin_id)
-            _recheck_created_locations(plugin_id, report)
+            await _recheck_created_locations(plugin_id, report)
             await self._drop_uninstalled_settings(plugin_id, tool_names)
 
         # Optionally delete files from disk (off the event loop).
@@ -2607,9 +2730,9 @@ class PluginLoader:
             source_path,
         )
         await self._drop_uninstalled_settings(plugin_id, tool_names)
-        teardown_created_locations(plugin_id)
+        await run_sync_io(teardown_created_locations, plugin_id)
         if candidate:
-            teardown_paths(declared)
+            await run_sync_io(teardown_paths, declared)
         PluginApi.cleanup_sourced_skills(plugin_id)
 
         leftover = leftover_dests(created or declared)
@@ -2727,37 +2850,11 @@ class PluginLoader:
                 plugin_id=plugin_id,
             )
         except BaseException:
-            from ..utils.io_utils import run_sync_io
-            from .provision import (
-                recover_migrating_inventory,
-                undo_created_locations,
-                undo_this_txn_escapes,
+            await self._dispose_then_undo_txn_disk(
+                plugin_id,
+                instance,
+                use_teardown=True,
             )
-
-            if instance is not None:
-                await run_sync_io(
-                    undo_this_txn_escapes,
-                    plugin_id,
-                    instance.txn_escapes(),
-                )
-                await run_sync_io(
-                    undo_created_locations,
-                    plugin_id,
-                    instance.created_dests(),
-                )
-                instance.clear_txn_escapes()
-                instance.clear_created_dests()
-            await run_sync_io(recover_migrating_inventory, plugin_id)
-            try:
-                report = await instance.teardown_runtime()
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "Failed to undo partial register() for plugin '%s'",
-                    plugin_id,
-                )
-                raise
-            if not report.quiescent:
-                instance.add_diagnostic("needs_restart")
             raise
 
     async def activate_plugin_unlocked(self, plugin_id: str) -> None:
@@ -2799,28 +2896,30 @@ class PluginLoader:
                 from ..utils.io_utils import run_sync_io
                 from .api import rollback_activate_install
 
-                created = (
-                    instance.created_dests() if instance is not None else []
-                )
-                escapes = (
-                    instance.txn_escapes() if instance is not None else []
-                )
-                await run_sync_io(
-                    rollback_activate_install,
-                    plugin_id,
-                    tools_before=tools_before,
-                    agent_tools_before=agent_tools_before,
-                    location_keys_before=location_keys_before,
-                    created_dests=created,
-                    txn_escapes=escapes,
-                )
-                if instance is not None:
-                    instance.clear_txn_escapes()
-                    instance.clear_created_dests()
+                async def _rollback() -> None:
+                    await run_sync_io(
+                        rollback_activate_install,
+                        plugin_id,
+                        tools_before=tools_before,
+                        agent_tools_before=agent_tools_before,
+                        location_keys_before=location_keys_before,
+                        created_dests=(
+                            instance.created_dests()
+                            if instance is not None
+                            else []
+                        ),
+                        txn_escapes=(
+                            instance.txn_escapes()
+                            if instance is not None
+                            else []
+                        ),
+                    )
+
                 try:
                     await self._fail_after_startup(
                         plugin_id,
                         str(exc) or type(exc).__name__,
+                        undo_disk=_rollback,
                     )
                 except Exception:  # noqa: BLE001
                     logger.exception(
@@ -2879,9 +2978,26 @@ class PluginLoader:
         box = committed if committed is not None else [None]
 
         def _commit() -> list[str]:
+            from .updates import (
+                STATUS_PREPARED,
+                STATUS_UPDATING,
+                mark_update_committed,
+                update_marker_status,
+            )
+
             written = tool_names_written_this_txn(plugin_id, before)
             errors: list[str] = []
-            commit_migrations(plugin_id)
+            marked = False
+            try:
+                status = update_marker_status(plugin_id)
+                if status in {STATUS_PREPARED, STATUS_UPDATING}:
+                    mark_update_committed(plugin_id)
+                    marked = True
+                commit_migrations(plugin_id)
+            except Exception as exc:
+                if not marked:
+                    raise
+                errors.append(str(exc) or type(exc).__name__)
             box[0] = errors
             try:
                 owned = recorded_tool_names(plugin_id)
@@ -2926,20 +3042,20 @@ class PluginLoader:
         if not commands:
             return
         from ..runtime.commands.control import register_command
-        from ..app.channels.command_registry import CommandRegistry
+        from .workspace_projector import ProjectionError, live_channel_managers
 
-        command_registry = CommandRegistry()
+        managers = live_channel_managers()
         for cmd_reg in commands:
+            prefix = f"/{str(cmd_reg.handler.command_name).lstrip('/')}"
             try:
                 register_command(cmd_reg.handler, owner=plugin_id)
-                command_registry.register_command(
-                    f"/{str(cmd_reg.handler.command_name).lstrip('/')}",
-                    priority_level=cmd_reg.priority_level,
-                    owner=plugin_id,
-                )
+                for manager in managers:
+                    manager.register_control_command(
+                        prefix,
+                        priority_level=cmd_reg.priority_level,
+                        owner=plugin_id,
+                    )
             except ValueError as exc:
-                from .workspace_projector import ProjectionError
-
                 raise ProjectionError(str(exc)) from exc
 
     async def run_plugin_startup_hooks(self, plugin_id: str) -> None:
@@ -3021,15 +3137,17 @@ class PluginLoader:
         self,
         plugin_id: str,
         reason: str,
+        *,
+        undo_disk=None,
     ) -> None:
         """Mark FAILED, undo the runtime ledger, keep the loaded record."""
         instance = self.lifecycle.ensure_instance(plugin_id)
         instance.mark_failed(reason)
-        report = await instance.dispose(UnloadMode.UNLOAD)
-        from ..utils.io_utils import run_sync_io
-        from .provision import recover_migrating_inventory
-
-        await run_sync_io(recover_migrating_inventory, plugin_id)
+        try:
+            report = await instance.dispose(UnloadMode.UNLOAD)
+        except BaseException:
+            instance.add_diagnostic("needs_restart")
+            raise
         record = self._loaded_plugins.get(plugin_id)
         if not report.quiescent:
             instance.add_diagnostic("needs_restart")
@@ -3044,6 +3162,19 @@ class PluginLoader:
                 reason,
             )
             return
+        try:
+            if undo_disk is not None:
+                maybe = undo_disk()
+                if inspect.isawaitable(maybe):
+                    await maybe
+            else:
+                await self._undo_failed_txn_disk(plugin_id, instance)
+            instance.clear_txn_escapes()
+            instance.clear_created_dests()
+        except Exception as undo_exc:  # noqa: BLE001
+            instance.add_diagnostic(
+                str(undo_exc) or type(undo_exc).__name__,
+            )
         source = instance.source_path
         if source is None and record is not None:
             source = record.source_path
@@ -3104,11 +3235,12 @@ async def _invoke_after_unload(
         await maybe
 
 
-def _recheck_created_locations(
+async def _recheck_created_locations(
     plugin_id: str,
     report: UnloadReport,
 ) -> None:
     """Uninstall step ⑦: teardown created dests, then ERROR if they remain."""
+    from ..utils.io_utils import run_sync_io
     from .provision import (
         leftover_dests,
         snapshot_created_dests,
@@ -3116,7 +3248,7 @@ def _recheck_created_locations(
     )
 
     created = snapshot_created_dests(plugin_id)
-    teardown_created_locations(plugin_id)
+    await run_sync_io(teardown_created_locations, plugin_id)
     for dest in leftover_dests(created):
         report.errors.append(f"inventory leftover: {dest}")
         report.clean = False

@@ -30,6 +30,55 @@ def _log_safe(value: object) -> str:
     return str(value).replace("\r", "").replace("\n", "")
 
 
+class UnquiescentUnloadError(RuntimeError):
+    """Unload / uninstall stopped because hosted resources are still live."""
+
+    def __init__(self, plugin_id: str, report, *, loaded: bool) -> None:
+        self.plugin_id = plugin_id
+        self.report = report
+        self.loaded = loaded
+        super().__init__(f"Plugin '{plugin_id}' did not go quiescent.")
+
+
+def unload_http_detail(
+    plugin_id: str,
+    report,
+    *,
+    loaded: bool,
+    kind: str = "Plugin",
+    message: str | None = None,
+) -> dict:
+    """Structured 409 body shared by unload and DELETE uninstall."""
+    return {
+        "id": plugin_id,
+        "loaded": loaded,
+        "clean": bool(getattr(report, "clean", False)),
+        "quiescent": bool(getattr(report, "quiescent", False)),
+        "needs_restart": bool(getattr(report, "needs_restart", True)),
+        "errors": list(getattr(report, "errors", None) or []),
+        "message": message or f"{kind} '{plugin_id}' did not go quiescent.",
+    }
+
+
+def memory_in_use_detail(
+    plugin_id: str,
+    exc: BaseException,
+    *,
+    loaded: bool,
+    kind: str = "Plugin",
+) -> dict:
+    """Structured 409 when a memory backend still holds the plugin."""
+    return {
+        "id": plugin_id,
+        "loaded": loaded,
+        "clean": False,
+        "quiescent": False,
+        "needs_restart": True,
+        "errors": [str(exc)],
+        "message": f"{kind} '{plugin_id}': {exc}",
+    }
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
@@ -455,9 +504,12 @@ async def uninstall_plugin_source(
             delete_files=True,
             mode=UnloadMode.UNINSTALL,
         )
-        if not report.quiescent:
-            raise RuntimeError(
-                f"Plugin '{plugin_id}' did not go quiescent.",
+        still_loaded = loader.get_loaded_plugin(plugin_id) is not None
+        if not report.quiescent or still_loaded:
+            raise UnquiescentUnloadError(
+                plugin_id,
+                report,
+                loaded=still_loaded,
             )
 
 
@@ -615,13 +667,26 @@ async def uninstall_plugin(plugin_id: str, request: Request):
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except UnquiescentUnloadError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=unload_http_detail(
+                exc.plugin_id,
+                exc.report,
+                loaded=exc.loaded,
+            ),
+        ) from exc
     except RuntimeError as exc:
-        message = str(exc)
-        if (
-            "did not go quiescent" in message
-            or "memory backend is in use" in message
-        ):
-            raise HTTPException(status_code=409, detail=message) from exc
+        if "memory backend is in use" in str(exc):
+            still_loaded = loader.get_loaded_plugin(plugin_id) is not None
+            raise HTTPException(
+                status_code=409,
+                detail=memory_in_use_detail(
+                    plugin_id,
+                    exc,
+                    loaded=still_loaded,
+                ),
+            ) from exc
         logger.error(
             f"Plugin uninstall failed for '{_log_safe(plugin_id)}': {exc}",
             exc_info=True,
@@ -675,25 +740,24 @@ async def unload_plugin_keep_config(plugin_id: str, request: Request):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         if "memory backend is in use" in str(exc):
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            still_loaded = loader.get_loaded_plugin(plugin_id) is not None
+            raise HTTPException(
+                status_code=409,
+                detail=memory_in_use_detail(
+                    plugin_id,
+                    exc,
+                    loaded=still_loaded,
+                ),
+            ) from exc
         raise
     still_loaded = loader.get_loaded_plugin(plugin_id) is not None
-    payload = {
-        "id": plugin_id,
-        "loaded": still_loaded,
-        "clean": report.clean,
-        "quiescent": report.quiescent,
-        "needs_restart": report.needs_restart,
-        "errors": list(report.errors or []),
-    }
+    payload = unload_http_detail(
+        plugin_id,
+        report,
+        loaded=still_loaded,
+    )
     if not report.quiescent or still_loaded:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                **payload,
-                "message": (f"Plugin '{plugin_id}' did not go quiescent."),
-            },
-        )
+        raise HTTPException(status_code=409, detail=payload)
     return {
         **payload,
         "message": f"Plugin '{plugin_id}' unloaded.",

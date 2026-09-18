@@ -63,7 +63,21 @@ def mark_update_committed(plugin_id: str) -> None:
     except (OSError, json.JSONDecodeError):
         return
     data["status"] = STATUS_COMMITTED
+    data["activate_committed"] = True
     write_json_atomic(path, data)
+
+
+def update_is_committed(plugin_id: str) -> bool:
+    """Whether the on-disk update marker already committed this swap."""
+    path = marker_path(plugin_id)
+    if not path.is_file():
+        return False
+    try:
+        data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    status = str(data.get("status") or "").strip()
+    return status == STATUS_COMMITTED or bool(data.get("activate_committed"))
 
 
 def update_marker_status(plugin_id: str) -> str | None:
@@ -128,7 +142,11 @@ def _restore_one_marker(path: Path) -> str | None:
     backup = parse_optional_absolute(data.get("backup_path"))
     target = parse_optional_absolute(data.get("target_path"))
     staging = parse_optional_absolute(data.get("staging_path"))
-    if status == STATUS_COMMITTED:
+    if status == STATUS_COMMITTED or data.get("activate_committed"):
+        if plugin_id:
+            from .provision import commit_prepared_migrations
+
+            commit_prepared_migrations(plugin_id)
         if backup is not None:
             safe_remove(backup, purpose="drop committed update backup")
         if staging is not None:

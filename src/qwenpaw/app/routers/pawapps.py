@@ -198,6 +198,7 @@ async def uninstall_pawapp(app_id: str, request: Request) -> Dict[str, Any]:
         )
     try:
         from ...plugins.lifecycle import UnloadMode
+        from .plugins import memory_in_use_detail, unload_http_detail
 
         report = await loader.unload_plugin(
             app_id,
@@ -209,15 +210,39 @@ async def uninstall_pawapp(app_id: str, request: Request) -> Dict[str, Any]:
             status_code=404,
             detail=f"PawApp '{app_id}' not found",
         ) from exc
-    except Exception as exc:  # noqa: BLE001
+    except RuntimeError as exc:
+        if "memory backend is in use" in str(exc):
+            still_loaded = loader.get_loaded_plugin(app_id) is not None
+            raise HTTPException(
+                status_code=409,
+                detail=memory_in_use_detail(
+                    app_id,
+                    exc,
+                    loaded=still_loaded,
+                    kind="PawApp",
+                ),
+            ) from exc
+        logger.error("PawApp uninstall failed for '%s': %s", app_id, exc)
         raise HTTPException(
             status_code=500,
             detail=f"Uninstall failed: {exc}",
         ) from exc
-    if not report.quiescent:
+    except Exception as exc:  # noqa: BLE001
+        logger.error("PawApp uninstall failed for '%s': %s", app_id, exc)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Uninstall failed: {exc}",
+        ) from exc
+    still_loaded = loader.get_loaded_plugin(app_id) is not None
+    if not report.quiescent or still_loaded:
         raise HTTPException(
             status_code=409,
-            detail=f"PawApp '{app_id}' did not go quiescent.",
+            detail=unload_http_detail(
+                app_id,
+                report,
+                loaded=still_loaded,
+                kind="PawApp",
+            ),
         )
     return {"id": app_id, "message": f"PawApp '{app_id}' uninstalled."}
 

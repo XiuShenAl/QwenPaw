@@ -8,6 +8,7 @@ import asyncio
 import json
 import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,8 +38,11 @@ from qwenpaw.plugins.dependency_gate import DependencyGate
 from qwenpaw.plugins.loader import PluginLoader
 from qwenpaw.plugins.provision import (
     apply_tool_factory,
+    inventory_path,
     load_inventory,
     provision_files,
+    recover_migrating_inventory,
+    save_inventory,
     teardown_created_locations,
 )
 from qwenpaw.plugins.registry import PluginRegistry
@@ -48,11 +52,14 @@ from qwenpaw.plugins.safe_fs import (
     same_location,
 )
 from qwenpaw.plugins.updates import (
+    STATUS_COMMITTED,
     STATUS_PREPARED,
+    mark_update_committed,
     marker_path,
     recover_interrupted_updates,
     update_marker_status,
     updates_dir,
+    write_updating_marker,
 )
 from qwenpaw.plugins.workspace_projector import WorkspaceProjector
 from qwenpaw.runtime.slash_command_registry import SlashCommandRegistry
@@ -109,6 +116,7 @@ def _slash_workspace():
             slash_command_registry=SlashCommandRegistry(),
             tool_registry=ToolRegistry(),
         ),
+        channel_manager=ChannelManager([]),
     )
 
 
@@ -1475,7 +1483,6 @@ async def test_inventory_only_uninstall_removes_owned_agent_tool(
 ):
     from qwenpaw.config.config import BuiltinToolConfig, load_agent_config
     from qwenpaw.config.config import save_agent_config
-    from qwenpaw.plugins.provision import save_inventory
 
     _seed_talk_agent(tmp_path, monkeypatch)
     agent_cfg = load_agent_config("talk")
@@ -3002,3 +3009,1080 @@ async def test_provision_setup_none_does_not_teardown_on_fail(
     assert record2.status == "failed"
     assert dest2.is_dir()
     assert (dest2 / "keep.txt").read_text(encoding="utf-8") == "user-data\n"
+
+
+@pytest.mark.asyncio
+async def test_boot_recover_after_activate_keeps_new_version(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    """Boot recover after swap+activate must keep the new tree.
+
+    Cleanup is skipped so backup remains, as after a crash. Activate
+    persists the update marker before it returns. The test then leaves
+    ``status=prepared`` (the leftover field the crash window used to
+    expose); ``recover_interrupted_updates`` must still keep the new
+    directory and must not restore the provision inventory.
+    """
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    dest = tmp_path / "prov-boot"
+    body = (
+        "from pathlib import Path\n"
+        "        api.provision_files(\n"
+        "            Path(__file__).resolve().parent / 'factory',\n"
+        f"            Path({str(dest)!r}),\n"
+        "            '1.0.0',\n"
+        "        )\n"
+        "        api.register_slash_command('ping', lambda c, a: None)"
+    )
+    root = tmp_path / "plugins" / "boot-rec"
+    _write_plugin(root, "boot-rec", body=body)
+    (root / "factory").mkdir()
+    (root / "factory" / "note.md").write_text("v1\n", encoding="utf-8")
+    loader, workspace, installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "boot-rec",
+        body,
+    )
+    incoming = _write_plugin(
+        tmp_path / "incoming-boot-rec",
+        "boot-rec",
+        body=(
+            "from pathlib import Path\n"
+            "        api.provision_files(\n"
+            "            Path(__file__).resolve().parent / 'factory',\n"
+            f"            Path({str(dest)!r}),\n"
+            "            '2.0.0',\n"
+            "        )\n"
+            "        api.register_slash_command('pong', lambda c, a: None)"
+        ),
+    )
+    (incoming / "factory").mkdir()
+    (incoming / "factory" / "note.md").write_text("v2\n", encoding="utf-8")
+    meta = json.loads((incoming / "plugin.json").read_text(encoding="utf-8"))
+    meta["version"] = "2.0.0"
+    (incoming / "plugin.json").write_text(
+        json.dumps(meta),
+        encoding="utf-8",
+    )
+    (incoming / "v2.txt").write_text("v2", encoding="utf-8")
+
+    async def _skip_finish(_plugin_id, _swapped):
+        return []
+
+    monkeypatch.setattr(loader, "_finish_committed_reload", _skip_finish)
+    report = await loader.lifecycle.reload("boot-rec", new_source=incoming)
+    assert report.ok
+    assert update_marker_status("boot-rec") == STATUS_COMMITTED
+    backup = installed.with_name(f"{installed.name}.boot-rec.bak")
+    assert backup.exists()
+    payload = json.loads(marker_path("boot-rec").read_text(encoding="utf-8"))
+    payload["status"] = STATUS_PREPARED
+    marker_path("boot-rec").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+    recover_interrupted_updates()
+    assert not backup.exists()
+    assert (installed / "v2.txt").read_text(encoding="utf-8") == "v2"
+    assert "pong" in (installed / "main.py").read_text(encoding="utf-8")
+    assert (dest / "note.md").read_text(encoding="utf-8") == "v2\n"
+    saved = load_inventory("boot-rec")
+    loc = (saved.get("locations") or {}).get(str(dest))
+    assert loc is not None
+    assert loc.get("version") == "2.0.0"
+    assert loc.get("owned") is True
+    assert "pong" in workspace.plugins.slash_command_registry.names()
+
+
+def test_boot_recover_committed_update_keeps_prepared_provision(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    target = tmp_path / "plugins" / "half-commit"
+    target.mkdir(parents=True)
+    (target / "main.py").write_text("NEW\n", encoding="utf-8")
+    backup = tmp_path / "plugins" / "half-commit.bak"
+    backup.mkdir()
+    (backup / "main.py").write_text("OLD\n", encoding="utf-8")
+    write_updating_marker(
+        "half-commit",
+        backup_path=backup,
+        target_path=target,
+    )
+    mark_update_committed("half-commit")
+    dest = tmp_path / "skills-half"
+    dest.mkdir()
+    (dest / "note.md").write_text("v2\n", encoding="utf-8")
+    dest_backup = tmp_path / "skills-half.bak"
+    dest_backup.mkdir()
+    (dest_backup / "note.md").write_text("v1\n", encoding="utf-8")
+    save_inventory(
+        "half-commit",
+        {
+            "plugin_id": "half-commit",
+            "locations": {
+                str(dest): {
+                    "src": str(tmp_path / "factory"),
+                    "version": "2.0.0",
+                    "owned": True,
+                    "files": {"note.md": {"factory_hash": "new"}},
+                    "migrating": {
+                        "status": "prepared",
+                        "backup_path": str(dest_backup),
+                        "target_version": "2.0.0",
+                        "prev_version": "1.0.0",
+                        "prev_factory_hashes": {"note.md": "old"},
+                    },
+                },
+            },
+            "tools": {},
+            "provisions": [],
+        },
+    )
+    recover_interrupted_updates()
+    recover_migrating_inventory()
+    assert (target / "main.py").read_text(encoding="utf-8") == "NEW\n"
+    assert not backup.exists()
+    assert (dest / "note.md").read_text(encoding="utf-8") == "v2\n"
+    assert not dest_backup.exists()
+    loc = load_inventory("half-commit")["locations"][str(dest)]
+    assert loc.get("version") == "2.0.0"
+    assert loc.get("migrating") is None
+    assert loc.get("owned") is True
+
+
+@pytest.mark.asyncio
+async def test_provision_create_mid_copy_retries_owned(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    dest = tmp_path / "created-skills"
+    plugin_id = "half-create"
+    body = (
+        "from pathlib import Path\n"
+        "        api.provision_files(\n"
+        "            Path(__file__).resolve().parent / 'factory',\n"
+        f"            Path({str(dest)!r}),\n"
+        "            '1.0.0',\n"
+        "        )\n"
+        "        api.register_slash_command('ready', lambda c, a: None)"
+    )
+    installed = _write_plugin(
+        tmp_path / "plugins" / plugin_id,
+        plugin_id,
+        body=body,
+    )
+    factory = installed / "factory"
+    factory.mkdir()
+    (factory / "a.txt").write_text("A\n", encoding="utf-8")
+    (factory / "b.txt").write_text("B\n", encoding="utf-8")
+
+    from qwenpaw.plugins import provision as provision_mod
+
+    real_copy = provision_mod.shutil.copy2
+
+    def _copy(src, dst, *args, **kwargs):
+        if Path(src).name == "b.txt":
+            raise OSError("disk full")
+        return real_copy(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(provision_mod.shutil, "copy2", _copy)
+    workspace = _slash_workspace()
+    fresh_registry.projector = WorkspaceProjector(
+        live_workspaces=lambda: [workspace],
+    )
+    fresh_registry.set_workspace_manager(
+        SimpleNamespace(agents={"talk": workspace}),
+    )
+    loader = PluginLoader(plugin_dirs=[tmp_path / "plugins"])
+    loader.registry = fresh_registry
+    manifest = PluginManifest.from_dict(
+        json.loads((installed / "plugin.json").read_text(encoding="utf-8")),
+    )
+    record = await loader.load_plugin(manifest, installed)
+    assert record.status == "failed"
+    assert not dest.exists()
+    loc = (load_inventory(plugin_id).get("locations") or {}).get(str(dest))
+    assert loc is None
+    monkeypatch.setattr(provision_mod.shutil, "copy2", real_copy)
+    await loader.unload_plugin(plugin_id, delete_files=False)
+    record2 = await loader.load_plugin(manifest, installed)
+    assert record2.status == "active"
+    assert (dest / "a.txt").read_text(encoding="utf-8") == "A\n"
+    assert (dest / "b.txt").read_text(encoding="utf-8") == "B\n"
+    loc = load_inventory(plugin_id)["locations"][str(dest)]
+    assert loc.get("owned") is True
+    await loader.unload_plugin(
+        plugin_id,
+        delete_files=True,
+        mode=UnloadMode.UNINSTALL,
+    )
+    assert not dest.exists()
+    assert not inventory_path(plugin_id).is_file()
+
+
+@pytest.mark.asyncio
+async def test_http_delete_uninstall_unquiescent_is_409(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    loader, _workspace, _installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "stay-del",
+        "api.register_slash_command('ping', lambda c, a: None)",
+    )
+
+    async def _busy(*_args, **_kwargs):
+        return UnloadReport(
+            plugin_id="stay-del",
+            mode=UnloadMode.UNINSTALL,
+            clean=False,
+            quiescent=False,
+            needs_restart=True,
+            errors=["channel stop failed"],
+        )
+
+    monkeypatch.setattr(loader, "_unload_plugin_unlocked", _busy)
+    from qwenpaw.app.routers.plugins import router as plugins_router
+
+    app = FastAPI()
+    app.include_router(plugins_router, prefix="/api")
+    app.state.plugin_loader = loader
+    client = TestClient(app)
+    response = client.delete("/api/plugins/stay-del")
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["loaded"] is True
+    assert detail["quiescent"] is False
+    assert detail["needs_restart"] is True
+    assert loader.get_loaded_plugin("stay-del") is not None
+
+
+@pytest.mark.asyncio
+async def test_http_delete_pawapp_unquiescent_is_409(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    monkeypatch.setattr(
+        "qwenpaw.app.routers.pawapps._get_apps_dir",
+        lambda: tmp_path / "plugins",
+    )
+    (tmp_path / "plugins").mkdir(parents=True, exist_ok=True)
+    loader, _workspace, _installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "stay-app",
+        "api.register_slash_command('ping', lambda c, a: None)",
+    )
+
+    async def _busy(*_args, **_kwargs):
+        return UnloadReport(
+            plugin_id="stay-app",
+            mode=UnloadMode.UNINSTALL,
+            clean=False,
+            quiescent=False,
+            needs_restart=True,
+            errors=["channel stop failed"],
+        )
+
+    monkeypatch.setattr(loader, "_unload_plugin_unlocked", _busy)
+    from qwenpaw.app.routers.pawapps import router as pawapps_router
+
+    app = FastAPI()
+    app.include_router(pawapps_router, prefix="/api")
+    app.state.plugin_loader = loader
+    client = TestClient(app)
+    response = client.delete("/api/pawapps/stay-app")
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["loaded"] is True
+    assert detail["quiescent"] is False
+    assert detail["needs_restart"] is True
+
+    async def _memory(*_args, **_kwargs):
+        raise RuntimeError("memory backend is in use")
+
+    monkeypatch.setattr(loader, "_unload_plugin_unlocked", _memory)
+    memory_resp = client.delete("/api/pawapps/stay-app")
+    assert memory_resp.status_code == 409
+    memory_detail = memory_resp.json()["detail"]
+    assert memory_detail["needs_restart"] is True
+    assert memory_detail["quiescent"] is False
+
+
+@pytest.mark.asyncio
+async def test_unloaded_force_respects_owns_commit(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    loader, _workspace, installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "idle-owned",
+        "api.register_slash_command('ping', lambda c, a: None)",
+    )
+    old_text = (installed / "main.py").read_text(encoding="utf-8")
+    await loader.unload_plugin("idle-owned", delete_files=False)
+    assert loader.get_loaded_plugin("idle-owned") is None
+    loader.lifecycle.delegate.owns_commit = lambda _plugin_id: False
+    staging = _write_plugin(
+        tmp_path / "staging-idle-owned",
+        "idle-owned",
+        body="api.register_slash_command('nope', lambda c, a: None)",
+    )
+    with pytest.raises(RuntimeError, match="not owned"):
+        await loader.load_plugin_from_path(staging, force=True)
+    assert (installed / "main.py").read_text(encoding="utf-8") == old_text
+    assert loader.get_loaded_plugin("idle-owned") is None
+
+
+def test_register_hooks_guard_before_registry(fresh_registry):
+    from qwenpaw.plugins.api import PluginApi
+
+    inst = PluginInstance("guard-hooks")
+    inst.state = PluginState.UNLOADING
+    api = PluginApi("guard-hooks", config={})
+    api.set_registry(fresh_registry)
+    api.bind_instance(inst)
+    with pytest.raises(RuntimeError, match="unloading"):
+        api.register_startup_hook("late-start", lambda: None)
+    assert all(
+        hook.hook_name != "late-start"
+        for hook in fresh_registry.get_startup_hooks()
+    )
+    with pytest.raises(RuntimeError, match="unloading"):
+        api.register_workspace_created_hook("late-ws", lambda _info: None)
+    assert all(
+        hook.hook_name != "late-ws"
+        for hook in fresh_registry.get_workspace_created_hooks()
+    )
+    inst.state = PluginState.DISPOSED
+    with pytest.raises(RuntimeError, match="disposed"):
+        api.register_prompt_section(
+            "late-prompt",
+            "workspace",
+            lambda _agent: "",
+        )
+    assert all(
+        section.name != "late-prompt"
+        for section in fresh_registry.get_prompt_sections()
+    )
+
+
+def test_schedule_workspace_intent_guards_before_intend(fresh_registry):
+    from qwenpaw.plugins.api import PluginApi
+
+    projector = WorkspaceProjector(live_workspaces=lambda: [])
+    fresh_registry.projector = projector
+    inst = PluginInstance("guard-intent")
+    inst.state = PluginState.UNLOADING
+    api = PluginApi("guard-intent", config={})
+    api.set_registry(fresh_registry)
+    api.bind_instance(inst)
+    with pytest.raises(RuntimeError, match="unloading"):
+        api._schedule_workspace_intent(
+            "slash_command",
+            "late",
+            apply=lambda _workspace: None,
+            revoke=lambda _workspace, _token=None: None,
+        )
+    assert projector._intents == []
+
+
+@pytest.mark.asyncio
+async def test_unloaded_force_keeps_old_dir_on_copy_failure(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    loader, _workspace, installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "idle-copy",
+        "api.register_slash_command('ping', lambda c, a: None)",
+    )
+    old_text = (installed / "main.py").read_text(encoding="utf-8")
+    await loader.unload_plugin("idle-copy", delete_files=False)
+    assert loader.get_loaded_plugin("idle-copy") is None
+    staging = _write_plugin(
+        tmp_path / "staging-idle-copy",
+        "idle-copy",
+        body="api.register_slash_command('pong', lambda c, a: None)",
+    )
+    (staging / "a.txt").write_text("new-a\n", encoding="utf-8")
+    (staging / "b.txt").write_text("new-b\n", encoding="utf-8")
+    real_copytree = shutil.copytree
+
+    def _copytree(src, dst, *args, **kwargs):
+        def _copy(src_file, dst_file, *a, **k):
+            if Path(src_file).name == "b.txt":
+                raise OSError("injected copy fail on b.txt")
+            return shutil.copy2(src_file, dst_file, *a, **k)
+
+        patched = dict(kwargs)
+        patched["copy_function"] = _copy
+        return real_copytree(src, dst, *args, **patched)
+
+    monkeypatch.setattr(shutil, "copytree", _copytree)
+    with pytest.raises(OSError, match="injected copy fail"):
+        await loader.load_plugin_from_path(staging, force=True)
+    assert (installed / "plugin.json").exists()
+    assert (installed / "main.py").read_text(encoding="utf-8") == old_text
+    assert installed.is_dir()
+    assert any(installed.iterdir())
+    recover_interrupted_updates()
+    assert (installed / "plugin.json").exists()
+    assert (installed / "main.py").read_text(encoding="utf-8") == old_text
+    assert not (marker_path("idle-copy").is_file()) or (
+        update_marker_status("idle-copy") == STATUS_PREPARED
+        and (installed / "plugin.json").exists()
+    )
+    assert loader.get_loaded_plugin("idle-copy") is None
+
+
+@pytest.mark.asyncio
+async def test_unloaded_force_permission_error_keeps_marker(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    loader, _workspace, installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "idle-lock",
+        "api.register_slash_command('ping', lambda c, a: None)",
+    )
+    old_text = (installed / "main.py").read_text(encoding="utf-8")
+    await loader.unload_plugin("idle-lock", delete_files=False)
+    staging = _write_plugin(
+        tmp_path / "staging-idle-lock",
+        "idle-lock",
+        body="api.register_slash_command('pong', lambda c, a: None)",
+    )
+
+    def _boom(*_args, **_kwargs):
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(shutil, "copytree", _boom)
+    with pytest.raises(RuntimeError, match="restart required"):
+        await loader.load_plugin_from_path(staging, force=True)
+    assert marker_path("idle-lock").is_file()
+    assert (installed / "plugin.json").exists()
+    assert (installed / "main.py").read_text(encoding="utf-8") == old_text
+
+
+@pytest.mark.asyncio
+async def test_failed_register_unquiescent_keeps_this_txn_create(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    monkeypatch.setattr("qwenpaw.plugins.custody.THREAD_STOP_SECONDS", 0.15)
+    dest = tmp_path / "created-sticky"
+    flag = tmp_path / "stop-sticky"
+    factory = tmp_path / "factory-sticky"
+    factory.mkdir()
+    (factory / "note.md").write_text("v1\n", encoding="utf-8")
+    body = (
+        "from pathlib import Path\n"
+        "        import time\n"
+        f"        dest = Path({str(dest)!r})\n"
+        f"        api.provision_files(Path({str(factory)!r}), dest, '1.0.0')\n"
+        "        def _spin():\n"
+        f"            while not Path({str(flag)!r}).exists():\n"
+        "                time.sleep(0.02)\n"
+        "        api.spawn_thread(_spin, 'sticky')\n"
+        "        raise RuntimeError('register boom')"
+    )
+    installed = _write_plugin(
+        tmp_path / "plugins" / "sticky-create",
+        "sticky-create",
+        body=body,
+    )
+    loader = PluginLoader(plugin_dirs=[tmp_path / "plugins"])
+    loader.registry = fresh_registry
+    manifest = PluginManifest.from_dict(
+        json.loads((installed / "plugin.json").read_text(encoding="utf-8")),
+    )
+    record = await loader.load_plugin(manifest, installed)
+    assert record.status == "failed"
+    assert dest.exists()
+    inst = loader.lifecycle.get_instance("sticky-create")
+    assert inst is not None
+    assert inst.state is PluginState.FAILED
+    assert any(entry.desc.startswith("thread:") for entry in inst._runtime)
+    assert "needs_restart" in inst.diagnostics
+    assert loader.lifecycle.get_instance("sticky-create") is inst
+    flag.write_text("stop\n", encoding="utf-8")
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if not any(
+            thread.is_alive() and thread.name.endswith(":sticky")
+            for thread in threading.enumerate()
+        ):
+            break
+        time.sleep(0.02)
+    report = await loader.unload_plugin("sticky-create", delete_files=False)
+    assert report.quiescent
+    assert not dest.exists()
+
+
+@pytest.mark.asyncio
+async def test_activate_failure_unquiescent_keeps_migrate_dest(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    monkeypatch.setattr("qwenpaw.plugins.custody.THREAD_STOP_SECONDS", 0.15)
+    dest = tmp_path / "migrated-keep"
+    factory_v1 = tmp_path / "factory-v1"
+    factory_v1.mkdir()
+    (factory_v1 / "note.md").write_text("v1\n", encoding="utf-8")
+    factory_v2 = tmp_path / "factory-v2"
+    factory_v2.mkdir()
+    (factory_v2 / "note.md").write_text("v2\n", encoding="utf-8")
+    loader, _workspace, installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "mig-keep",
+        (
+            "from pathlib import Path\n"
+            f"        api.provision_files(Path({str(factory_v1)!r}), "
+            f"Path({str(dest)!r}), '1.0.0')"
+        ),
+    )
+    assert (dest / "note.md").read_text(encoding="utf-8") == "v1\n"
+    await loader.unload_plugin("mig-keep", delete_files=False)
+    _write_plugin(
+        installed,
+        "mig-keep",
+        body=(
+            "from pathlib import Path\n"
+            "        import time\n"
+            f"        api.provision_files(Path({str(factory_v2)!r}), "
+            f"Path({str(dest)!r}), '2.0.0')\n"
+            "        def _spin():\n"
+            "            while True:\n"
+            "                time.sleep(0.05)\n"
+            "        api.spawn_thread(_spin, 'sticky')\n"
+            "        def _boom():\n"
+            "            raise RuntimeError('startup boom')\n"
+            "        api.register_startup_hook('boom', _boom)"
+        ),
+    )
+    manifest = PluginManifest.from_dict(
+        json.loads((installed / "plugin.json").read_text(encoding="utf-8")),
+    )
+    record = await loader.load_plugin(manifest, installed)
+    assert record.status == "failed"
+    assert (dest / "note.md").read_text(encoding="utf-8") == "v2\n"
+    inst = loader.lifecycle.get_instance("mig-keep")
+    assert inst is not None
+    assert inst.state is PluginState.FAILED
+    assert "needs_restart" in inst.diagnostics
+    loc = (load_inventory("mig-keep").get("locations") or {}).get(str(dest))
+    migrating = (loc or {}).get("migrating") or {}
+    assert migrating
+    assert migrating.get("status") != "committed"
+
+
+@pytest.mark.asyncio
+async def test_control_command_projects_to_live_channel_manager(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    from qwenpaw.runtime.commands.control import unregister_command
+
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    loader, workspace, _installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "cmd-live",
+        _control_body("plugincmd"),
+    )
+    manager = workspace.channel_manager
+    assert manager.is_control_command("/plugincmd")
+    await loader.unload_plugin("cmd-live", delete_files=False)
+    assert not manager.is_control_command("/plugincmd")
+    unregister_command("plugincmd", owner="cmd-live")
+
+
+@pytest.mark.asyncio
+async def test_effect_teardown_runtime_error_is_not_quiescent(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    loader, _workspace, _installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "effect-hang",
+        (
+            "def _boom():\n"
+            "            raise RuntimeError('effect still running')\n"
+            "        api.effect('hang', None, _boom)"
+        ),
+    )
+    inst = loader.lifecycle.get_instance("effect-hang")
+    assert inst is not None
+    setups = {"n": 0}
+    real_register = loader._invoke_plugin_register
+
+    async def _count(*args, **kwargs):
+        setups["n"] += 1
+        return await real_register(*args, **kwargs)
+
+    monkeypatch.setattr(loader, "_invoke_plugin_register", _count)
+    report = await loader.unload_plugin("effect-hang", delete_files=False)
+    assert report.quiescent is False
+    assert report.needs_restart is True
+    assert loader.lifecycle.get_instance("effect-hang") is inst
+    assert inst.has_runtime_ledger()
+    assert "effect-hang" in loader.get_all_loaded_plugins()
+    reload_report = await loader.lifecycle.reload("effect-hang")
+    assert not reload_report.ok
+    assert reload_report.needs_restart
+    assert setups["n"] == 0
+    cfg = await loader.lifecycle.update_config(
+        "effect-hang",
+        {"touched": True},
+    )
+    assert not cfg.ok
+    assert cfg.needs_restart
+    assert setups["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_unloaded_force_unquiescent_activate_keeps_new_dir(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+
+    async def _noop_process(_req):
+        return None
+
+    loader, workspace, installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "force-ch",
+        "pass",
+    )
+    (installed / "v1.txt").write_text("v1\n", encoding="utf-8")
+    await loader.unload_plugin("force-ch", delete_files=False)
+    workspace._config = _enabled_channel_config("force-ch")
+    workspace.channel_manager = ChannelManager([])
+    workspace.channel_manager._process = _noop_process
+    workspace.channel_manager._workspace = workspace
+    staging = _write_plugin(
+        tmp_path / "staging-force-ch",
+        "force-ch",
+        body=(
+            "from qwenpaw.app.channels.base import BaseChannel\n"
+            "        class _Stuck(BaseChannel):\n"
+            "            channel = 'force-ch'\n"
+            "            uses_manager_queue = False\n"
+            "            def __init__(self, *args, **kwargs):\n"
+            "                self.alive = True\n"
+            "                self._enqueue = None\n"
+            "            @classmethod\n"
+            "            def from_config(cls, **kwargs):\n"
+            "                return cls()\n"
+            "            async def start(self):\n"
+            "                self.alive = True\n"
+            "            async def stop(self):\n"
+            "                raise RuntimeError('still connected')\n"
+            "            def set_enqueue(self, cb):\n"
+            "                self._enqueue = cb\n"
+            "            def set_workspace(self, ws, reg):\n"
+            "                return None\n"
+            "        api.register_channel(_Stuck)\n"
+            "        def _boom():\n"
+            "            raise RuntimeError('startup boom')\n"
+            "        api.register_startup_hook('boom', _boom, priority=90)"
+        ),
+    )
+    (staging / "v2.txt").write_text("v2\n", encoding="utf-8")
+    backup = installed.with_name(f"{installed.name}.force-ch.bak")
+
+    def _ch_registry():
+        reg = fresh_registry.get_channel_registration("force-ch")
+        if reg is None:
+            return {}
+        return {"force-ch": reg.channel_class}
+
+    with (
+        patch(
+            "qwenpaw.plugins.workspace_projector.get_available_channels",
+            return_value=("force-ch",),
+        ),
+        patch(
+            "qwenpaw.app.channels.manager.get_channel_registry",
+            _ch_registry,
+        ),
+        patch(
+            "qwenpaw.app.channels.manager.get_available_channels",
+            return_value=("force-ch",),
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="startup boom"):
+            await loader.load_plugin_from_path(staging, force=True)
+    assert (installed / "v2.txt").exists()
+    assert not (installed / "v1.txt").exists()
+    assert backup.is_dir()
+    assert (backup / "v1.txt").read_text(encoding="utf-8") == "v1\n"
+    assert marker_path("force-ch").is_file()
+    inst = loader.lifecycle.get_instance("force-ch")
+    assert inst is not None
+    assert inst.state is PluginState.FAILED
+    assert inst.has_runtime_ledger()
+    assert workspace.channel_manager.channels
+    assert "force-ch" in [
+        ch.channel for ch in workspace.channel_manager.channels
+    ]
+
+
+@pytest.mark.asyncio
+async def test_commit_migrations_failure_keeps_new_service(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    loader, workspace, installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "svc-commit",
+        "api.register_slash_command('ping', lambda c, a: None)",
+    )
+    incoming = _write_plugin(
+        tmp_path / "incoming-svc-commit",
+        "svc-commit",
+        body="api.register_slash_command('pong', lambda c, a: None)",
+    )
+
+    def _boom(_plugin_id):
+        raise RuntimeError("commit boom")
+
+    monkeypatch.setattr(
+        "qwenpaw.plugins.provision.commit_migrations",
+        _boom,
+    )
+    report = await loader.lifecycle.reload(
+        "svc-commit",
+        new_source=incoming,
+    )
+    assert report.ok
+    assert report.needs_restart
+    assert "pong" in workspace.plugins.slash_command_registry.names()
+    assert "ping" not in workspace.plugins.slash_command_registry.names()
+    assert "pong" in (installed / "main.py").read_text(encoding="utf-8")
+    assert "ping" not in (installed / "main.py").read_text(encoding="utf-8")
+    inst = loader.lifecycle.get_instance("svc-commit")
+    assert inst is not None
+    assert inst.activated
+    record = loader.get_loaded_plugin("svc-commit")
+    assert record is not None
+    assert record.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_commit_migrations_failure_survives_boot_recover(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    dest = tmp_path / "prov-commit-boot"
+    factory_v1 = tmp_path / "factory-commit-v1"
+    factory_v1.mkdir()
+    (factory_v1 / "note.md").write_text("v1\n", encoding="utf-8")
+    factory_v2 = tmp_path / "factory-commit-v2"
+    factory_v2.mkdir()
+    (factory_v2 / "note.md").write_text("v2\n", encoding="utf-8")
+    loader, workspace, installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "svc-boot",
+        (
+            "from pathlib import Path\n"
+            f"        api.provision_files(Path({str(factory_v1)!r}), "
+            f"Path({str(dest)!r}), '1.0.0')\n"
+            "        api.register_slash_command('ping', lambda c, a: None)"
+        ),
+    )
+    assert (dest / "note.md").read_text(encoding="utf-8") == "v1\n"
+    incoming = _write_plugin(
+        tmp_path / "incoming-svc-boot",
+        "svc-boot",
+        body=(
+            "from pathlib import Path\n"
+            f"        api.provision_files(Path({str(factory_v2)!r}), "
+            f"Path({str(dest)!r}), '2.0.0')\n"
+            "        api.register_slash_command('pong', lambda c, a: None)"
+        ),
+    )
+
+    def _boom(_plugin_id):
+        raise RuntimeError("commit boom")
+
+    monkeypatch.setattr(
+        "qwenpaw.plugins.provision.commit_migrations",
+        _boom,
+    )
+    report = await loader.lifecycle.reload(
+        "svc-boot",
+        new_source=incoming,
+    )
+    assert report.ok
+    assert report.needs_restart
+    assert (dest / "note.md").read_text(encoding="utf-8") == "v2\n"
+    assert "pong" in workspace.plugins.slash_command_registry.names()
+    loc = (load_inventory("svc-boot").get("locations") or {}).get(str(dest))
+    migrating = (loc or {}).get("migrating") or {}
+    assert not migrating or migrating.get("status") == "committed"
+    recover_interrupted_updates()
+    recover_migrating_inventory()
+    assert (dest / "note.md").read_text(encoding="utf-8") == "v2\n"
+    assert "pong" in (installed / "main.py").read_text(encoding="utf-8")
+    loc = (load_inventory("svc-boot").get("locations") or {}).get(str(dest))
+    assert loc is not None
+    assert loc.get("version") == "2.0.0"
+    leftover = loc.get("migrating") or {}
+    assert leftover.get("status") != "prepared"
+    assert not leftover or leftover.get("status") == "committed"
+
+
+@pytest.mark.asyncio
+async def test_finish_committed_keeps_marker_if_prepared_commit_fails(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    target = tmp_path / "plugins" / "keep-mark"
+    target.mkdir(parents=True)
+    (target / "main.py").write_text("NEW\n", encoding="utf-8")
+    backup = tmp_path / "plugins" / "keep-mark.bak"
+    backup.mkdir()
+    (backup / "main.py").write_text("OLD\n", encoding="utf-8")
+    write_updating_marker(
+        "keep-mark",
+        backup_path=backup,
+        target_path=target,
+    )
+    mark_update_committed("keep-mark")
+    loader = PluginLoader(plugin_dirs=[tmp_path / "plugins"])
+
+    def _boom(_plugin_id):
+        raise RuntimeError("inventory full")
+
+    monkeypatch.setattr(
+        "qwenpaw.plugins.provision.commit_prepared_migrations",
+        _boom,
+    )
+    errors = await loader._finish_committed_reload("keep-mark", backup)
+    assert errors
+    assert marker_path("keep-mark").is_file()
+    assert update_marker_status("keep-mark") == STATUS_COMMITTED
+    assert backup.exists()
+    assert (target / "main.py").read_text(encoding="utf-8") == "NEW\n"
+
+
+@pytest.mark.asyncio
+async def test_unload_keeps_post_activate_workspace_create(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    from qwenpaw.plugins.api import PluginApi
+    from qwenpaw.plugins.provision import commit_migrations
+
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    first = tmp_path / "first-skill"
+    factory = tmp_path / "factory-skill"
+    factory.mkdir()
+    (factory / "note.md").write_text("v1\n", encoding="utf-8")
+    loader, _workspace, _installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "ws-keep",
+        (
+            "from pathlib import Path\n"
+            f"        api.provision_files(Path({str(factory)!r}), "
+            f"Path({str(first)!r}), '1.0.0')\n"
+            "        api.register_slash_command('ping', lambda c, a: None)"
+        ),
+    )
+    inst = loader.lifecycle.get_instance("ws-keep")
+    assert inst is not None
+    assert inst.activated
+    dest = tmp_path / "new-ws-skill"
+    later = tmp_path / "later-factory"
+    later.mkdir()
+    (later / "note.md").write_text("ws\n", encoding="utf-8")
+    api = PluginApi("ws-keep", config={}, manifest={"id": "ws-keep"})
+    api.bind_instance(inst)
+    assert api.provision_files(later, dest, "1.0.0") == "create"
+    commit_migrations("ws-keep")
+    assert dest.exists()
+    assert inst.created_dests() == []
+    report = await loader.unload_plugin("ws-keep", delete_files=False)
+    assert report.quiescent
+    assert dest.exists()
+    assert first.exists()
+    loc = (load_inventory("ws-keep").get("locations") or {}).get(str(dest))
+    assert loc is not None
+    assert loc.get("owned") is True
+
+
+@pytest.mark.asyncio
+async def test_uninstall_removes_owned_after_post_activate_create(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    from qwenpaw.plugins.api import PluginApi
+    from qwenpaw.plugins.provision import commit_migrations
+
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    factory = tmp_path / "owned-factory"
+    factory.mkdir()
+    (factory / "note.md").write_text("v1\n", encoding="utf-8")
+    dest = tmp_path / "owned-later"
+    loader, _workspace, _installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "ws-drop",
+        "api.register_slash_command('ping', lambda c, a: None)",
+    )
+    inst = loader.lifecycle.get_instance("ws-drop")
+    assert inst is not None
+    api = PluginApi("ws-drop", config={}, manifest={"id": "ws-drop"})
+    api.bind_instance(inst)
+    assert api.provision_files(factory, dest, "1.0.0") == "create"
+    commit_migrations("ws-drop")
+    assert dest.exists()
+    report = await loader.unload_plugin(
+        "ws-drop",
+        delete_files=True,
+        mode=UnloadMode.UNINSTALL,
+    )
+    assert report.quiescent
+    assert not dest.exists()
+    assert str(dest) not in (load_inventory("ws-drop").get("locations") or {})
+
+
+@pytest.mark.asyncio
+async def test_activate_rollback_does_not_block_event_loop(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    from qwenpaw.plugins import api as plugin_api
+
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    real = plugin_api.rollback_activate_install
+
+    def _slow(*args, **kwargs):
+        time.sleep(0.12)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(plugin_api, "rollback_activate_install", _slow)
+    beats: list[float] = []
+
+    async def _heart() -> None:
+        for _ in range(8):
+            beats.append(time.monotonic())
+            await asyncio.sleep(0.01)
+
+    installed = _write_plugin(
+        tmp_path / "plugins" / "roll-io",
+        "roll-io",
+        body=(
+            "def _boom():\n"
+            "            raise RuntimeError('startup boom')\n"
+            "        api.register_startup_hook('boom', _boom)"
+        ),
+    )
+    loader = PluginLoader(plugin_dirs=[tmp_path / "plugins"])
+    loader.registry = fresh_registry
+    manifest = PluginManifest.from_dict(
+        json.loads((installed / "plugin.json").read_text(encoding="utf-8")),
+    )
+    heart = asyncio.create_task(_heart())
+    record = await loader.load_plugin(manifest, installed)
+    await heart
+    assert record.status == "failed"
+    gaps = [later - earlier for later, earlier in zip(beats[1:], beats)]
+    assert gaps
+    assert min(gaps) < 0.05
+
+
+@pytest.mark.asyncio
+async def test_uninstall_teardown_does_not_block_event_loop(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    from qwenpaw.plugins import provision as provision_mod
+
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    real = provision_mod.teardown_created_locations
+
+    def _slow(plugin_id):
+        time.sleep(0.12)
+        return real(plugin_id)
+
+    monkeypatch.setattr(provision_mod, "teardown_created_locations", _slow)
+    factory = tmp_path / "slow-factory"
+    factory.mkdir()
+    (factory / "note.md").write_text("v1\n", encoding="utf-8")
+    dest = tmp_path / "slow-dest"
+    loader, _workspace, _installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "slow-un",
+        (
+            "from pathlib import Path\n"
+            f"        api.provision_files(Path({str(factory)!r}), "
+            f"Path({str(dest)!r}), '1.0.0')"
+        ),
+    )
+    beats: list[float] = []
+
+    async def _heart() -> None:
+        for _ in range(8):
+            beats.append(time.monotonic())
+            await asyncio.sleep(0.01)
+
+    heart = asyncio.create_task(_heart())
+    await loader.unload_plugin(
+        "slow-un",
+        delete_files=True,
+        mode=UnloadMode.UNINSTALL,
+    )
+    await heart
+    gaps = [later - earlier for later, earlier in zip(beats[1:], beats)]
+    assert gaps
+    assert min(gaps) < 0.05
+    assert not dest.exists()

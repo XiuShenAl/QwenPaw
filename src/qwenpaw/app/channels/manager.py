@@ -189,6 +189,36 @@ class ChannelManager:
         # Track channel-start tasks for graceful shutdown
         self._start_tasks: set[asyncio.Task] = set()
 
+    def register_control_command(
+        self,
+        prefix: str,
+        *,
+        priority_level: int | None = None,
+        owner: str | None = None,
+    ) -> None:
+        """Register a control command on this workspace's live registry."""
+        self._command_registry.register_command(
+            prefix,
+            priority_level=10 if priority_level is None else priority_level,
+            owner=owner,
+        )
+
+    def unregister_control_command(
+        self,
+        prefix: str,
+        *,
+        owner: str | None = None,
+    ) -> bool:
+        """Drop one command this *owner* previously registered here."""
+        return self._command_registry.unregister_command(
+            prefix,
+            owner=owner,
+        )
+
+    def is_control_command(self, query: str) -> bool:
+        """Whether *query* matches a command on this workspace."""
+        return self._command_registry.is_control_command(query)
+
     @classmethod
     def from_env(
         cls,

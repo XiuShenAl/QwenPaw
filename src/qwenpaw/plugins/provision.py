@@ -8,7 +8,9 @@ import importlib
 import importlib.util
 import json
 import logging
+import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -228,6 +230,10 @@ def provision_files(
     dest = Path(dest)
     if not src.exists():
         raise FileNotFoundError(f"provision src not found: {src}")
+    if not str(dest).strip() or dest in {Path(""), Path(".")}:
+        raise ValueError("refusing to provision an empty dest")
+    if not dest.is_absolute():
+        dest = dest.resolve()
 
     dest_key = str(dest)
     data = load_inventory(plugin_id)
@@ -236,12 +242,14 @@ def provision_files(
     prev_version = previous.get("version")
     prev_files: dict[str, Any] = previous.get("files") or {}
     owned = location_owned(previous)
+    dest_existed = dest.exists()
 
-    if dest.exists() and prev_version == version:
+    if dest_existed and prev_version == version:
         return "keep"
 
-    if dest.exists() and not prev_version:
-        # Inventory missing: treat as user-owned, do not overwrite.
+    if dest_existed and not prev_version:
+        # User already had this path before the plugin created it.
+        # Never use this branch for a half-finished create from this txn.
         locations[dest_key] = {
             "src": str(src),
             "version": version,
@@ -252,7 +260,7 @@ def provision_files(
         save_inventory(plugin_id, data)
         return "keep"
 
-    branch = "create" if not dest.exists() else "migrate"
+    branch = "create" if not dest_existed else "migrate"
     if branch == "create":
         owned = True
     backup = None
@@ -268,27 +276,35 @@ def provision_files(
             data,
             owned=owned,
         )
-    new_files = _apply_factory_copy(src, dest, prev_files, branch)
-    marker = None
-    if branch == "migrate" and backup is not None:
-        marker = {
-            "status": "prepared",
-            "backup_path": str(backup),
-            "target_version": version,
-            "prev_version": prev_version,
-            "prev_factory_hashes": {
-                rel: (info or {}).get("factory_hash", "")
-                for rel, info in prev_files.items()
-            },
+    try:
+        if branch == "create":
+            new_files = _create_via_staging(src, dest, prev_files)
+        else:
+            new_files = _apply_factory_copy(src, dest, prev_files, branch)
+        marker = None
+        if branch == "migrate" and backup is not None:
+            marker = {
+                "status": "prepared",
+                "backup_path": str(backup),
+                "target_version": version,
+                "prev_version": prev_version,
+                "prev_factory_hashes": {
+                    rel: (info or {}).get("factory_hash", "")
+                    for rel, info in prev_files.items()
+                },
+            }
+        locations[dest_key] = {
+            "src": str(src),
+            "version": version,
+            "owned": owned,
+            "files": new_files,
+            "migrating": marker,
         }
-    locations[dest_key] = {
-        "src": str(src),
-        "version": version,
-        "owned": owned,
-        "files": new_files,
-        "migrating": marker,
-    }
-    save_inventory(plugin_id, data)
+        save_inventory(plugin_id, data)
+    except Exception:
+        if branch == "create" and not dest_existed and dest.exists():
+            _remove_path(dest)
+        raise
     return branch
 
 
@@ -328,6 +344,45 @@ def _begin_migration(
     }
     save_inventory(plugin_id, data)
     return backup
+
+
+def _create_via_staging(
+    src: Path,
+    dest: Path,
+    prev_files: dict[str, Any],
+) -> dict[str, Any]:
+    """Copy factory files on the same volume, then rename onto dest."""
+    if dest.exists():
+        raise RuntimeError(f"provision create dest already exists: {dest}")
+    parent = dest.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    if not parent.is_absolute():
+        raise ValueError("provision dest parent must be absolute")
+    staging_root = Path(
+        tempfile.mkdtemp(
+            prefix=f".{dest.name or 'dest'}.prov-",
+            dir=str(parent),
+        ),
+    )
+    staging = staging_root / (dest.name or "dest")
+    try:
+        new_files = _apply_factory_copy(src, staging, prev_files, "create")
+        if dest.exists():
+            raise RuntimeError(
+                f"provision dest appeared during create: {dest}",
+            )
+        os.rename(str(staging), str(dest))
+        return new_files
+    except Exception:
+        if dest.exists():
+            _remove_path(dest)
+        raise
+    finally:
+        if staging_root.exists():
+            safe_remove(
+                staging_root,
+                purpose="clear provision create staging",
+            )
 
 
 def _apply_factory_copy(
@@ -395,6 +450,69 @@ def _copy_one(
         shutil.copy2(src_file, sibling)
 
 
+def commit_prepared_migrations(plugin_id: str) -> None:
+    """Keep dests and drop backups for leftover migrating locations.
+
+    Call only when the plugin directory update is already committed.
+    Prepared and committed markers both finish as committed: dest stays,
+    provision backups go away, ``migrating`` is cleared.
+    """
+    data = load_inventory(plugin_id)
+    changed = False
+    for loc in (data.get("locations") or {}).values():
+        if not loc:
+            continue
+        marker = loc.get("migrating")
+        if not marker:
+            continue
+        backup = parse_optional_absolute(marker.get("backup_path"))
+        if backup is not None:
+            try:
+                _remove_path(backup)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Could not remove committed provision backup %s",
+                    backup,
+                    exc_info=True,
+                )
+        loc["migrating"] = None
+        changed = True
+    if changed:
+        save_inventory(plugin_id, data)
+
+
+def _recover_one_migrating_location(
+    dest_key: str,
+    loc: dict[str, Any],
+    keep_new: bool,
+) -> bool:
+    """Finish or restore one migrating location. True if inventory changed."""
+    marker = loc.get("migrating")
+    if not marker:
+        return False
+    if marker.get("status") == "committed" or keep_new:
+        backup = parse_optional_absolute(marker.get("backup_path"))
+        if backup is not None:
+            _remove_path(backup)
+        loc["migrating"] = None
+        return True
+    backup = parse_optional_absolute(marker.get("backup_path"))
+    dest = parse_optional_absolute(dest_key)
+    if dest is None:
+        loc["migrating"] = None
+        return True
+    if backup is not None:
+        _restore_backup(backup, dest)
+    loc["version"] = marker.get("prev_version")
+    loc["migrating"] = None
+    hashes = marker.get("prev_factory_hashes") or {}
+    loc["files"] = {
+        rel: {"factory_hash": digest} for rel, digest in hashes.items()
+    }
+    loc.pop("pending_factory", None)
+    return True
+
+
 def recover_migrating_inventory(
     plugin_id: str | None = None,
     *,
@@ -410,45 +528,32 @@ def recover_migrating_inventory(
         if not Path(WORKING_DIR).joinpath("plugin_provisions").is_dir():
             return recovered
         ids = [p.stem for p in provisions_dir().glob("*.json")]
+    from .updates import update_is_committed
+
     for item_id in ids:
         if owns_commit is not None and not owns_commit(item_id):
             continue
+        keep_new = update_is_committed(item_id)
         data = load_inventory(item_id)
         changed = False
         for dest_key, loc in list((data.get("locations") or {}).items()):
-            marker = (loc or {}).get("migrating")
-            if not marker:
+            if not loc:
                 continue
-            if marker.get("status") == "committed":
-                backup = parse_optional_absolute(marker.get("backup_path"))
-                if backup is not None:
-                    _remove_path(backup)
-                loc["migrating"] = None
+            if _recover_one_migrating_location(dest_key, loc, keep_new):
                 changed = True
-                continue
-            backup = parse_optional_absolute(marker.get("backup_path"))
-            dest = parse_optional_absolute(dest_key)
-            if dest is None:
-                loc["migrating"] = None
-                changed = True
-                continue
-            if backup is not None:
-                _restore_backup(backup, dest)
-            loc["version"] = marker.get("prev_version")
-            loc["migrating"] = None
-            hashes = marker.get("prev_factory_hashes") or {}
-            loc["files"] = {
-                rel: {"factory_hash": digest} for rel, digest in hashes.items()
-            }
-            loc.pop("pending_factory", None)
-            changed = True
         if changed:
             save_inventory(item_id, data)
             recovered.append(item_id)
-            logger.warning(
-                "Restored in-progress provision migration for plugin '%s'",
-                item_id,
-            )
+            if keep_new:
+                logger.info(
+                    "Finished committed provision migration for plugin '%s'",
+                    item_id,
+                )
+            else:
+                logger.warning(
+                    "Restored in-progress provision migration for plugin '%s'",
+                    item_id,
+                )
     return recovered
 
 

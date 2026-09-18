@@ -174,6 +174,8 @@ class PluginInstance:
 
     def note_created_dest(self, dest: str) -> None:
         """Record a destination created during this load transaction."""
+        if self.activated:
+            return
         if dest and dest not in self._created_dests:
             self._created_dests.append(dest)
 
@@ -191,6 +193,8 @@ class PluginInstance:
         ran. Pass ``None`` to drop a newly written inventory row without
         calling the author's uninstall teardown.
         """
+        if self.activated:
+            return
         if desc:
             self._txn_escapes.append((desc, teardown))
 
@@ -392,28 +396,24 @@ def _record_teardown_failure(
     entry: "LedgerEntry",
     exc: BaseException,
 ) -> None:
-    """Mark *report* from a teardown exception."""
+    """Mark *report* from a teardown exception.
+
+    A teardown that raises has not proved the resource stopped. Fail
+    closed: do not treat ordinary ``Exception`` as quiescent.
+    """
     report.clean = False
     report.errors.append(f"{entry.desc}: {exc}")
-    if isinstance(exc, (TimeoutError, QuiescenceError)):
-        report.quiescent = False
-        report.needs_restart = True
-        receipt = getattr(exc, "receipt", None)
-        if receipt is not None:
-            report.receipt = UnloadReceipt(
-                ok=False,
-                detail=str(exc),
-                leftovers=[str(receipt)],
-            )
-        logger.error(
-            "Teardown '%s' did not go quiescent for plugin '%s': %s",
-            entry.desc,
-            report.plugin_id,
-            exc,
+    report.quiescent = False
+    report.needs_restart = True
+    receipt = getattr(exc, "receipt", None)
+    if receipt is not None:
+        report.receipt = UnloadReceipt(
+            ok=False,
+            detail=str(exc),
+            leftovers=[str(receipt)],
         )
-        return
     logger.error(
-        "Teardown '%s' failed for plugin '%s': %s",
+        "Teardown '%s' did not go quiescent for plugin '%s': %s",
         entry.desc,
         report.plugin_id,
         exc,
@@ -506,6 +506,15 @@ class PluginLifecycle:
             allow_install=allow_install,
             activate=activate,
         )
+
+    async def activate(self, plugin_id: str) -> None:
+        """Activate one registered plugin under the loader lock.
+
+        The lock lives here; ``PluginLoader.activate_plugin_unlocked``
+        is the only commit implementation.
+        """
+        async with self._loader.plugin_lifecycle(plugin_id):
+            await self._loader.activate_plugin_unlocked(plugin_id)
 
     async def unload(
         self,
