@@ -110,6 +110,41 @@ def record_escape_provision(
     save_inventory(plugin_id, data)
 
 
+def drop_escape_provision(plugin_id: str, desc: str) -> None:
+    """Remove one escape-provision inventory row after this-txn undo."""
+    data = load_inventory(plugin_id)
+    rows = list(data.get("provisions") or [])
+    kept = [row for row in rows if row.get("desc") != desc]
+    if len(kept) == len(rows):
+        return
+    data["provisions"] = kept
+    save_inventory(plugin_id, data)
+
+
+def undo_this_txn_escapes(
+    plugin_id: str,
+    escapes: list[tuple[str, Any]],
+) -> None:
+    """Undo this-txn escape rows and drop those inventory rows.
+
+    ``teardown`` runs only when this transaction actually ran
+    ``setup``. A ``None`` teardown only drops the newly written
+    inventory row. Existing rows that did not run ``setup`` in this
+    transaction are left alone.
+    """
+    for desc, teardown in reversed(list(escapes)):
+        if teardown is not None:
+            try:
+                teardown()
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "This-txn escape teardown %r failed for '%s'",
+                    desc,
+                    plugin_id,
+                )
+        drop_escape_provision(plugin_id, desc)
+
+
 def replay_persisted_provisions(
     plugin_id: str,
     source_path: Path | None,
@@ -583,8 +618,14 @@ def apply_tool_factory(
     return merged
 
 
-def commit_migrations(plugin_id: str) -> None:
-    """Persist committed state first, then delete leftover backups."""
+# pylint: disable=too-many-branches
+def commit_migrations(plugin_id: str) -> bool:
+    """Persist committed state first, then delete leftover backups.
+
+    Returns True once committed has been persisted (or there was
+    nothing to persist). Exceptions after that persist are logged;
+    callers must not treat them as an uncommitted activate.
+    """
     data = load_inventory(plugin_id)
     changed = False
     backups: list[Path] = []
@@ -612,22 +653,30 @@ def commit_migrations(plugin_id: str) -> None:
         changed = True
     if changed:
         save_inventory(plugin_id, data)
-    for loc in (data.get("locations") or {}).values():
-        marker = (loc or {}).get("migrating") or {}
-        if marker.get("status") != "committed":
-            continue
-        loc["migrating"] = None
-    for backup in backups:
-        try:
-            _remove_path(backup)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "Could not remove committed provision backup %s",
-                backup,
-                exc_info=True,
-            )
-    if changed:
-        save_inventory(plugin_id, data)
+    try:
+        for loc in (data.get("locations") or {}).values():
+            marker = (loc or {}).get("migrating") or {}
+            if marker.get("status") != "committed":
+                continue
+            loc["migrating"] = None
+        for backup in backups:
+            try:
+                _remove_path(backup)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Could not remove committed provision backup %s",
+                    backup,
+                    exc_info=True,
+                )
+        if changed:
+            save_inventory(plugin_id, data)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Post-commit provision cleanup failed for '%s'",
+            plugin_id,
+            exc_info=True,
+        )
+    return True
 
 
 def snapshot_created_dests(plugin_id: str) -> list[str]:

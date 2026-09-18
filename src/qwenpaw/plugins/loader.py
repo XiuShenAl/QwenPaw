@@ -29,6 +29,7 @@ from .dependency_gate import (
 )
 from .lifecycle import (
     PluginLifecycle,
+    PluginState,
     ReloadReport,
     UnloadMode,
     UnloadReport,
@@ -622,6 +623,7 @@ class PluginLoader:
         module.__dict__["__builtins__"] = plugin_builtins
         get_namespace_finder().register(module_name, plugin_builtins)
 
+        skip_module_cleanup = False
         try:
             sys.modules[module_name] = module
             module.__package__ = module_name
@@ -664,11 +666,25 @@ class PluginLoader:
                 manifest_dict,
             )
         except BaseException:
-            self._cleanup_failed_load(
-                plugin_id,
-                module_name,
-                source_path,
-            )
+            instance = self.lifecycle.get_instance(plugin_id)
+            if instance is not None and instance.state is PluginState.FAILED:
+                skip_module_cleanup = True
+                logger.warning(
+                    "Skipping failed-load cleanup for '%s': "
+                    "hosted resources did not go quiescent",
+                    plugin_id,
+                )
+            else:
+                if (
+                    instance is not None
+                    and instance.state is PluginState.DISPOSED
+                ):
+                    self.lifecycle.drop_instance(plugin_id)
+                self._cleanup_failed_load(
+                    plugin_id,
+                    module_name,
+                    source_path,
+                )
             raise
         finally:
             # A loaded plugin no longer needs the sys.path entries it
@@ -681,12 +697,11 @@ class PluginLoader:
             # plain bare imports would otherwise pick up the residue).
             # Shared dependency locations (plugin site dir) are
             # untouched — only paths under the plugin's own tree go.
-            strip_plugin_sys_path(source_path)
-            # sys.modules is the other residue channel: a bypass import
-            # or a data-directory fallthrough during load can cache a
-            # bare name rooted in this plugin's tree, which would keep
-            # serving later plugins even with sys.path clean.
-            sweep_bare_tree_modules(source_path, modules_before)
+            # Unquiescent failed register keeps modules and sys.path:
+            # hosted threads may still import from this tree.
+            if not skip_module_cleanup:
+                strip_plugin_sys_path(source_path)
+                sweep_bare_tree_modules(source_path, modules_before)
 
         return plugin_def
 
@@ -703,6 +718,7 @@ class PluginLoader:
         api = PluginApi(plugin_id, runtime_config(config), manifest_dict)
         api.set_registry(self.registry)
         instance = self.lifecycle.ensure_instance(plugin_id)
+        instance.refuse_unquiescent_reregister()
         api.bind_instance(instance)
         self.registry.register_plugin_manifest(plugin_id, manifest_dict)
         instance.record_runtime(
@@ -724,17 +740,53 @@ class PluginLoader:
             )
         except BaseException as exc:
             instance.mark_failed(str(exc))
+            from ..utils.io_utils import run_sync_io
             from .provision import (
                 recover_migrating_inventory,
                 undo_created_locations,
+                undo_this_txn_escapes,
             )
 
-            undo_created_locations(plugin_id, instance.created_dests())
-            await instance.dispose(UnloadMode.UNLOAD)
-            from ..utils.io_utils import run_sync_io
-
+            await run_sync_io(
+                undo_this_txn_escapes,
+                plugin_id,
+                instance.txn_escapes(),
+            )
+            await run_sync_io(
+                undo_created_locations,
+                plugin_id,
+                instance.created_dests(),
+            )
+            instance.clear_txn_escapes()
+            instance.clear_created_dests()
+            report = await instance.dispose(UnloadMode.UNLOAD)
             await run_sync_io(recover_migrating_inventory, plugin_id)
+            if not report.quiescent:
+                instance.add_diagnostic("needs_restart")
             raise
+
+    def _record_failed_backend(
+        self,
+        manifest: PluginManifest,
+        source_path: Path,
+        exc: BaseException,
+    ) -> PluginRecord:
+        """Persist a failed record so cancel is visible to reload/repair."""
+        plugin_id = manifest.id
+        live = self.lifecycle.ensure_instance(plugin_id)
+        live.mark_failed(str(exc) or type(exc).__name__)
+        live.source_path = source_path
+        if isinstance(exc, asyncio.CancelledError):
+            live.add_diagnostic("needs_restart")
+        record = PluginRecord(
+            manifest=manifest,
+            source_path=source_path,
+            enabled=False,
+            diagnostics=list(live.diagnostics),
+            status="failed",
+        )
+        self._loaded_plugins[plugin_id] = record
+        return record
 
     def _cleanup_failed_load(
         self,
@@ -930,20 +982,18 @@ class PluginLoader:
                     config,
                     manifest,
                 )
-            except Exception as e:
+            except BaseException as exc:
+                record = self._record_failed_backend(
+                    manifest,
+                    source_path,
+                    exc,
+                )
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
                 logger.error(
-                    f"Failed to load plugin '{plugin_id}': {e}",
+                    f"Failed to load plugin '{plugin_id}': {exc}",
                     exc_info=True,
                 )
-                instance.mark_failed(str(e))
-                record = PluginRecord(
-                    manifest=manifest,
-                    source_path=source_path,
-                    enabled=False,
-                    diagnostics=list(instance.diagnostics),
-                    status="failed",
-                )
-                self._loaded_plugins[plugin_id] = record
                 return record
         elif saved_plugin_def is not None:
             try:
@@ -953,16 +1003,14 @@ class PluginLoader:
                     config,
                     _manifest_as_dict(manifest),
                 )
-            except Exception as e:
-                instance.mark_failed(str(e))
-                record = PluginRecord(
-                    manifest=manifest,
-                    source_path=source_path,
-                    enabled=False,
-                    diagnostics=list(instance.diagnostics),
-                    status="failed",
+            except BaseException as exc:
+                record = self._record_failed_backend(
+                    manifest,
+                    source_path,
+                    exc,
                 )
-                self._loaded_plugins[plugin_id] = record
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
                 return record
 
         record = PluginRecord(
@@ -1663,6 +1711,16 @@ class PluginLoader:
             needs_restart=True,
             generation=generation,
         )
+        leftover = self.lifecycle.get_instance(plugin_id)
+        if (
+            plugin_id not in self._loaded_plugins
+            and leftover is not None
+            and leftover.state is PluginState.FAILED
+        ):
+            failed.errors.append(
+                "unquiescent instance remains; refuse to restore directories",
+            )
+            return failed
         if plugin_id in self._loaded_plugins:
             try:
                 unload_report = await self._unload_plugin_unlocked(
@@ -1850,12 +1908,21 @@ class PluginLoader:
                     )
                 return record
             except BaseException:
-                if record is not None and plugin_id in self._loaded_plugins:
+                inst = self.lifecycle.get_instance(plugin_id)
+                already_committed = record is not None and (
+                    record.status == "active"
+                    or (inst is not None and inst.activated)
+                )
+                if (
+                    record is not None
+                    and plugin_id in self._loaded_plugins
+                    and not already_committed
+                ):
                     await self._unload_plugin_unlocked(
                         plugin_id,
                         delete_files=False,
                     )
-                if pawport_owner is not None:
+                if pawport_owner is not None and not already_committed:
                     await asyncio.to_thread(
                         self._remove_incomplete_pawport_plugin,
                         install_dir,
@@ -2639,6 +2706,7 @@ class PluginLoader:
         api = PluginApi(plugin_id, runtime_config(config), manifest_dict)
         api.set_registry(self.registry)
         instance = self.lifecycle.ensure_instance(plugin_id)
+        instance.refuse_unquiescent_reregister()
         api.bind_instance(instance)
         self.registry.register_plugin_manifest(plugin_id, manifest_dict)
         instance.record_runtime(
@@ -2663,22 +2731,33 @@ class PluginLoader:
             from .provision import (
                 recover_migrating_inventory,
                 undo_created_locations,
+                undo_this_txn_escapes,
             )
 
             if instance is not None:
+                await run_sync_io(
+                    undo_this_txn_escapes,
+                    plugin_id,
+                    instance.txn_escapes(),
+                )
                 await run_sync_io(
                     undo_created_locations,
                     plugin_id,
                     instance.created_dests(),
                 )
+                instance.clear_txn_escapes()
+                instance.clear_created_dests()
             await run_sync_io(recover_migrating_inventory, plugin_id)
             try:
-                await instance.teardown_runtime()
+                report = await instance.teardown_runtime()
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "Failed to undo partial register() for plugin '%s'",
                     plugin_id,
                 )
+                raise
+            if not report.quiescent:
+                instance.add_diagnostic("needs_restart")
             raise
 
     async def activate_plugin_unlocked(self, plugin_id: str) -> None:
@@ -2723,6 +2802,9 @@ class PluginLoader:
                 created = (
                     instance.created_dests() if instance is not None else []
                 )
+                escapes = (
+                    instance.txn_escapes() if instance is not None else []
+                )
                 await run_sync_io(
                     rollback_activate_install,
                     plugin_id,
@@ -2730,7 +2812,11 @@ class PluginLoader:
                     agent_tools_before=agent_tools_before,
                     location_keys_before=location_keys_before,
                     created_dests=created,
+                    txn_escapes=escapes,
                 )
+                if instance is not None:
+                    instance.clear_txn_escapes()
+                    instance.clear_created_dests()
                 try:
                     await self._fail_after_startup(
                         plugin_id,
@@ -2745,6 +2831,7 @@ class PluginLoader:
         if instance is not None:
             instance.activated = True
             instance.clear_created_dests()
+            instance.clear_txn_escapes()
             for item in cleanup_errors:
                 instance.add_diagnostic(f"post-commit cleanup: {item}")
         record = self._loaded_plugins.get(plugin_id)
@@ -2772,7 +2859,6 @@ class PluginLoader:
                     exc,
                     exc_info=True,
                 )
-                await self._fail_after_startup(plugin_id, str(exc))
 
     async def _commit_plugin_transaction(
         self,
@@ -2794,8 +2880,8 @@ class PluginLoader:
 
         def _commit() -> list[str]:
             written = tool_names_written_this_txn(plugin_id, before)
-            commit_migrations(plugin_id)
             errors: list[str] = []
+            commit_migrations(plugin_id)
             box[0] = errors
             try:
                 owned = recorded_tool_names(plugin_id)
@@ -2939,17 +3025,44 @@ class PluginLoader:
         """Mark FAILED, undo the runtime ledger, keep the loaded record."""
         instance = self.lifecycle.ensure_instance(plugin_id)
         instance.mark_failed(reason)
-        await instance.dispose(UnloadMode.UNLOAD)
+        report = await instance.dispose(UnloadMode.UNLOAD)
         from ..utils.io_utils import run_sync_io
         from .provision import recover_migrating_inventory
 
         await run_sync_io(recover_migrating_inventory, plugin_id)
-        self.registry.unregister_plugin(plugin_id)
         record = self._loaded_plugins.get(plugin_id)
+        if not report.quiescent:
+            instance.add_diagnostic("needs_restart")
+            if record is not None:
+                record.status = "failed"
+                record.enabled = False
+                record.diagnostics = list(instance.diagnostics)
+            logger.error(
+                "Plugin '%s' marked FAILED after startup "
+                "(not quiescent): %s",
+                plugin_id,
+                reason,
+            )
+            return
+        source = instance.source_path
+        if source is None and record is not None:
+            source = record.source_path
+        self.lifecycle.drop_instance(plugin_id)
+        failed = self.lifecycle.ensure_instance(plugin_id)
+        failed.mark_failed(reason)
+        if source is not None:
+            failed.source_path = source
+            self._cleanup_failed_load(
+                plugin_id,
+                f"plugin_{plugin_id.replace('-', '_')}",
+                Path(source),
+            )
+        else:
+            self.registry.unregister_plugin(plugin_id)
         if record is not None:
             record.status = "failed"
             record.enabled = False
-            record.diagnostics = list(instance.diagnostics)
+            record.diagnostics = list(failed.diagnostics)
         logger.error(
             "Plugin '%s' marked FAILED after startup: %s",
             plugin_id,

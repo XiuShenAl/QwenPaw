@@ -503,6 +503,7 @@ def rollback_activate_install(
     agent_tools_before: dict[str, dict[str, dict[str, Any] | None]],
     location_keys_before: set[str],
     created_dests: Collection[str] | None = None,
+    txn_escapes: Collection[tuple[str, Any]] | None = None,
 ) -> None:
     """Undo install-layer writes from a failed activate transaction."""
     from .provision import (
@@ -510,6 +511,7 @@ def rollback_activate_install(
         rollback_created_locations,
         rollback_uncommitted_tools,
         undo_created_locations,
+        undo_this_txn_escapes,
     )
 
     new_names = rollback_uncommitted_tools(plugin_id, tools_before)
@@ -524,6 +526,8 @@ def rollback_activate_install(
         agent_tools_before,
     )
     rollback_created_locations(plugin_id, location_keys_before)
+    if txn_escapes:
+        undo_this_txn_escapes(plugin_id, list(txn_escapes))
     if created_dests:
         undo_created_locations(plugin_id, list(created_dests))
     recover_migrating_inventory(plugin_id)
@@ -937,7 +941,11 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 teardown_ref=teardown_ref,
             )
             if setup is not None:
+                if self._instance is not None:
+                    self._instance.note_txn_escape(desc, teardown)
                 setup()
+            elif self._instance is not None:
+                self._instance.note_txn_escape(desc, None)
         self._note_install(desc, teardown, kind=kind)
 
     def effect(

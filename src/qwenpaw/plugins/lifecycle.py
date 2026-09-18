@@ -115,6 +115,7 @@ class ConfigUpdateReport:
     requires_confirmation: bool = False
     legacy_hooks: list[str] = field(default_factory=list)
     needs_restart: bool = False
+    quiescent: bool = True
 
 
 @dataclass
@@ -167,6 +168,7 @@ class PluginInstance:
         self._runtime: list[LedgerEntry] = []
         self._install: list[LedgerEntry] = []
         self._created_dests: list[str] = []
+        self._txn_escapes: list[tuple[str, Any]] = []
         self._dispose_task: asyncio.Task[UnloadReport] | None = None
         _LIVE_INSTANCES[plugin_id] = self
 
@@ -182,6 +184,23 @@ class PluginInstance:
         """Drop this-txn create list after the load transaction commits."""
         self._created_dests.clear()
 
+    def note_txn_escape(self, desc: str, teardown: Any) -> None:
+        """Record a this-txn escape row.
+
+        ``teardown`` is the this-txn undo only when ``setup`` actually
+        ran. Pass ``None`` to drop a newly written inventory row without
+        calling the author's uninstall teardown.
+        """
+        if desc:
+            self._txn_escapes.append((desc, teardown))
+
+    def txn_escapes(self) -> list[tuple[str, Any]]:
+        return list(self._txn_escapes)
+
+    def clear_txn_escapes(self) -> None:
+        """Drop this-txn escape list after commit or after undo."""
+        self._txn_escapes.clear()
+
     def legacy_uninstall_descs(self) -> list[str]:
         """Return runtime rows recorded as legacy uninstall hooks."""
         return [
@@ -189,6 +208,18 @@ class PluginInstance:
             for entry in self._runtime
             if entry.kind == "legacy_uninstall"
         ]
+
+    def has_runtime_ledger(self) -> bool:
+        """Whether the runtime teardown ledger still has rows."""
+        return bool(self._runtime)
+
+    def refuse_unquiescent_reregister(self) -> None:
+        """Refuse ``register()`` while a FAILED instance still has handles."""
+        if self.state is PluginState.FAILED and self.has_runtime_ledger():
+            raise RuntimeError(
+                f"Plugin '{self.plugin_id}' is FAILED and not quiescent; "
+                "new register() is forbidden",
+            )
 
     def guard_register(self) -> None:
         """Refuse new long-lived registrations while unloading or disposed."""
@@ -242,6 +273,10 @@ class PluginInstance:
         return self.delegate.owns_commit(self.plugin_id)
 
     def mark_failed(self, reason: str) -> None:
+        if self.state is PluginState.DISPOSED:
+            if reason and reason not in self.diagnostics:
+                self.diagnostics.append(reason)
+            return
         self.state = PluginState.FAILED
         if reason and reason not in self.diagnostics:
             self.diagnostics.append(reason)
@@ -428,11 +463,20 @@ class PluginLifecycle:
     ) -> PluginInstance:
         inst = self._instances.get(plugin_id)
         if inst is None or inst.state is PluginState.DISPOSED:
+            if inst is not None:
+                self.drop_instance(plugin_id)
             inst = PluginInstance(
                 plugin_id,
                 generation=0 if generation is None else generation,
             )
             self._instances[plugin_id] = inst
+            inst.delegate = self.delegate
+            return inst
+        if generation is not None and inst.generation != generation:
+            raise RuntimeError(
+                f"Plugin '{plugin_id}' instance generation "
+                f"{inst.generation} cannot be reused as {generation}",
+            )
         inst.delegate = self.delegate
         return inst
 
@@ -605,6 +649,7 @@ class PluginLifecycle:
                 plugin_id=plugin_id,
                 ok=False,
                 needs_restart=True,
+                quiescent=False,
                 errors=list(teardown_report.errors)
                 or ["hosted resources did not go quiescent"],
             )
@@ -626,6 +671,7 @@ class PluginLifecycle:
                     plugin_id=plugin_id,
                     ok=False,
                     needs_restart=True,
+                    quiescent=False,
                     errors=[str(exc)]
                     + list(
                         undo_report.errors

@@ -11,6 +11,7 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from fastapi import FastAPI
@@ -22,10 +23,12 @@ from qwenpaw.app.routers.plugins import (
     uninstall_plugin_source,
     update_plugin_config,
 )
+from qwenpaw.app.workspace.workspace_plugins import WorkspacePlugins
 from qwenpaw.plugins.architecture import PluginManifest
 from qwenpaw.plugins.custody import close_connection, stop_task
 from qwenpaw.plugins.lifecycle import (
     PluginInstance,
+    PluginLifecycle,
     PluginState,
     UnloadMode,
     UnloadReport,
@@ -2397,3 +2400,605 @@ async def test_disable_unquiescent_does_not_persist_or_lie(
         plugin_id == "stay-on" and item.get("enabled") is False
         for plugin_id, item in persisted
     )
+
+
+def _enabled_channel_config(*keys: str):
+    channels = SimpleNamespace()
+    extra = {}
+    for key in keys:
+        extra[key] = SimpleNamespace(enabled=True, no_text_debounce=True)
+    channels.__pydantic_extra__ = extra
+    return SimpleNamespace(channels=channels, show_tool_details=True)
+
+
+@pytest.mark.asyncio
+async def test_failed_register_unquiescent_keeps_module(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    monkeypatch.setattr("qwenpaw.plugins.custody.THREAD_STOP_SECONDS", 0.15)
+    body = (
+        "import time\n"
+        "        def _spin():\n"
+        "            while True:\n"
+        "                time.sleep(0.05)\n"
+        "        api.spawn_thread(_spin, 'sticky')\n"
+        "        raise RuntimeError('register boom')"
+    )
+    installed = _write_plugin(
+        tmp_path / "plugins" / "sticky-reg",
+        "sticky-reg",
+        body=body,
+    )
+    loader = PluginLoader(plugin_dirs=[tmp_path / "plugins"])
+    loader.registry = fresh_registry
+    manifest = PluginManifest.from_dict(
+        json.loads((installed / "plugin.json").read_text(encoding="utf-8")),
+    )
+    setups = {"n": 0}
+    real_register = loader._invoke_plugin_register
+
+    async def _count(*args, **kwargs):
+        setups["n"] += 1
+        return await real_register(*args, **kwargs)
+
+    monkeypatch.setattr(loader, "_invoke_plugin_register", _count)
+    record = await loader.load_plugin(manifest, installed)
+    assert record.status == "failed"
+    assert "plugin_sticky_reg" in sys.modules
+    inst = loader.lifecycle.get_instance("sticky-reg")
+    assert inst is not None
+    assert inst.state is PluginState.FAILED
+    after = setups["n"]
+    report = await loader.lifecycle.reload("sticky-reg")
+    assert not report.ok
+    assert report.needs_restart
+    assert setups["n"] == after
+    repaired = await loader.repair_dependencies("sticky-reg")
+    assert repaired.status == "failed"
+    assert setups["n"] == after
+    assert "plugin_sticky_reg" in sys.modules
+
+
+@pytest.mark.asyncio
+async def test_startup_stop_failure_keeps_channel(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+
+    async def _noop_process(_req):
+        return None
+
+    workspace = SimpleNamespace(
+        agent_id="talk",
+        plugins=WorkspacePlugins(),
+        _config=_enabled_channel_config("sticky-ch"),
+        channel_manager=ChannelManager([]),
+    )
+    workspace.channel_manager._process = _noop_process
+    workspace.channel_manager._workspace = workspace
+    fresh_registry.projector = WorkspaceProjector(
+        live_workspaces=lambda: [workspace],
+    )
+    fresh_registry.set_workspace_manager(
+        SimpleNamespace(agents={"talk": workspace}),
+    )
+    body = (
+        "from qwenpaw.app.channels.base import BaseChannel\n"
+        "        class _Stuck(BaseChannel):\n"
+        "            channel = 'sticky-ch'\n"
+        "            uses_manager_queue = False\n"
+        "            def __init__(self, *args, **kwargs):\n"
+        "                self.alive = True\n"
+        "                self._enqueue = None\n"
+        "            @classmethod\n"
+        "            def from_config(cls, **kwargs):\n"
+        "                return cls()\n"
+        "            async def start(self):\n"
+        "                self.alive = True\n"
+        "            async def stop(self):\n"
+        "                raise RuntimeError('still connected')\n"
+        "            def set_enqueue(self, cb):\n"
+        "                self._enqueue = cb\n"
+        "            def set_workspace(self, ws, reg):\n"
+        "                return None\n"
+        "        api.register_channel(_Stuck)\n"
+        "        def _boom():\n"
+        "            raise RuntimeError('startup boom')\n"
+        "        api.register_startup_hook('boom', _boom, priority=90)"
+    )
+    installed = _write_plugin(
+        tmp_path / "plugins" / "sticky-ch-plug",
+        "sticky-ch-plug",
+        body=body,
+    )
+    loader = PluginLoader(plugin_dirs=[tmp_path / "plugins"])
+    loader.registry = fresh_registry
+    manifest = PluginManifest.from_dict(
+        json.loads((installed / "plugin.json").read_text(encoding="utf-8")),
+    )
+
+    def _ch_registry():
+        reg = fresh_registry.get_channel_registration("sticky-ch")
+        if reg is None:
+            return {}
+        return {"sticky-ch": reg.channel_class}
+
+    with (
+        patch(
+            "qwenpaw.plugins.workspace_projector.get_available_channels",
+            return_value=("sticky-ch",),
+        ),
+        patch(
+            "qwenpaw.app.channels.manager.get_channel_registry",
+            _ch_registry,
+        ),
+        patch(
+            "qwenpaw.app.channels.manager.get_available_channels",
+            return_value=("sticky-ch",),
+        ),
+    ):
+        record = await loader.load_plugin(manifest, installed)
+        assert record.status == "failed"
+        assert "plugin_sticky_ch_plug" in sys.modules
+        inst = loader.lifecycle.get_instance("sticky-ch-plug")
+        assert inst is not None
+        assert inst.state is PluginState.FAILED
+        assert workspace.channel_manager.channels
+        keys = [ch.channel for ch in workspace.channel_manager.channels]
+        assert "sticky-ch" in keys
+        setups = {"n": 0}
+        real_register = loader._invoke_plugin_register
+
+        async def _count(*args, **kwargs):
+            setups["n"] += 1
+            return await real_register(*args, **kwargs)
+
+        monkeypatch.setattr(loader, "_invoke_plugin_register", _count)
+        report = await loader.lifecycle.reload("sticky-ch-plug")
+        assert not report.ok
+        assert report.needs_restart
+        assert setups["n"] == 0
+        assert workspace.channel_manager.channels
+
+
+@pytest.mark.asyncio
+async def test_failed_register_undoes_this_txn_provision_setup(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    dest = tmp_path / "escape-once"
+    body = (
+        "from pathlib import Path\n"
+        "        import shutil\n"
+        f"        dest = Path({str(dest)!r})\n"
+        "        def _setup(_dest=dest):\n"
+        "            _dest.mkdir()\n"
+        "            (_dest / 'note.md').write_text('v1\\n')\n"
+        "        def _teardown(_dest=dest):\n"
+        "            if _dest.exists():\n"
+        "                shutil.rmtree(_dest)\n"
+        "        api.provision('escape-dir', _setup, _teardown)\n"
+        "        raise RuntimeError('register boom')"
+    )
+    installed = _write_plugin(
+        tmp_path / "plugins" / "esc-boom",
+        "esc-boom",
+        body=body,
+    )
+    loader = PluginLoader(plugin_dirs=[tmp_path / "plugins"])
+    loader.registry = fresh_registry
+    manifest = PluginManifest.from_dict(
+        json.loads((installed / "plugin.json").read_text(encoding="utf-8")),
+    )
+    record = await loader.load_plugin(manifest, installed)
+    assert record.status == "failed"
+    assert not dest.exists()
+    rows = load_inventory("esc-boom").get("provisions") or []
+    assert not any(row.get("desc") == "escape-dir" for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_commit_persist_then_error_does_not_rollback(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    factory = tmp_path / "factory-commit"
+    factory.mkdir()
+    (factory / "note.md").write_text("v1\n", encoding="utf-8")
+    dest = tmp_path / "migrated-commit"
+    body = (
+        "from pathlib import Path\n"
+        f"        src = Path({str(factory)!r})\n"
+        f"        dest = Path({str(dest)!r})\n"
+        "        api.provision_files(src, dest, '1.0.0')\n"
+        "        (src / 'note.md').write_text('v2\\n')\n"
+        "        api.provision_files(src, dest, '2.0.0')\n"
+        "        api.register_slash_command('ping', lambda c, a: None)"
+    )
+    loader, workspace, _installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "commit-half",
+        body,
+        activate=False,
+    )
+    loc = load_inventory("commit-half")["locations"][str(dest)]
+    assert loc.get("migrating")
+    from qwenpaw.plugins import provision as provision_mod
+
+    calls = {"n": 0}
+    real_save = provision_mod.save_inventory
+
+    def _save(plugin_id, data):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise RuntimeError("second save boom")
+        return real_save(plugin_id, data)
+
+    monkeypatch.setattr(provision_mod, "save_inventory", _save)
+    await loader.activate_plugin_unlocked("commit-half")
+    assert (dest / "note.md").read_text(encoding="utf-8") == "v2\n"
+    record = loader.get_loaded_plugin("commit-half")
+    assert record is not None
+    assert record.status == "active"
+    assert "ping" in workspace.plugins.slash_command_registry.names()
+    saved = json.loads(
+        provision_mod.inventory_path("commit-half").read_text(
+            encoding="utf-8",
+        ),
+    )
+    marker = (
+        (saved.get("locations") or {})
+        .get(str(dest), {})
+        .get(
+            "migrating",
+        )
+    )
+    assert marker is None or marker.get("status") == "committed"
+
+
+@pytest.mark.asyncio
+async def test_http_unload_unquiescent_is_409(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    loader, _workspace, _installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "stay-loaded",
+        "api.register_slash_command('ping', lambda c, a: None)",
+    )
+
+    async def _busy(*_args, **_kwargs):
+        return UnloadReport(
+            plugin_id="stay-loaded",
+            mode=UnloadMode.UNLOAD,
+            clean=False,
+            quiescent=False,
+            needs_restart=True,
+            errors=["channel stop failed"],
+        )
+
+    monkeypatch.setattr(loader, "_unload_plugin_unlocked", _busy)
+    from qwenpaw.app.routers.plugins import router as plugins_router
+
+    app = FastAPI()
+    app.include_router(plugins_router, prefix="/api")
+    app.state.plugin_loader = loader
+    client = TestClient(app)
+    response = client.post("/api/plugins/stay-loaded/unload")
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["loaded"] is True
+    assert detail["quiescent"] is False
+    assert detail["needs_restart"] is True
+    assert loader.get_loaded_plugin("stay-loaded") is not None
+
+
+@pytest.mark.asyncio
+async def test_http_update_config_unquiescent_is_409(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    monkeypatch.setattr(
+        "qwenpaw.plugins.settings.persist_plugin_settings",
+        lambda *args, **kwargs: None,
+    )
+    loader, _workspace, _installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "cfg-http",
+        "api.register_slash_command('old', lambda c, a: None)",
+        config={"cmd": "old"},
+    )
+
+    async def _busy(self):
+        self.state = PluginState.FAILED
+        return UnloadReport(
+            plugin_id=self.plugin_id,
+            mode=UnloadMode.UNLOAD,
+            clean=False,
+            quiescent=False,
+            needs_restart=True,
+            errors=["teardown stuck"],
+        )
+
+    monkeypatch.setattr(PluginInstance, "teardown_runtime", _busy)
+    from qwenpaw.app.routers.plugins import router as plugins_router
+
+    app = FastAPI()
+    app.include_router(plugins_router, prefix="/api")
+    app.state.plugin_loader = loader
+    client = TestClient(app)
+    response = client.put(
+        "/api/plugins/cfg-http/config",
+        json={"config": {"cmd": "new"}},
+    )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["needs_restart"] is True
+    assert detail["quiescent"] is False
+    assert detail["errors"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_instance_replaces_disposed_generation():
+    life = PluginLifecycle(SimpleNamespace())
+    inst = life.ensure_instance("gen-p", generation=1)
+    report = await inst.dispose(UnloadMode.UNLOAD)
+    assert report.quiescent
+    assert inst.state is PluginState.DISPOSED
+    inst.mark_failed("should not revive")
+    assert inst.state is PluginState.DISPOSED
+    fresh = life.ensure_instance("gen-p", generation=7)
+    assert fresh is not inst
+    assert fresh.generation == 7
+    assert fresh.state is not PluginState.DISPOSED
+
+
+def test_ensure_instance_refuses_other_generation():
+    life = PluginLifecycle(SimpleNamespace())
+    inst = life.ensure_instance("gen-q", generation=3)
+    inst.mark_failed("boom")
+    with pytest.raises(RuntimeError, match="cannot be reused"):
+        life.ensure_instance("gen-q", generation=4)
+    assert life.get_instance("gen-q") is inst
+    assert inst.generation == 3
+
+
+@pytest.mark.asyncio
+async def test_install_after_load_error_does_not_unload_active(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    incoming = _write_plugin(
+        tmp_path / "incoming-keep-after",
+        "keep-after",
+        body="api.register_slash_command('ping', lambda c, a: None)",
+    )
+    loader = PluginLoader(plugin_dirs=[tmp_path / "plugins"])
+    loader.registry = fresh_registry
+    fresh_registry.projector = WorkspaceProjector(
+        live_workspaces=lambda: [_slash_workspace()],
+    )
+
+    def _after(_record):
+        raise RuntimeError("after boom")
+
+    with pytest.raises(RuntimeError, match="after boom"):
+        await loader.load_plugin_from_path(incoming, after_load=_after)
+    record = loader.get_loaded_plugin("keep-after")
+    assert record is not None
+    assert record.status == "active"
+    inst = loader.lifecycle.get_instance("keep-after")
+    assert inst is not None
+    assert inst.activated
+    assert (tmp_path / "plugins" / "keep-after").is_dir()
+
+    def _cancel(_record):
+        raise asyncio.CancelledError
+
+    incoming2 = _write_plugin(
+        tmp_path / "incoming-keep-cancel",
+        "keep-cancel",
+        body="api.register_slash_command('pong', lambda c, a: None)",
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await loader.load_plugin_from_path(incoming2, after_load=_cancel)
+    record2 = loader.get_loaded_plugin("keep-cancel")
+    assert record2 is not None
+    assert record2.status == "active"
+    assert (tmp_path / "plugins" / "keep-cancel").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_register_cancel_records_failed_and_refuses_setup(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    monkeypatch.setattr("qwenpaw.plugins.custody.THREAD_STOP_SECONDS", 0.15)
+    marker = tmp_path / "ready-cancel.txt"
+    body = (
+        "import asyncio, pathlib, time\n"
+        "        def _spin():\n"
+        "            while True:\n"
+        "                time.sleep(0.05)\n"
+        "        api.spawn_thread(_spin, 'sticky')\n"
+        f"        pathlib.Path({str(marker)!r}).write_text('ready')\n"
+        "        return asyncio.get_running_loop().create_future()"
+    )
+    installed = _write_plugin(
+        tmp_path / "plugins" / "sticky-cancel",
+        "sticky-cancel",
+        body=body,
+    )
+    loader = PluginLoader(plugin_dirs=[tmp_path / "plugins"])
+    loader.registry = fresh_registry
+    manifest = PluginManifest.from_dict(
+        json.loads((installed / "plugin.json").read_text(encoding="utf-8")),
+    )
+    setups = {"n": 0}
+    real_register = loader._invoke_plugin_register
+
+    async def _count(*args, **kwargs):
+        setups["n"] += 1
+        return await real_register(*args, **kwargs)
+
+    monkeypatch.setattr(loader, "_invoke_plugin_register", _count)
+    task = asyncio.create_task(loader.load_plugin(manifest, installed))
+    for _ in range(50):
+        if marker.is_file():
+            break
+        await asyncio.sleep(0.02)
+    assert marker.is_file()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    record = loader.get_loaded_plugin("sticky-cancel")
+    assert record is not None
+    assert record.status == "failed"
+    assert any("needs_restart" in item for item in record.diagnostics)
+    assert "plugin_sticky_cancel" in sys.modules
+    inst = loader.lifecycle.get_instance("sticky-cancel")
+    assert inst is not None
+    assert inst.state is PluginState.FAILED
+    assert inst.has_runtime_ledger()
+    after = setups["n"]
+    again = await loader.load_plugin(manifest, installed)
+    assert again.status == "failed"
+    assert setups["n"] == after
+    with pytest.raises(RuntimeError, match="not quiescent"):
+        inst.refuse_unquiescent_reregister()
+
+
+@pytest.mark.asyncio
+async def test_rollback_reload_skips_dir_swap_without_record(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    old = _write_plugin(
+        tmp_path / "plugins" / "swap-me",
+        "swap-me",
+        body="pass",
+    )
+    backup = _write_plugin(
+        tmp_path / "backup-swap-me",
+        "swap-me",
+        body="api.register_slash_command('old', lambda c, a: None)",
+    )
+    loader = PluginLoader(plugin_dirs=[tmp_path / "plugins"])
+    loader.registry = fresh_registry
+    inst = loader.lifecycle.ensure_instance("swap-me", generation=2)
+    inst.record_runtime("thread", teardown=lambda: None)
+    inst.mark_failed("cancelled")
+    assert loader.get_loaded_plugin("swap-me") is None
+    old_text = (old / "main.py").read_text(encoding="utf-8")
+    manifest = PluginManifest.from_dict(
+        json.loads((old / "plugin.json").read_text(encoding="utf-8")),
+    )
+    report = await loader._rollback_reload(
+        "swap-me",
+        old,
+        None,
+        None,
+        backup,
+        incoming_manifest=manifest,
+        in_place=False,
+        generation=1,
+    )
+    assert not report.ok
+    assert report.needs_restart
+    assert any("unquiescent" in item for item in report.errors)
+    assert (old / "main.py").read_text(encoding="utf-8") == old_text
+    assert backup.is_dir()
+    assert inst.state is PluginState.FAILED
+
+
+@pytest.mark.asyncio
+async def test_provision_setup_none_does_not_teardown_on_fail(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    dest = tmp_path / "cloudpaw-ws"
+    dest.mkdir()
+    (dest / "keep.txt").write_text("user-data\n", encoding="utf-8")
+    body = (
+        "from pathlib import Path\n"
+        "        import shutil\n"
+        f"        dest = Path({str(dest)!r})\n"
+        "        def _teardown(_dest=dest):\n"
+        "            if _dest.exists():\n"
+        "                shutil.rmtree(_dest)\n"
+        "        api.provision(\n"
+        "            'cloudpaw_agents', None, _teardown,\n"
+        "            kind='cloudpaw_agents',\n"
+        "        )\n"
+        "        raise RuntimeError('register boom')"
+    )
+    installed = _write_plugin(
+        tmp_path / "plugins" / "cloud-first",
+        "cloud-first",
+        body=body,
+    )
+    loader = PluginLoader(plugin_dirs=[tmp_path / "plugins"])
+    loader.registry = fresh_registry
+    manifest = PluginManifest.from_dict(
+        json.loads((installed / "plugin.json").read_text(encoding="utf-8")),
+    )
+    record = await loader.load_plugin(manifest, installed)
+    assert record.status == "failed"
+    assert dest.is_dir()
+    assert (dest / "keep.txt").read_text(encoding="utf-8") == "user-data\n"
+    rows = load_inventory("cloud-first").get("provisions") or []
+    assert not any(row.get("desc") == "cloudpaw_agents" for row in rows)
+
+    dest2 = tmp_path / "cloudpaw-ws-activate"
+    dest2.mkdir()
+    (dest2 / "keep.txt").write_text("user-data\n", encoding="utf-8")
+    body2 = (
+        "from pathlib import Path\n"
+        "        import shutil\n"
+        f"        dest = Path({str(dest2)!r})\n"
+        "        def _teardown(_dest=dest):\n"
+        "            if _dest.exists():\n"
+        "                shutil.rmtree(_dest)\n"
+        "        api.provision(\n"
+        "            'cloudpaw_agents', None, _teardown,\n"
+        "            kind='cloudpaw_agents',\n"
+        "        )\n"
+        "        def _boom():\n"
+        "            raise RuntimeError('startup boom')\n"
+        "        api.register_startup_hook('boom', _boom, priority=90)"
+    )
+    loader2, _workspace, _installed = await _load(
+        tmp_path / "activate-cloud",
+        fresh_registry,
+        "cloud-act",
+        body2,
+    )
+    record2 = loader2.get_loaded_plugin("cloud-act")
+    assert record2 is not None
+    assert record2.status == "failed"
+    assert dest2.is_dir()
+    assert (dest2 / "keep.txt").read_text(encoding="utf-8") == "user-data\n"

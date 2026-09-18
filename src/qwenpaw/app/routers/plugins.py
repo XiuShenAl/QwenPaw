@@ -677,12 +677,25 @@ async def unload_plugin_keep_config(plugin_id: str, request: Request):
         if "memory backend is in use" in str(exc):
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         raise
-    return {
+    still_loaded = loader.get_loaded_plugin(plugin_id) is not None
+    payload = {
         "id": plugin_id,
+        "loaded": still_loaded,
         "clean": report.clean,
         "quiescent": report.quiescent,
         "needs_restart": report.needs_restart,
-        "errors": report.errors,
+        "errors": list(report.errors or []),
+    }
+    if not report.quiescent or still_loaded:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                **payload,
+                "message": (f"Plugin '{plugin_id}' did not go quiescent."),
+            },
+        )
+    return {
+        **payload,
         "message": f"Plugin '{plugin_id}' unloaded.",
     }
 
@@ -839,7 +852,12 @@ async def update_plugin_config(
             },
         )
     if not report.ok:
-        status = 404 if report.unchanged else 400
+        if report.needs_restart:
+            status = 409
+        elif report.unchanged:
+            status = 404
+        else:
+            status = 400
         raise HTTPException(
             status_code=status,
             detail={
@@ -850,6 +868,8 @@ async def update_plugin_config(
                 ),
                 "errors": report.errors,
                 "unchanged": report.unchanged,
+                "needs_restart": report.needs_restart,
+                "quiescent": report.quiescent,
             },
         )
     return {
