@@ -9,15 +9,16 @@ Tests cover:
 """
 
 import importlib.util
+import logging
 import sys
 import tempfile
 import types
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import MagicMock
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Stub missing agentscope 2.0 modules so MultiAgentManager can be imported
@@ -69,6 +70,168 @@ def plugin_api(fresh_registry):
     api = PluginApi("test-plugin", config={}, manifest={"id": "test-plugin"})
     api.set_registry(fresh_registry)
     return api
+
+
+class TestSlashCommandLifecycle:
+    """Plugin slash commands use successful registration identities."""
+
+    @staticmethod
+    def _workspace(agent_id="ws-1"):
+        from qwenpaw.runtime.slash_command_registry import SlashCommandRegistry
+
+        return SimpleNamespace(
+            agent_id=agent_id,
+            plugins=SimpleNamespace(
+                slash_command_registry=SlashCommandRegistry(),
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_plugin_api_stamps_command_owner(
+        self,
+        plugin_api,
+        fresh_registry,
+    ):
+        workspace = self._workspace()
+        fresh_registry.set_workspace_manager(
+            SimpleNamespace(agents={workspace.agent_id: workspace}),
+        )
+        plugin_api.register_slash_command("owned", MagicMock())
+        await fresh_registry.projector.project(
+            "slash_command", "owned", "test-plugin"
+        )
+        spec, _args = workspace.plugins.slash_command_registry.resolve(
+            "/owned"
+        )
+        assert spec.owner_plugin_id == "test-plugin"
+
+    @pytest.mark.asyncio
+    async def test_plugin_collision_is_error_logged_and_propagated(
+        self,
+        plugin_api,
+        fresh_registry,
+        caplog,
+    ):
+        from qwenpaw.runtime.slash_command_registry import CommandSpec
+        from qwenpaw.plugins.workspace_projector import ProjectionError
+
+        workspace = self._workspace()
+        original = CommandSpec(name="reserved", handler=MagicMock())
+        workspace.plugins.slash_command_registry.register(original)
+        fresh_registry.set_workspace_manager(
+            SimpleNamespace(agents={workspace.agent_id: workspace}),
+        )
+        plugin_api.register_slash_command("reserved", MagicMock())
+        with caplog.at_level(logging.ERROR, logger="qwenpaw.plugins.api"):
+            with pytest.raises(ProjectionError):
+                await fresh_registry.projector.project(
+                    "slash_command", "reserved", "test-plugin"
+                )
+        assert "Projection slash_command failed" in caplog.text
+        await fresh_registry.projector.revoke(
+            "slash_command", "reserved", "test-plugin"
+        )
+        assert (
+            workspace.plugins.slash_command_registry.resolve("/reserved")[0]
+            is original
+        )
+
+    @pytest.mark.asyncio
+    async def test_failed_projection_can_revoke_only_successful_bindings(
+        self,
+        plugin_api,
+        fresh_registry,
+    ):
+        from qwenpaw.runtime.slash_command_registry import CommandSpec
+        from qwenpaw.plugins.workspace_projector import ProjectionError
+
+        first = self._workspace("ws-1")
+        second = self._workspace("ws-2")
+        occupant = CommandSpec(name="reserved", handler=MagicMock())
+        second.plugins.slash_command_registry.register(occupant)
+        fresh_registry.set_workspace_manager(
+            SimpleNamespace(agents={"ws-1": first, "ws-2": second}),
+        )
+        plugin_api.register_slash_command("reserved", MagicMock())
+        with pytest.raises(ProjectionError):
+            await fresh_registry.projector.project(
+                "slash_command", "reserved", "test-plugin"
+            )
+        await fresh_registry.projector.revoke(
+            "slash_command", "reserved", "test-plugin"
+        )
+        assert (
+            first.plugins.slash_command_registry.resolve("/reserved") is None
+        )
+        assert (
+            second.plugins.slash_command_registry.resolve("/reserved")[0]
+            is occupant
+        )
+
+    @pytest.mark.asyncio
+    async def test_unload_revokes_bindings_and_reports_untracked_rows(
+        self,
+        plugin_api,
+        fresh_registry,
+        tmp_path,
+    ):
+        from qwenpaw.plugins.architecture import (
+            PluginEntryPoints,
+            PluginManifest,
+            PluginRecord,
+        )
+        from qwenpaw.plugins.loader import PluginLoader
+        from qwenpaw.runtime.slash_command_registry import CommandSpec
+
+        workspace = self._workspace()
+        commands = workspace.plugins.slash_command_registry
+        builtin = CommandSpec(name="builtin", handler=MagicMock())
+        untracked = CommandSpec(
+            name="untracked",
+            handler=MagicMock(),
+            owner_plugin_id="test-plugin",
+        )
+        commands.register(builtin)
+        commands.register(untracked)
+        fresh_registry.set_workspace_manager(
+            SimpleNamespace(agents={workspace.agent_id: workspace})
+        )
+        loader = PluginLoader(plugin_dirs=[])
+        instance = loader.lifecycle.ensure_instance("test-plugin")
+        plugin_api.bind_instance(instance)
+        plugin_api.register_slash_command(
+            "reloadable", MagicMock(), aliases=("stale",)
+        )
+        await fresh_registry.projector.project(
+            "slash_command", "reloadable", "test-plugin"
+        )
+        loader._loaded_plugins["test-plugin"] = PluginRecord(
+            manifest=PluginManifest(
+                id="test-plugin",
+                name="Test",
+                version="1.0.0",
+                entry=PluginEntryPoints(backend="plugin.py"),
+            ),
+            source_path=tmp_path,
+            enabled=True,
+            instance=None,
+            status="active",
+        )
+        report = await loader.unload_plugin("test-plugin")
+        assert commands.names() == ["builtin", "untracked"]
+        assert commands.resolve("/builtin")[0] is builtin
+        assert commands.resolve("/untracked")[0] is untracked
+        assert not report.clean
+        assert report.workspace_leaks
+        replacement = CommandSpec(
+            name="reloadable",
+            aliases=("fresh",),
+            handler=MagicMock(),
+            owner_plugin_id="test-plugin",
+        )
+        commands.register(replacement)
+        assert commands.resolve("/reloadable")[0] is replacement
+        assert commands.resolve("/stale") is None
 
 
 # ---------------------------------------------------------------------------

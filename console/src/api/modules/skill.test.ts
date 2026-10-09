@@ -23,7 +23,10 @@ describe("skillApi.listSkills", () => {
 
   it("calls /skills without agent header when no agentId", async () => {
     await skillApi.listSkills();
-    expect(request).toHaveBeenCalledWith("/skills", {});
+    expect(request).toHaveBeenCalledWith(
+      "/skills",
+      expect.objectContaining({ timeout: 120_000, retries: 2 }),
+    );
   });
 
   it("passes X-Agent-Id header when agentId is provided", async () => {
@@ -75,7 +78,10 @@ describe("skillApi.listSkillWorkspaces", () => {
 
   it("calls /skills/workspaces", async () => {
     await skillApi.listSkillWorkspaces();
-    expect(request).toHaveBeenCalledWith("/skills/workspaces");
+    expect(request).toHaveBeenCalledWith(
+      "/skills/workspaces",
+      expect.objectContaining({ timeout: 120_000, retries: 2 }),
+    );
   });
 
   it("returns cached value on second call", async () => {
@@ -98,7 +104,10 @@ describe("skillApi.listSkillPoolSkills", () => {
   it("calls /skills/pool and returns data", async () => {
     vi.mocked(request).mockResolvedValue([{ name: "pool-skill" }]);
     const result = await skillApi.listSkillPoolSkills();
-    expect(request).toHaveBeenCalledWith("/skills/pool");
+    expect(request).toHaveBeenCalledWith(
+      "/skills/pool",
+      expect.objectContaining({ timeout: 120_000, retries: 2 }),
+    );
     expect(result).toEqual([{ name: "pool-skill" }]);
   });
 
@@ -792,5 +801,29 @@ describe("skillApi.streamOptimizeSkill", () => {
       controller.signal,
     );
     expect(chunks).toEqual([]);
+  });
+});
+
+describe("skill editor persistence scope", () => {
+  it("pins content and metadata saves to the original agent", async () => {
+    vi.mocked(request).mockClear();
+    vi.mocked(request).mockResolvedValue({
+      success: true,
+      name: "demo",
+      mode: "edit",
+    });
+    await skillApi.saveSkill(
+      { name: "demo", content: "edited" },
+      "original-agent",
+    );
+    await skillApi.updateSkillChannels("demo", ["all"], "original-agent");
+    await skillApi.updateSkillPreload("demo", true, "original-agent");
+    await skillApi.updateSkillTags("demo", ["work"], "original-agent");
+    expect(request).toHaveBeenCalledTimes(4);
+    for (const [, options] of vi.mocked(request).mock.calls) {
+      expect(new Headers(options?.headers).get("X-Agent-Id")).toBe(
+        "original-agent",
+      );
+    }
   });
 });

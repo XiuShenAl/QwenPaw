@@ -6,7 +6,7 @@
  * the full component with mocked registries/child panels.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, screen, fireEvent, waitFor } from "@testing-library/react";
 import React from "react";
 import { renderWithProviders } from "@/test/common_setup";
 import { useLocation } from "react-router-dom";
@@ -29,12 +29,20 @@ const mocks = vi.hoisted(() => ({
   restartRuntime: vi.fn().mockResolvedValue({}),
   setSelectedAgent: vi.fn(),
   refreshAgents: vi.fn().mockResolvedValue(undefined),
+  language: "en",
 }));
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
     t: (key: string, fallback?: string) => fallback ?? key,
-    i18n: { language: "en" },
+    i18n: {
+      get language() {
+        return mocks.language;
+      },
+      get resolvedLanguage() {
+        return mocks.language;
+      },
+    },
   }),
 }));
 
@@ -74,7 +82,9 @@ vi.mock("../plugins/registry/hooks", () => ({
 }));
 
 vi.mock("../plugins/registry/Slot", () => ({
-  Slot: () => null,
+  Slot: ({ name }: { name: string }) => (
+    <input aria-label={`Plugin ${name}`} defaultValue="plugin state" />
+  ),
 }));
 
 vi.mock("../hooks/useInboxWobble", () => ({
@@ -177,27 +187,6 @@ vi.mock("./SidebarSettingsPanel", () => ({
   ),
 }));
 
-vi.mock("motion/react", () => ({
-  AnimatePresence: ({ children }: { children?: React.ReactNode }) => (
-    <>{children}</>
-  ),
-  motion: new Proxy(
-    {},
-    {
-      get: (_t, tag: string) => {
-        const MotionEl = ({
-          children,
-          ...rest
-        }: {
-          children?: React.ReactNode;
-        }) => React.createElement(tag, { ...rest }, children);
-        return MotionEl;
-      },
-    },
-  ),
-  useReducedMotion: () => true,
-}));
-
 const iconStubs = vi.hoisted(() => {
   const make = (name: string) => {
     function Icon() {
@@ -223,7 +212,8 @@ const iconStubs = vi.hoisted(() => {
 
 vi.mock("@agentscope-ai/icons", () => iconStubs);
 
-vi.mock("lucide-react", () => {
+vi.mock("lucide-react", async () => {
+  const actual = await vi.importActual<object>("lucide-react");
   const stub = ({ size }: { size?: number }) =>
     React.createElement(
       "span",
@@ -231,6 +221,7 @@ vi.mock("lucide-react", () => {
       size ?? 16,
     );
   return {
+    ...actual,
     Check: stub,
     ChevronDown: stub,
     History: stub,
@@ -263,20 +254,49 @@ function renderSidebar(
   );
 }
 
+/**
+ * Mutable viewport state so a test can resize the window and notify the
+ * media-query listener the sidebar subscribes to on mount.
+ */
+const viewportState = {
+  matches: false,
+  listeners: [] as Array<() => void>,
+};
+
 function mockMobileViewport(matches: boolean) {
+  viewportState.matches = matches;
+  viewportState.listeners = [];
   vi.mocked(window.matchMedia).mockImplementation(
     (query) =>
       ({
-        matches: matches && query === "(max-width: 768px)",
+        get matches() {
+          return viewportState.matches && query === "(max-width: 768px)";
+        },
         media: query,
         onchange: null,
         addListener: vi.fn(),
         removeListener: vi.fn(),
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
+        addEventListener: (_type: string, listener: () => void) => {
+          viewportState.listeners.push(listener);
+        },
+        removeEventListener: (_type: string, listener: () => void) => {
+          viewportState.listeners = viewportState.listeners.filter(
+            (current) => current !== listener,
+          );
+        },
         dispatchEvent: vi.fn(),
-      }) as MediaQueryList,
+      }) as unknown as MediaQueryList,
   );
+}
+
+/** Resize the viewport and fire the sidebar's media-query change event. */
+function resizeViewport(matches: boolean) {
+  viewportState.matches = matches;
+  act(() => {
+    for (const listener of [...viewportState.listeners]) {
+      listener();
+    }
+  });
 }
 
 async function openAccountModal() {
@@ -307,8 +327,16 @@ const modelsItem = {
 };
 
 describe("Sidebar", () => {
+  it("shows a local identity capsule when authentication is disabled", () => {
+    renderWithProviders(<Sidebar selectedKey="core.chat" />);
+    const label = screen.getByText("sidebar.localWorkspace");
+    expect(label.closest("button")).toHaveAttribute("aria-haspopup", "menu");
+    expect(screen.getByText("sidebar.localMode")).toBeInTheDocument();
+  });
   beforeEach(() => {
     mockMobileViewport(false);
+    localStorage.removeItem("qwenpaw_sidebar_collapsed");
+    localStorage.setItem("qwenpaw_sidebar_tools_mode", "2");
     mocks.sidebar.focusItemIds = ["core.workspace", "core.models"];
     mocks.sidebar.hiddenPluginItemIds = [];
     mocks.menuItems = [workspaceItem, inboxItem, modelsItem];
@@ -327,6 +355,103 @@ describe("Sidebar", () => {
     mocks.restartRuntime.mockClear().mockResolvedValue({});
     mocks.setSelectedAgent.mockClear();
     mocks.refreshAgents.mockClear().mockResolvedValue(undefined);
+    mocks.language = "en";
+  });
+
+  it("keeps plugin fills and navigation alive through floating and docking", async () => {
+    renderSidebar();
+    const slot = screen.getByRole("textbox", { name: "Plugin sider.top" });
+    fireEvent.change(slot, { target: { value: "unsaved plugin input" } });
+    const handle = screen.getByRole("button", {
+      name: "Drag sidebar to float; Enter to toggle docking",
+    });
+    fireEvent.keyDown(handle, { key: "Enter" });
+    expect(
+      document.querySelector('[data-sidebar-placement="floating"]'),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
+    expect(
+      screen.getByRole("button", { name: "Collapse tools" }),
+    ).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Return sidebar to left edge" }),
+    );
+    expect(screen.getByRole("textbox", { name: "Plugin sider.top" })).toBe(
+      slot,
+    );
+    expect(slot).toHaveValue("unsaved plugin input");
+    expect(
+      screen.getAllByRole("textbox", { name: "Plugin sider.bottom" }),
+    ).toHaveLength(1);
+  });
+
+  it("cycles collapsed, compact and detailed tools without folding on navigation", () => {
+    localStorage.removeItem("qwenpaw_sidebar_tools_mode");
+    renderSidebar();
+    expect(
+      screen.queryByRole("button", { name: "Workspace" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Compact tools" }));
+    fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
+    expect(
+      screen.getByRole("button", { name: "Detailed tools" }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(localStorage.getItem("qwenpaw_sidebar_tools_mode")).toBe("1");
+    fireEvent.click(screen.getByRole("button", { name: "Detailed tools" }));
+    expect(localStorage.getItem("qwenpaw_sidebar_tools_mode")).toBe("2");
+    fireEvent.click(screen.getByTestId("tool-header-toggle"));
+    expect(localStorage.getItem("qwenpaw_sidebar_tools_mode")).toBe("0");
+    expect(
+      screen.queryByRole("button", { name: "Pin tools" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows navigation labels as tooltips in compact tools mode", async () => {
+    localStorage.setItem("qwenpaw_sidebar_tools_mode", "1");
+    renderSidebar();
+
+    fireEvent.mouseEnter(screen.getByRole("button", { name: "Workspace" }));
+
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Workspace");
+  });
+
+  it("collapses tools when the open header blank area is clicked", async () => {
+    localStorage.setItem("qwenpaw_sidebar_tools_mode", "1");
+    renderSidebar();
+
+    fireEvent.click(screen.getByTestId("tool-header-toggle"));
+
+    expect(localStorage.getItem("qwenpaw_sidebar_tools_mode")).toBe("0");
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Workspace" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "Compact tools" })).toBeVisible();
+  });
+
+  it("restores the previous detailed mode after a header collapse", async () => {
+    localStorage.setItem("qwenpaw_sidebar_tools_mode", "2");
+    renderSidebar();
+
+    fireEvent.click(screen.getByTestId("tool-header-toggle"));
+
+    expect(localStorage.getItem("qwenpaw_sidebar_tools_mode")).toBe("0");
+    expect(localStorage.getItem("qwenpaw_sidebar_tools_last_open_mode")).toBe(
+      "2",
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Workspace" }),
+      ).not.toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByTestId("tool-header-toggle"));
+
+    expect(localStorage.getItem("qwenpaw_sidebar_tools_mode")).toBe("2");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Workspace" })).toBeVisible(),
+    );
   });
 
   it("renders the unified desktop sidebar with agent and settings menus", async () => {
@@ -338,6 +463,59 @@ describe("Sidebar", () => {
     // Menu labels resolve from the mocked menu registry
     expect(screen.getByText("Workspace")).toBeTruthy();
     expect(screen.getByText("Models")).toBeTruthy();
+  });
+
+  it("resolves menu labels again when the language changes", async () => {
+    mocks.menuItems = [
+      {
+        ...workspaceItem,
+        label: () => (mocks.language === "ja" ? "ワークスペース" : "Workspace"),
+      },
+    ];
+
+    const view = renderSidebar();
+    expect(await screen.findByText("Workspace")).toBeVisible();
+
+    mocks.language = "ja";
+    view.rerender(
+      <>
+        <Sidebar selectedKey="core.workspace" />
+        <LocationProbe />
+      </>,
+    );
+
+    expect(await screen.findByText("ワークスペース")).toBeVisible();
+    expect(screen.queryByText("Workspace")).not.toBeInTheDocument();
+  });
+
+  it("refreshes collapsed menu labels when the language changes", async () => {
+    mockMobileViewport(true);
+    mocks.menuItems = [
+      {
+        ...workspaceItem,
+        label: () => (mocks.language === "ja" ? "ワークスペース" : "Workspace"),
+      },
+    ];
+
+    const view = renderSidebar();
+    expect(
+      await screen.findByRole("button", { name: "Workspace" }),
+    ).toBeVisible();
+
+    mocks.language = "ja";
+    view.rerender(
+      <>
+        <Sidebar selectedKey="core.workspace" />
+        <LocationProbe />
+      </>,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "ワークスペース" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Workspace" }),
+    ).not.toBeInTheDocument();
   });
 
   it("navigates to the chat path from the sticky chat button", async () => {
@@ -455,6 +633,51 @@ describe("Sidebar", () => {
     expect(mocks.setSelectedAgent).toHaveBeenCalledWith("agent-1");
   });
 
+  it("separates agent selection from the menu header hit area", () => {
+    renderSidebar();
+    const agent = screen.getByTestId("agent-selector");
+    const header = agent.parentElement!.parentElement!;
+    const background = header.querySelector<HTMLButtonElement>(
+      'button[aria-hidden="true"]',
+    )!;
+    const toggle =
+      header.querySelector<HTMLButtonElement>("button[data-mode]")!;
+    const initial = Number(toggle.dataset.mode);
+    fireEvent.click(agent);
+    expect(Number(toggle.dataset.mode)).toBe(initial);
+    fireEvent.click(background);
+    expect(Number(toggle.dataset.mode)).toBe((initial + 1) % 3);
+    fireEvent.click(toggle);
+    expect(Number(toggle.dataset.mode)).toBe((initial + 2) % 3);
+  });
+
+  it("keeps external plugin links working while floating", () => {
+    mocks.menuItems.push({
+      id: "plugin.docs",
+      location: "primary.settings",
+      label: "Plugin docs",
+      href: "https://example.com/plugin-docs",
+    });
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    renderSidebar();
+    fireEvent.keyDown(
+      screen.getByRole("button", {
+        name: "Drag sidebar to float; Enter to toggle docking",
+      }),
+      { key: "Enter" },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Plugin docs" }));
+    expect(open).toHaveBeenCalledWith(
+      "https://example.com/plugin-docs",
+      "_blank",
+      "noopener,noreferrer",
+    );
+    expect(
+      screen.getByRole("button", { name: "Collapse tools" }),
+    ).toHaveAttribute("aria-expanded", "true");
+    open.mockRestore();
+  });
+
   it("renders registered plugin shortcuts unless the user hides them", async () => {
     const pluginItem = {
       id: "plugin.cloud.dashboard",
@@ -489,7 +712,7 @@ describe("Sidebar", () => {
     renderSidebar();
     await openAccountModal();
     // Modal form renders; submit with only the current password filled
-    const inputs = document.querySelectorAll("input");
+    const inputs = screen.getByRole("dialog").querySelectorAll("input");
     // currentPassword is the first input
     fireEvent.change(inputs[0], { target: { value: "current-pw" } });
     const submitBtn = screen.getByText("account.save");
@@ -516,7 +739,7 @@ describe("Sidebar", () => {
     mocks.authStatus = { enabled: true, mode: "normal" };
     renderSidebar();
     await openAccountModal();
-    const inputs = document.querySelectorAll("input");
+    const inputs = screen.getByRole("dialog").querySelectorAll("input");
     fireEvent.change(inputs[0], { target: { value: "current-pw" } });
     fireEvent.change(inputs[2], { target: { value: "   " } });
     fireEvent.click(screen.getByText("account.save"));
@@ -531,7 +754,7 @@ describe("Sidebar", () => {
     mocks.updateProfile.mockRejectedValue(new Error("password is incorrect"));
     renderSidebar();
     await openAccountModal();
-    const inputs = document.querySelectorAll("input");
+    const inputs = screen.getByRole("dialog").querySelectorAll("input");
     fireEvent.change(inputs[0], { target: { value: "current-pw" } });
     fireEvent.change(inputs[1], { target: { value: "new-user" } });
     fireEvent.click(screen.getByText("account.save"));
@@ -583,5 +806,122 @@ describe("Sidebar", () => {
     // The inbox label is wrapped in a Badge span with a ref callback
     const inboxSpans = screen.getAllByText("Inbox");
     expect(inboxSpans.length).toBeGreaterThan(0);
+  });
+
+  // TC-CON-01 checkpoint 3: the collapsed/expanded state must survive a
+  // page reload through localStorage.
+  describe("collapsed state persistence", () => {
+    function renderedSider() {
+      return document.querySelector<HTMLElement>(".ant-layout-sider");
+    }
+
+    it("restores the collapsed state after a reload", async () => {
+      const view = renderSidebar();
+      await waitFor(() => {
+        expect(screen.getByText("Workspace")).toBeTruthy();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Collapse sidebar" }));
+      await waitFor(() => {
+        expect(screen.queryByText("Workspace")).toBeNull();
+      });
+      expect(localStorage.getItem("qwenpaw_sidebar_collapsed")).toBe("true");
+      view.unmount();
+
+      // Remount simulates the reload: it must start collapsed (72px).
+      renderSidebar();
+      expect(renderedSider()).toHaveStyle({ width: "72px", minWidth: "72px" });
+      expect(screen.queryByText("Workspace")).toBeNull();
+      expect(screen.getByTestId("app-brand")).not.toBeVisible();
+    });
+
+    it("restores the expanded state after a reload", async () => {
+      localStorage.setItem("qwenpaw_sidebar_collapsed", "true");
+      const view = renderSidebar();
+      expect(renderedSider()).toHaveStyle({ width: "72px", minWidth: "72px" });
+
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Expand sidebar" }),
+      );
+      await waitFor(() => {
+        expect(screen.getByText("Workspace")).toBeTruthy();
+      });
+      expect(localStorage.getItem("qwenpaw_sidebar_collapsed")).toBeNull();
+      view.unmount();
+
+      // Remount simulates the reload: it must start expanded (280px).
+      renderSidebar();
+      expect(renderedSider()).toHaveStyle({
+        width: "280px",
+        minWidth: "280px",
+      });
+      expect(screen.getByText("Workspace")).toBeTruthy();
+    });
+
+    it("keeps the mobile collapse transient so desktop is not pinned", async () => {
+      mockMobileViewport(true);
+      renderSidebar();
+
+      expect(renderedSider()).toHaveStyle({ width: "56px", minWidth: "56px" });
+      // A viewport-driven collapse must not write the user preference.
+      expect(localStorage.getItem("qwenpaw_sidebar_collapsed")).toBeNull();
+    });
+
+    it("does not override the stored preference on mobile", async () => {
+      localStorage.setItem("qwenpaw_sidebar_collapsed", "true");
+      mockMobileViewport(true);
+      renderSidebar();
+
+      expect(renderedSider()).toHaveStyle({ width: "56px", minWidth: "56px" });
+      expect(localStorage.getItem("qwenpaw_sidebar_collapsed")).toBe("true");
+    });
+
+    it("restores the stored collapsed preference when back on desktop", async () => {
+      localStorage.setItem("qwenpaw_sidebar_collapsed", "true");
+      renderSidebar();
+      expect(renderedSider()).toHaveStyle({ width: "72px", minWidth: "72px" });
+
+      resizeViewport(true);
+      await waitFor(() => {
+        expect(renderedSider()).toHaveStyle({
+          width: "56px",
+          minWidth: "56px",
+        });
+      });
+
+      resizeViewport(false);
+      await waitFor(() => {
+        expect(renderedSider()).toHaveStyle({
+          width: "72px",
+          minWidth: "72px",
+        });
+      });
+    });
+
+    it("re-expands on desktop when no collapsed preference is stored", async () => {
+      renderSidebar();
+      expect(renderedSider()).toHaveStyle({
+        width: "280px",
+        minWidth: "280px",
+      });
+
+      resizeViewport(true);
+      await waitFor(() => {
+        expect(renderedSider()).toHaveStyle({
+          width: "56px",
+          minWidth: "56px",
+        });
+      });
+      // The viewport override must stay transient.
+      expect(localStorage.getItem("qwenpaw_sidebar_collapsed")).toBeNull();
+
+      resizeViewport(false);
+      await waitFor(() => {
+        expect(renderedSider()).toHaveStyle({
+          width: "280px",
+          minWidth: "280px",
+        });
+      });
+    });
   });
 });

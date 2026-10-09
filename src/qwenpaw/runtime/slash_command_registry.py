@@ -34,6 +34,7 @@ class CommandSpec:
     ``category`` records the origin (``"daemon"`` / ``"control"`` /
     ``"conversation"`` / ``"skill"`` / ``"auto"`` / ``"user"``) so future
     introspection can group commands without re-parsing source.
+    ``owner_plugin_id`` identifies plugin commands; built-ins remain ownerless.
     """
 
     name: str
@@ -59,14 +60,14 @@ class SlashCommandRegistry:
         self._fallback: FallbackHandler | None = None
 
     # ---------------------------------------------------------------- register
-    def register(self, spec: CommandSpec) -> None:
+    def _validate_registration(self, spec: CommandSpec) -> tuple[str, ...]:
         names = (spec.name, *spec.aliases)
-        for nm in names:
-            key = nm.lower()
-            if not key:
-                raise ValueError(
-                    f"command spec has empty name in {names!r}",
-                )
+        keys = tuple(name.lower() for name in names)
+        if any(not key for key in keys):
+            raise ValueError(f"command spec has empty name in {names!r}")
+        if len(set(keys)) != len(keys):
+            raise ValueError(f"command spec has duplicate names in {names!r}")
+        for key in keys:
             if key in self._by_name:
                 existing = self._by_name[key]
                 raise ValueError(
@@ -76,8 +77,15 @@ class SlashCommandRegistry:
                         getattr(existing, "owner_plugin_id", "") or "",
                     ),
                 )
-        for nm in names:
-            self._by_name[nm.lower()] = spec
+        return keys
+
+    def validate(self, spec: CommandSpec) -> None:
+        """Validate a registration without changing the registry."""
+        self._validate_registration(spec)
+
+    def register(self, spec: CommandSpec) -> None:
+        keys = self._validate_registration(spec)
+        self._by_name.update(zip(keys, (spec,) * len(keys)))
 
     def unregister(
         self,

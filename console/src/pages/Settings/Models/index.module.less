@@ -1,3 +1,11 @@
+@import (reference) "../../../styles/modelSurfaces.less";
+@import (reference) "../../../styles/scaledTypography.less";
+
+.settingsPage,
+.modelManageModal {
+  .scaled-control-typography();
+}
+
 .localAdvancedConfigFieldRow {
   flex-direction: row;
   align-items: flex-start;
@@ -6,9 +14,9 @@
 
 /* ---- Provider visual refresh -------------------------------------------- */
 .settingsPage {
-  --models-bg: transparent;
+  .model-surface-tokens();
   --models-surface: var(--app-surface);
-  --models-surface-muted: var(--app-fill-faint);
+  --models-surface-muted: var(--model-inset);
   --models-border: var(--app-border);
   --models-border-strong: var(--app-border-strong);
   --models-text: var(--app-text);
@@ -19,8 +27,9 @@
   --models-accent-soft: var(--app-accent-soft);
   --models-positive: var(--app-success-text);
   --models-positive-soft: var(--app-success-bg);
-  background: var(--models-bg);
+  background: transparent;
   color: var(--models-text);
+  overflow: hidden;
 }
 
 .settingsPage
@@ -35,13 +44,21 @@
 }
 
 .settingsPage .content {
-  background: var(--models-bg);
+  background: transparent;
 }
 
 .settingsPage .pageHeader {
-  padding: 18px 24px;
-  border-bottom-color: var(--models-border);
-  background: var(--models-bg);
+  padding: 0 24px 20px;
+  border: 0;
+  backdrop-filter: none;
+  background: transparent;
+}
+
+:global(.os-window-body) .settingsPage .pageHeader {
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--app-border-subtle);
+  backdrop-filter: blur(16px);
+  background: var(--app-glass);
 }
 
 .settingsPage .breadcrumbParent {
@@ -63,10 +80,11 @@
 .settingsPage .sectionHeaderRow {
   align-items: center;
   padding: 18px 24px 14px;
-  background: var(--models-bg);
+  background: transparent;
 }
 
 .settingsPage .providersPageHeader {
+  background: transparent;
   padding: 0;
 }
 
@@ -147,19 +165,19 @@
 
 .settingsPage .panelSection,
 .settingsPage .panelSectionDashed {
-  margin: 0 24px 18px;
-  padding: 18px;
-  border-radius: 10px;
+  margin: 0 24px 24px;
+  padding: 0;
+  border-radius: 0;
 }
 
 .settingsPage .panelSection {
-  background: var(--models-surface-muted);
-  border-color: var(--models-border);
+  background: transparent;
+  border: 0;
 }
 
 .settingsPage .panelSectionDashed {
-  background: var(--models-surface);
-  border: 1px dashed var(--models-border-strong);
+  background: transparent;
+  border: 0;
 }
 
 .settingsPage .panelTitle {
@@ -180,38 +198,30 @@
 }
 
 .settingsPage .providerCards {
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(0, min(100%, 400px)));
+  gap: 16px;
   margin-bottom: 0;
 }
 
 .settingsPage .groupCardGlass,
 .settingsPage .providerCard {
-  border: 1px solid var(--models-border);
-  border-radius: 10px;
+  border: 1px solid var(--model-hairline);
+  border-radius: 24px;
   background: var(--models-surface);
-  box-shadow: var(--app-shadow-sm);
+  box-shadow: var(--model-shadow);
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
 
 .settingsPage .groupCardGlass:hover,
 .settingsPage .providerCard:hover {
-  border-color: var(--models-border-strong);
-  box-shadow: var(--app-shadow-md);
+  border-color: var(--models-border);
+  box-shadow: var(--model-shadow);
 }
 
 .settingsPage .groupCardName,
 .settingsPage .cardName {
   color: var(--models-text);
-}
-
-.settingsPage .groupCardLiveBadge {
-  color: var(--models-positive);
-}
-
-.settingsPage .groupCardPulse {
-  background: var(--models-positive);
 }
 
 .settingsPage .groupSegmented {
@@ -271,9 +281,9 @@
 }
 
 .settingsPage .groupCardActBtn {
-  min-height: 34px;
-  padding: 7px 12px;
-  border-color: var(--models-border);
+  min-height: 40px;
+  padding: 8px 16px;
+  border-color: transparent;
   color: var(--models-text-muted);
   background: var(--models-surface);
 }
@@ -318,22 +328,34 @@
 }
 
 .settingsPage .availableGrid {
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(
+    auto-fill,
+    minmax(min(100%, max(240px, calc(240px * var(--app-font-scale)))), 1fr)
+  );
   gap: 10px;
 }
 
 .settingsPage .availableItem {
-  min-height: 50px;
-  padding: 10px 12px;
-  border-color: var(--models-border);
-  border-radius: 8px;
+  min-height: 68px;
+  padding: 14px 16px;
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+  font: inherit;
+  border-color: var(--model-hairline);
+  border-radius: 14px;
   background: var(--models-surface);
 }
 
 .settingsPage .availableItem:hover {
-  border-color: var(--app-accent-border);
-  background: var(--models-accent-soft);
-  box-shadow: none;
+  border-color: var(--models-border-strong);
+  background: var(--models-surface-muted);
+  box-shadow: 0 2px 6px rgb(0 0 0 / 4%);
+}
+
+.settingsPage .availableItem:focus-visible {
+  outline: 2px solid var(--models-accent);
+  outline-offset: 3px;
 }
 
 .settingsPage .availableItemName {
@@ -341,11 +363,41 @@
 }
 
 .settingsPage .emptyConfigured {
-  padding: 40px 24px;
-  border-color: var(--models-border-strong);
+  flex-direction: row;
+  justify-content: flex-start;
+  gap: 16px;
+  padding: 20px;
+  margin-bottom: 0;
+  border: 1px solid var(--model-hairline);
+  border-radius: 16px;
+  background: var(--models-surface-muted);
+  text-align: left;
+}
+
+.settingsPage .emptyConfigured h3 {
+  margin: 0 0 4px;
+  color: var(--models-text);
+  font-size: calc(15px * var(--app-font-scale));
+  font-weight: 600;
+  line-height: 1.5;
 }
 
 .settingsPage .emptyConfigured p {
+  margin: 0;
+  color: var(--models-text-muted);
+  font-size: var(--app-font-secondary);
+  line-height: 1.6;
+}
+
+.emptyConfiguredIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 44px;
+  height: 44px;
+  border: 1px solid var(--model-hairline);
+  border-radius: 12px;
+  background: var(--models-surface);
   color: var(--models-text-muted);
 }
 
@@ -374,6 +426,10 @@
     padding: 14px 16px;
   }
 
+  :global(.os-window-body) .settingsPage .pageHeader {
+    padding: 12px 16px;
+  }
+
   .settingsPage .sectionHeaderRow {
     padding: 14px 16px 12px;
   }
@@ -399,7 +455,7 @@
   }
 
   .settingsPage .providerCards {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: minmax(0, min(100%, 400px));
   }
 }
 
@@ -418,18 +474,6 @@
   overflow: hidden;
 }
 
-/* ---- Page Header (breadcrumb style) ---- */
-.pageHeader {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  position: relative;
-  padding: 20px;
-  border-bottom: 1px solid var(--app-border);
-  margin-bottom: 0;
-  flex-shrink: 0;
-}
-
 /* ---- Scrollable Content ---- */
 .content {
   flex: 1;
@@ -441,7 +485,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 16px;
+  font-size: var(--app-font-subtitle);
   flex: 1;
 }
 
@@ -458,7 +502,7 @@
 .breadcrumbCurrent {
   color: var(--app-text);
   font-weight: 600;
-  font-size: 20px;
+  font-size: var(--app-font-title);
 }
 
 .loading {
@@ -482,14 +526,14 @@
 
 .sectionTitle {
   margin-bottom: 4px;
-  font-size: 24px;
+  font-size: calc(24px * var(--app-font-scale));
   font-weight: 600;
 }
 
 .sectionDesc {
   margin: 0 0 24px;
   color: var(--app-text-tertiary);
-  font-size: 14px;
+  font-size: var(--app-font-body);
 }
 
 /* ---- Providers Block (LLM below, providers below) ---- */
@@ -509,7 +553,7 @@
 }
 
 .providerGroupTitle {
-  font-size: 14px;
+  font-size: var(--app-font-body);
   font-weight: 600;
   color: var(--app-text-secondary);
   margin: 0 0 12px;
@@ -517,7 +561,7 @@
 }
 
 .subSectionTitle {
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   font-weight: 500;
   color: var(--app-text-tertiary);
   margin: 16px 0 10px;
@@ -542,14 +586,14 @@
 }
 
 .configuredCount {
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   font-weight: 400;
   color: var(--app-success-text);
   margin-left: 8px;
 }
 
 .availableHint {
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   font-weight: 400;
   color: var(--app-text-tertiary);
   margin-left: 8px;
@@ -567,7 +611,7 @@
   text-align: center;
 }
 .emptyConfigured p {
-  font-size: 14px;
+  font-size: var(--app-font-body);
   color: var(--app-text-secondary);
   margin-bottom: 16px;
 }
@@ -587,7 +631,10 @@
   border-radius: 8px;
   background: var(--app-surface-subtle);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease,
+    box-shadow 150ms ease;
 }
 .availableItem:hover {
   background: var(--models-surface);
@@ -596,14 +643,18 @@
 }
 
 .availableItemName {
-  font-size: 13px;
+  font-size: var(--app-font-secondary);
   font-weight: 500;
   flex: 1;
   color: var(--app-text);
 }
 
 .availableItemAction {
-  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: calc(11px * var(--app-font-scale));
   color: var(--models-accent-strong);
   font-weight: 500;
   white-space: nowrap;
@@ -623,7 +674,9 @@
   border-radius: 8px;
   background: var(--app-surface-subtle);
   cursor: pointer;
-  transition: all 0.2s;
+  transition:
+    color 150ms ease,
+    background-color 150ms ease;
 
   &:hover {
     background: var(--models-accent-soft);
@@ -632,7 +685,7 @@
 }
 
 .variantItemName {
-  font-size: 14px;
+  font-size: var(--app-font-body);
   font-weight: 500;
   color: var(--app-text);
   flex: 1;
@@ -640,11 +693,12 @@
 
 .providerCard {
   background: var(--app-surface);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+
   border-radius: 14px;
   border: 1px solid var(--app-border);
-  transition: all 0.2s;
+  transition:
+    color 150ms ease,
+    background-color 150ms ease;
   cursor: pointer;
   position: relative;
   overflow: visible;
@@ -682,7 +736,7 @@
 }
 
 .statusText {
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   font-weight: 500;
 
   &.enabled {
@@ -715,7 +769,7 @@
 }
 
 .cardName {
-  font-size: 16px;
+  font-size: var(--app-font-subtitle);
   font-weight: 600;
   color: var(--app-text);
 }
@@ -726,7 +780,7 @@
   align-items: center;
   padding: 2px 8px;
   border-radius: 4px;
-  font-size: 11px;
+  font-size: calc(11px * var(--app-font-scale));
   font-weight: 500;
   background-color: var(--app-fill);
   color: var(--app-text-secondary);
@@ -737,7 +791,7 @@
   align-items: center;
   padding: 2px 8px;
   border-radius: 4px;
-  font-size: 11px;
+  font-size: calc(11px * var(--app-font-scale));
   font-weight: 500;
   background-color: var(--app-accent-soft);
   color: var(--app-accent-text);
@@ -749,7 +803,7 @@
   align-items: center;
   padding: 2px 6px;
   border-radius: 4px;
-  font-size: 10px;
+  font-size: calc(10px * var(--app-font-scale));
   font-weight: 700;
   letter-spacing: 0.5px;
   background: var(--app-success);
@@ -761,7 +815,7 @@
   align-items: center;
   padding: 2px 8px;
   border-radius: 4px;
-  font-size: 11px;
+  font-size: calc(11px * var(--app-font-scale));
   font-weight: 500;
   background-color: var(--app-info-bg);
   color: var(--app-info-text);
@@ -773,7 +827,7 @@
   gap: 8px;
 
   .statusText {
-    font-size: 12px;
+    font-size: var(--app-font-caption);
     font-weight: 500;
 
     &.enabled {
@@ -812,7 +866,7 @@
 }
 
 .cardName {
-  font-size: 18px;
+  font-size: calc(18px * var(--app-font-scale));
   font-weight: 600;
   color: var(--app-text);
 }
@@ -828,7 +882,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  font-size: var(--app-font-secondary);
 }
 
 .infoLabel {
@@ -841,7 +895,7 @@
 .infoValue {
   color: var(--app-text-secondary);
   font-family: "SF Mono", "Menlo", monospace;
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -878,8 +932,9 @@
 
 .actionBtn {
   flex: 1;
-  height: 32px;
-  font-size: 13px;
+  height: auto;
+  min-height: max(32px, calc(32px * var(--app-font-scale)));
+  font-size: var(--app-font-secondary);
   border-radius: 6px;
 }
 
@@ -887,12 +942,14 @@
 
 .groupCardGlass {
   background: var(--app-surface);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+
   border-radius: 14px;
   border: 1px solid var(--app-border);
-  padding: 22px;
-  transition: all 0.2s;
+  padding: 24px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  transition: border-color 150ms ease;
   cursor: default;
 
   &:hover {
@@ -908,38 +965,12 @@
 }
 
 .groupCardName {
-  font-size: 17px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: calc(18px * var(--app-font-scale));
   font-weight: 600;
   flex: 1;
   color: var(--app-text);
-}
-
-.groupCardLiveBadge {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  color: var(--app-success-text);
-  font-weight: 500;
-}
-
-.groupCardPulse {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--app-success);
-  animation: groupPulse 2s infinite;
-}
-
-@keyframes groupPulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-
-  50% {
-    opacity: 0.4;
-  }
 }
 
 /* Segmented Control */
@@ -954,15 +985,21 @@
 }
 
 .groupSegBtn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  font-family: inherit;
   flex: 1;
   padding: 7px 6px;
   text-align: center;
-  font-size: 11px;
+  font-size: calc(11px * var(--app-font-scale));
   font-weight: 500;
   color: var(--app-text-tertiary);
   border-radius: 8px;
   cursor: pointer;
-  transition: all 0.2s;
+  transition:
+    color 150ms ease,
+    background-color 150ms ease;
   white-space: nowrap;
   display: flex;
   align-items: center;
@@ -998,8 +1035,8 @@
 .groupCardContent {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: 16px;
+  margin-bottom: 24px;
 }
 
 .groupCardField {
@@ -1009,20 +1046,20 @@
 }
 
 .groupCardFieldLabel {
-  font-size: 10px;
-  color: var(--app-text-tertiary);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+  font-size: var(--app-font-caption);
+  color: var(--app-text-secondary);
+  text-transform: none;
+  letter-spacing: 0;
 }
 
 .groupCardFieldValue {
-  font-size: 13px;
+  font-size: var(--app-font-secondary);
   color: var(--app-text);
 }
 
 .groupCardMono {
-  font-family: "SF Mono", "Fira Code", monospace;
-  font-size: 12px;
+  font-family: inherit;
+  font-size: var(--app-font-caption);
   color: var(--app-text-secondary);
   background: var(--app-fill-faint);
   padding: 8px 12px;
@@ -1037,7 +1074,10 @@
 }
 
 .groupCardChangeBtn {
-  font-size: 11px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  font-size: calc(11px * var(--app-font-scale));
   color: var(--models-accent-strong);
   cursor: pointer;
   font-family:
@@ -1061,19 +1101,24 @@
 .groupCardActions {
   display: flex;
   gap: 8px;
-  padding-top: 14px;
-  border-top: 1px solid var(--app-border-subtle);
+  padding-top: 16px;
+  margin-top: auto;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--model-hairline);
 }
 
 .groupCardActBtn {
+  .model-focus();
   padding: 7px 14px;
   background: var(--app-fill-faint);
   border: 1px solid var(--app-border);
-  border-radius: 8px;
+  border-radius: 12px;
   color: var(--app-text-secondary);
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   cursor: pointer;
-  transition: all 0.15s;
+  transition:
+    color 150ms ease,
+    background-color 150ms ease;
   font-family: inherit;
 
   &:hover {
@@ -1135,7 +1180,7 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-size: 14px;
+  font-size: var(--app-font-body);
   font-weight: 600;
 }
 
@@ -1182,7 +1227,7 @@
   padding: 12px 14px;
   min-height: 180px;
   font-family: Monaco, "Courier New", monospace;
-  font-size: 13px;
+  font-size: var(--app-font-secondary);
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
@@ -1292,20 +1337,20 @@
 }
 
 .llmPillLabel {
-  font-size: 13px;
+  font-size: var(--app-font-secondary);
   color: var(--app-text-secondary);
   white-space: nowrap;
 }
 
 .llmPillValue {
-  font-size: 13px;
+  font-size: var(--app-font-secondary);
   font-weight: 600;
   color: var(--app-text);
   white-space: nowrap;
 }
 
 .llmPillEdit {
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   color: var(--models-accent-strong);
   font-weight: 500;
   margin-left: 4px;
@@ -1317,7 +1362,7 @@
 }
 
 .llmDescription {
-  font-size: 13px;
+  font-size: var(--app-font-secondary);
   color: var(--app-text-tertiary);
   margin: 0 0 16px;
   line-height: 1.5;
@@ -1342,7 +1387,7 @@
 }
 
 .panelTitle {
-  font-size: 13px;
+  font-size: var(--app-font-secondary);
   font-weight: 600;
   color: var(--app-text-secondary);
   margin-bottom: 14px;
@@ -1368,7 +1413,7 @@
 }
 
 .panelCount {
-  font-size: 11px;
+  font-size: calc(11px * var(--app-font-scale));
   color: var(--app-success-text);
   font-weight: 400;
   margin-left: auto;
@@ -1385,7 +1430,7 @@
 
 .tabItem {
   padding: 10px 20px;
-  font-size: 13px;
+  font-size: var(--app-font-secondary);
   font-weight: 500;
   color: var(--app-text-tertiary);
   cursor: pointer;
@@ -1413,7 +1458,13 @@
   border-radius: 6px;
   border: 1px solid var(--app-border);
   box-shadow: var(--app-shadow-sm);
-  transition: all 0.2s ease-in-out;
+  transition:
+    background-color 0.2s ease-in-out,
+    color 0.2s ease-in-out,
+    border-color 0.2s ease-in-out,
+    box-shadow 0.2s ease-in-out,
+    opacity 0.2s ease-in-out,
+    transform 0.2s ease-in-out;
 
   &:hover {
     box-shadow: var(--app-shadow-md);
@@ -1431,7 +1482,7 @@
 }
 
 .slotTitle {
-  font-size: 18px;
+  font-size: calc(18px * var(--app-font-scale));
   font-weight: 600;
   color: var(--app-text);
 }
@@ -1439,12 +1490,12 @@
 .slotDescription {
   margin: 8px 0 0;
   color: var(--app-text-secondary);
-  font-size: 13px;
+  font-size: var(--app-font-secondary);
   line-height: 1.6;
 }
 
 .slotCurrent {
-  font-size: 13px;
+  font-size: var(--app-font-secondary);
   color: var(--app-success-text);
   font-family: "SF Mono", "Menlo", monospace;
   background: var(--app-success-bg);
@@ -1485,7 +1536,7 @@
 }
 
 .slotLabel {
-  font-size: 14px;
+  font-size: var(--app-font-body);
   color: var(--app-text-secondary);
   font-weight: 500;
   display: flex;
@@ -1567,7 +1618,7 @@
 }
 
 .localModalTitle {
-  font-size: 18px;
+  font-size: calc(18px * var(--app-font-scale));
   font-weight: 600;
   color: var(--models-text);
 }
@@ -1575,7 +1626,7 @@
 .localModalDescription {
   margin-top: 4px;
   color: var(--models-text-muted);
-  font-size: 13px;
+  font-size: var(--app-font-secondary);
   line-height: 1.6;
   max-width: 420px;
 }
@@ -1598,7 +1649,7 @@
 .localSummaryLabel {
   display: block;
   color: var(--models-text-faint);
-  font-size: 11px;
+  font-size: calc(11px * var(--app-font-scale));
   line-height: 1.4;
 }
 
@@ -1606,7 +1657,7 @@
   display: block;
   margin-top: 2px;
   color: var(--models-text);
-  font-size: 13px;
+  font-size: var(--app-font-secondary);
   font-weight: 600;
 }
 
@@ -1634,7 +1685,7 @@
 }
 
 .localSectionTitle {
-  font-size: 14px;
+  font-size: var(--app-font-body);
   font-weight: 600;
   color: var(--models-text);
 }
@@ -1642,13 +1693,13 @@
 .localSectionDescription {
   margin-top: 3px;
   color: var(--models-text-muted);
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   line-height: 1.5;
 }
 
 .localSectionMeta {
   color: var(--models-text-faint);
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   font-family: "SF Mono", "Menlo", monospace;
 }
 
@@ -1674,12 +1725,12 @@
 
 .localSectionInfoLabel {
   color: var(--models-text-muted);
-  font-size: 12px;
+  font-size: var(--app-font-caption);
 }
 
 .localSectionInfoValue {
   color: var(--models-text);
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   font-weight: 600;
   font-family: "SF Mono", "Menlo", monospace;
   text-align: right;
@@ -1691,7 +1742,7 @@
 
 .localSectionInfoMeta {
   color: var(--models-text-faint);
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   font-family: "SF Mono", "Menlo", monospace;
   line-height: 1.5;
 }
@@ -1723,21 +1774,21 @@
 
 .localAdvancedConfigLabel {
   color: var(--models-text);
-  font-size: 13px;
+  font-size: var(--app-font-secondary);
   font-weight: 600;
 }
 
 .localAdvancedConfigHint {
   margin-top: 4px;
   color: var(--models-text-muted);
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   line-height: 1.5;
 }
 
 .localAdvancedConfigError {
   margin-top: 6px;
   color: var(--app-error-text);
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   line-height: 1.5;
 }
 
@@ -1748,7 +1799,7 @@
 
 .localAdvancedConfigChevronOpen,
 .localAdvancedConfigChevronClosed {
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   transition: transform 0.2s ease;
 }
 
@@ -1767,7 +1818,7 @@
   background: var(--app-surface-subtle);
   border: 1px solid var(--app-border-subtle);
   color: var(--models-text-muted);
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   line-height: 1.6;
 }
 
@@ -1794,7 +1845,7 @@
 .localEngineMetricLabel {
   display: block;
   color: var(--models-text-faint);
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   font-weight: 500;
   line-height: 1.4;
 }
@@ -1811,7 +1862,7 @@
   min-width: 0;
   max-width: 160px;
   color: var(--models-text);
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1825,7 +1876,7 @@
   min-height: 22px;
   padding: 0 10px;
   border-radius: 8px;
-  font-size: 11px;
+  font-size: calc(11px * var(--app-font-scale));
   font-weight: 600;
   line-height: 1;
   white-space: nowrap;
@@ -1887,7 +1938,7 @@
   padding: 24px;
   text-align: center;
   color: var(--models-text-faint);
-  font-size: 13px;
+  font-size: var(--app-font-secondary);
 }
 
 .modelListLoadMore {
@@ -1900,7 +1951,7 @@
 }
 
 .modelListCount {
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   color: var(--models-text-faint);
 }
 
@@ -1985,14 +2036,14 @@
 }
 
 .customModelHint {
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   color: var(--models-text-faint);
   line-height: 1.4;
   white-space: normal;
 }
 
 .modelListItemName {
-  font-size: 14px;
+  font-size: var(--app-font-body);
   font-weight: 500;
   color: var(--models-text);
   overflow: hidden;
@@ -2008,7 +2059,7 @@
 }
 
 .modelListItemId {
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   color: var(--models-text-faint);
   font-family: "SF Mono", "Menlo", monospace;
   overflow: hidden;
@@ -2052,12 +2103,12 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  height: 24px;
+  min-height: max(24px, calc(24px * var(--app-font-scale)));
   padding: 0 11px;
   border-radius: 6px;
   color: var(--app-success-text);
   background: var(--app-success-bg);
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   font-weight: 500;
   line-height: 1;
   white-space: nowrap;
@@ -2121,7 +2172,7 @@
 
 .localStatusHint {
   color: var(--models-text-faint);
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   line-height: 1.5;
 }
 
@@ -2167,14 +2218,14 @@
   display: block;
   margin-top: 6px;
   color: var(--models-text-faint);
-  font-size: 11px;
+  font-size: calc(11px * var(--app-font-scale));
   line-height: 1.4;
   font-family: "SF Mono", "Menlo", monospace;
 }
 
 .localInlineProgress {
   color: var(--models-text-faint);
-  font-size: 12px;
+  font-size: var(--app-font-caption);
   font-family: "SF Mono", "Menlo", monospace;
 }
 
@@ -2192,13 +2243,13 @@
 
 .localLockedPanelTitle {
   color: var(--models-text);
-  font-size: 14px;
+  font-size: var(--app-font-body);
   font-weight: 600;
 }
 
 .localLockedPanelDescription {
   color: var(--models-text-muted);
-  font-size: 14px;
+  font-size: var(--app-font-body);
   line-height: 1.6;
 }
 
@@ -2239,7 +2290,7 @@
   gap: 4px;
   padding: 0;
   height: auto;
-  font-size: 13px;
+  font-size: var(--app-font-secondary);
   color: var(--app-accent-text);
   background: transparent;
   border: none;
@@ -2252,19 +2303,13 @@
 
 /* ─── Mobile responsive ───────────────────────────────────────────────────── */
 @media (max-width: 768px) {
-  .pageHeader {
-    padding: 12px 16px;
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-
   .breadcrumbHeader {
     flex-wrap: wrap;
     gap: 4px 8px;
   }
 
   .breadcrumbParent {
-    font-size: 14px;
+    font-size: var(--app-font-body);
   }
 
   .breadcrumbSeparator {
@@ -2272,7 +2317,7 @@
   }
 
   .breadcrumbCurrent {
-    font-size: 16px;
+    font-size: var(--app-font-subtitle);
   }
 
   .sectionHeaderRow {
@@ -2296,15 +2341,15 @@
     justify-content: space-between;
     width: 100%;
     padding: 6px 10px;
-    font-size: 13px;
+    font-size: var(--app-font-secondary);
   }
 
   .llmPillLabel {
-    font-size: 13px;
+    font-size: var(--app-font-secondary);
   }
 
   .llmPillValue {
-    font-size: 12px;
+    font-size: var(--app-font-caption);
     max-width: 120px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -2334,7 +2379,7 @@
 
   .tabItem {
     padding: 8px 14px;
-    font-size: 12px;
+    font-size: var(--app-font-caption);
     white-space: nowrap;
   }
 
@@ -2343,12 +2388,12 @@
   }
 
   .sectionTitle {
-    font-size: 20px;
+    font-size: var(--app-font-title);
   }
 
   .sectionDesc {
     margin: 0 0 16px;
-    font-size: 13px;
+    font-size: var(--app-font-secondary);
   }
 
   .providersBlock {
@@ -2360,7 +2405,7 @@
   }
 
   .providerGroupTitle {
-    font-size: 13px;
+    font-size: var(--app-font-secondary);
     margin: 0 0 8px;
   }
 
@@ -2376,7 +2421,7 @@
   }
 
   .cardName {
-    font-size: 14px;
+    font-size: var(--app-font-body);
   }
 
   .groupCardGlass {
@@ -2396,7 +2441,7 @@
   }
 
   .groupCardName {
-    font-size: 15px;
+    font-size: calc(15px * var(--app-font-scale));
   }
 
   .groupSegmented {
@@ -2409,7 +2454,7 @@
   .groupSegBtn {
     flex: 0 0 auto;
     padding: 6px 10px;
-    font-size: 10px;
+    font-size: calc(10px * var(--app-font-scale));
   }
 
   .groupCardContent {
@@ -2417,7 +2462,7 @@
   }
 
   .groupCardMono {
-    font-size: 11px;
+    font-size: calc(11px * var(--app-font-scale));
     padding: 6px 10px;
     gap: 4px;
   }
@@ -2437,7 +2482,7 @@
     flex: 1;
     min-width: 0;
     padding: 6px 10px;
-    font-size: 11px;
+    font-size: calc(11px * var(--app-font-scale));
     text-align: center;
   }
 
@@ -2446,7 +2491,7 @@
   }
 
   .groupCardFieldValue {
-    font-size: 12px;
+    font-size: var(--app-font-caption);
   }
 
   .availableGrid {
@@ -2466,7 +2511,7 @@
 
   .actionBtn {
     height: 28px;
-    font-size: 12px;
+    font-size: var(--app-font-caption);
   }
 
   .modalFooter {
@@ -2532,13 +2577,13 @@
   }
 
   .localModalTitle {
-    font-size: 16px;
+    font-size: var(--app-font-subtitle);
   }
 
   .jsonEditorHighlight,
   .jsonEditorTextarea {
     padding: 8px 10px;
-    font-size: 12px;
+    font-size: var(--app-font-caption);
     min-height: 120px;
   }
 
@@ -2561,11 +2606,11 @@
   }
 
   .modelListItemName {
-    font-size: 13px;
+    font-size: var(--app-font-secondary);
   }
 
   .modelListItemId {
-    font-size: 11px;
+    font-size: calc(11px * var(--app-font-scale));
   }
 
   .modelListItemActions {
@@ -2592,11 +2637,11 @@
   .modelListItemStatusButton {
     height: 22px;
     padding: 0 8px;
-    font-size: 11px;
+    font-size: calc(11px * var(--app-font-scale));
   }
 
   .modelListCount {
-    font-size: 11px;
+    font-size: calc(11px * var(--app-font-scale));
   }
 
   .modelManageModal {
@@ -2609,5 +2654,428 @@
         overflow-y: auto;
       }
     }
+  }
+}
+
+.settingsPage .groupCardPrimaryAction {
+  color: var(--models-accent-strong);
+  background: var(--models-accent-soft);
+  font-weight: 500;
+}
+
+.defaultsBlock {
+  margin: 24px;
+  max-width: 800px;
+}
+.defaultsBlock .llmPill {
+  display: flex;
+  width: 100%;
+  padding: 16px 20px;
+  border: 1px solid var(--app-border-subtle);
+  border-radius: 16px;
+  background: var(--app-surface);
+  color: var(--app-text);
+  justify-content: flex-start;
+}
+.defaultsBlock .llmPillDot {
+  display: none;
+}
+.defaultsBlock .llmPillEdit {
+  margin-left: auto;
+}
+@media (max-width: 600px) {
+  .defaultsBlock {
+    margin: 12px;
+  }
+}
+
+.groupCardGlass {
+  position: relative;
+}
+.providerClose {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--app-text-tertiary);
+  cursor: pointer;
+}
+.providerClose:hover {
+  background: var(--app-fill);
+  color: var(--app-text);
+}
+.providerClose:focus-visible {
+  outline: 2px solid var(--app-accent);
+}
+.providerClose:disabled {
+  opacity: 0.4;
+  cursor: wait;
+}
+
+.groupCardGlass {
+  padding: 20px;
+}
+.groupCardHeader {
+  padding-right: 48px;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.groupCardName {
+  font-size: calc(17px * var(--app-font-scale));
+  flex-basis: calc(100% - 48px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.providerStatusRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 20px;
+  margin-bottom: 12px;
+}
+.providerStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--app-text-tertiary);
+  font-size: calc(11px * var(--app-font-scale));
+  font-weight: 500;
+  &[data-ready="true"] {
+    color: var(--models-positive, var(--app-success-text));
+  }
+}
+.providerStatusDot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: currentColor;
+}
+.groupCardContent {
+  gap: 12px;
+  margin-bottom: 0;
+}
+.groupCardActions:empty {
+  display: none;
+}
+.providerSettings {
+  composes: providerClose;
+  right: 42px;
+}
+.selectedModelsLink {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-height: 40px;
+  padding: 10px 12px;
+  border: 1px solid var(--model-hairline);
+  border-radius: 10px;
+  background: var(--model-inset);
+  color: var(--app-text);
+  font: inherit;
+  font-size: var(--app-font-secondary);
+  cursor: pointer;
+  text-align: left;
+}
+.selectedModelsLink:hover {
+  border-color: var(--app-accent);
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+}
+.selectedModelsLink:active {
+  background: var(--app-accent-soft-hover);
+}
+.selectedModelsLink:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 3px;
+}
+
+.scopeTabs {
+  display: flex;
+  align-self: flex-start;
+  width: fit-content;
+  margin: 16px 24px 0;
+  padding: 3px;
+  gap: 3px;
+  border-radius: 10px;
+  background: var(--app-fill);
+}
+.scopeTabs button {
+  padding: 7px 18px;
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  font-size: var(--app-font-secondary);
+  color: var(--app-text-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+.scopeTabs button[aria-selected="true"] {
+  background: var(--app-surface);
+  color: var(--app-text);
+  box-shadow: 0 1px 4px rgb(0 0 0 / 6%);
+}
+
+.globalModelRow {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: var(--app-font-secondary);
+}
+
+.headerRight .globalModelRow {
+  width: auto;
+  margin: 0;
+  padding: 0 8px;
+  gap: 8px;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  > span {
+    white-space: nowrap;
+    font-size: var(--app-font-caption);
+    color: var(--app-text-tertiary);
+  }
+  button {
+    max-width: 240px;
+  }
+}
+@media (max-width: 900px) {
+  .settingsPage .headerRight {
+    flex-wrap: wrap;
+  }
+}
+
+.settingsPage .headerRight {
+  min-width: 0;
+}
+.settingsPage .sectionHeaderRow {
+  gap: 16px;
+}
+
+.settingsPage .sectionHeaderRow {
+  box-sizing: border-box;
+}
+
+.groupSegBtn:focus-visible {
+  outline: 2px solid var(--app-focus-ring);
+  outline-offset: -2px;
+}
+.groupCardName {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+}
+.groupCardMono {
+  overflow-wrap: anywhere;
+}
+@media (pointer: coarse) {
+  .providerClose,
+  .providerSettings {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .groupCardHeader {
+    padding-right: 88px;
+  }
+}
+
+/* Keep provider interactions aligned with the quieter tool-card language. */
+.settingsPage .groupCardGlass,
+.settingsPage .providerCard {
+  --reflection-highlight: var(--app-accent-faint);
+  --reflection-silver: transparent;
+  --reflection-edge: var(--app-accent-border);
+  --reflection-shadow: var(--app-border-subtle);
+
+  border-color: var(--app-border);
+  border-radius: 16px;
+  background: var(--app-surface);
+  box-shadow: none;
+  transition:
+    border-color 160ms ease,
+    background-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.settingsPage .groupCardGlass:hover,
+.settingsPage .groupCardGlass:focus-within,
+.settingsPage .providerCard:hover,
+.settingsPage .providerCard:focus-within {
+  border-color: var(--app-accent-border);
+  background: color-mix(in srgb, var(--app-accent) 2%, var(--app-surface));
+  box-shadow: 0 10px 26px rgb(49 35 22 / 6%);
+}
+
+.settingsPage .availableItem {
+  border-color: var(--app-border);
+  border-radius: 14px;
+  background: var(--app-surface);
+  box-shadow: none;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.settingsPage .availableItem:hover,
+.settingsPage .availableItem:focus-visible {
+  border-color: var(--app-accent-border);
+  background: color-mix(in srgb, var(--app-accent) 3%, var(--app-surface));
+  box-shadow: 0 6px 18px rgb(49 35 22 / 5%);
+}
+
+.settingsPage .selectedModelsLink {
+  border-color: var(--app-border-subtle);
+  background: var(--app-surface-subtle);
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease,
+    color 150ms ease;
+}
+
+.settingsPage .selectedModelsLink:hover,
+.settingsPage .selectedModelsLink:focus-visible {
+  border-color: var(--app-accent-border);
+  background: var(--app-accent-soft);
+  color: var(--app-text);
+}
+
+.settingsPage .variantItem:hover,
+.settingsPage .variantItem:focus-visible {
+  background: var(--app-accent-soft);
+  color: var(--app-text);
+  transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settingsPage .groupCardGlass,
+  .settingsPage .providerCard,
+  .settingsPage .availableItem,
+  .settingsPage .selectedModelsLink {
+    transition: none;
+  }
+}
+
+/* Give every model workflow the same restrained surface language as Tools. */
+.modelManageModal,
+.modelConfirmModal {
+  :global(.ant-modal-content),
+  :global(.qwenpaw-modal-content) {
+    border: 1px solid var(--app-border);
+    border-radius: 20px;
+    background: var(--app-surface);
+    box-shadow: 0 22px 64px rgb(49 35 22 / 14%);
+    overflow: hidden;
+  }
+
+  :global(.ant-modal-header),
+  :global(.qwenpaw-modal-header) {
+    margin-bottom: 18px;
+    background: transparent;
+  }
+
+  :global(.ant-modal-title),
+  :global(.qwenpaw-modal-title) {
+    color: var(--app-text);
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+
+  :global(.ant-modal-footer),
+  :global(.qwenpaw-modal-footer) {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--app-border-subtle);
+  }
+}
+
+.modelManageModal {
+  :global(.ant-modal-close),
+  :global(.qwenpaw-modal-close) {
+    color: var(--app-text-tertiary);
+    border-radius: 10px;
+    transition:
+      color 150ms ease,
+      background-color 150ms ease;
+  }
+
+  :global(.ant-modal-close:hover),
+  :global(.qwenpaw-modal-close:hover) {
+    color: var(--app-text);
+    background: var(--app-accent-soft);
+  }
+}
+
+.modelConfirmModal {
+  :global(.ant-modal-confirm-body),
+  :global(.qwenpaw-modal-confirm-body) {
+    color: var(--app-text-secondary);
+  }
+}
+
+.modelManageModal .modelList {
+  border: 1px solid var(--app-border-subtle);
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--app-surface);
+}
+
+.modelManageModal .modelListItem {
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease;
+}
+
+.modelManageModal .modelListItem:hover,
+.modelManageModal .modelListItem:focus-within {
+  background: color-mix(in srgb, var(--app-accent) 3%, var(--app-surface));
+}
+
+.modelManageModal .advancedConfigToggle {
+  padding: 12px 14px;
+  border: 1px solid var(--app-border-subtle);
+  border-radius: 12px;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease;
+}
+
+.modelManageModal .advancedConfigToggle:hover,
+.modelManageModal .advancedConfigToggle:focus-visible {
+  border-color: var(--app-accent-border);
+  background: var(--app-accent-soft);
+}
+
+@media (max-width: 640px) {
+  .modelManageModal,
+  .modelConfirmModal {
+    :global(.ant-modal-content),
+    :global(.qwenpaw-modal-content) {
+      border-radius: 16px;
+    }
+  }
+
+  .modalFooter {
+    align-items: stretch;
+    flex-direction: column-reverse;
+  }
+
+  .modalFooterLeft,
+  .modalFooterRight {
+    flex-wrap: wrap;
   }
 }

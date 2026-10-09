@@ -426,9 +426,9 @@ class QwenPawACPAgent(Agent):
 
         return WorkspaceBootstrapFactory.build_bootstrap_kwargs(
             app_services,
-            extra_command_specs=extra_command_specs
-            if extra_command_specs
-            else None,
+            extra_command_specs=(
+                extra_command_specs if extra_command_specs else None
+            ),
         )
 
     async def _ensure_workspace(self) -> Any:
@@ -1332,7 +1332,9 @@ class QwenPawACPAgent(Agent):
                     current_model_id=model_id,
                 )
 
-            manager = ProviderManager.get_instance()
+            manager = await run_sync_io(ProviderManager.get_instance)
+            agent_id = self._resolve_agent_id()
+            agent_config = await run_sync_io(load_agent_config, agent_id)
             provider_infos = await manager.list_provider_info()
 
             available_models: list[ACPModelInfo] = []
@@ -1345,8 +1347,6 @@ class QwenPawACPAgent(Agent):
                         ),
                     )
 
-            agent_id = self._resolve_agent_id()
-            agent_config = load_agent_config(agent_id)
             active = agent_config.active_model
             if active and active.provider_id and active.model:
                 current_model_id = f"{active.provider_id}:{active.model}"
@@ -1529,7 +1529,7 @@ class QwenPawACPAgent(Agent):
         manager = ProviderManager.get_instance()
 
         if provider_id:
-            provider = manager.get_provider(provider_id)
+            provider = await run_sync_io(manager.get_provider, provider_id)
             if not provider:
                 raise ValueError(
                     f"Provider {provider_id!r} not found",

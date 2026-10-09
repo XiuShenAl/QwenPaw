@@ -7,12 +7,15 @@
  * and tags) and security scan verdicts surfacing.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderHook, act } from "@testing-library/react";
+import { renderHook, act, waitFor } from "@testing-library/react";
 
 // ---- Hoisted mocks ---------------------------------------------------------
 
 const mocks = vi.hoisted(() => ({
+  selectedAgent: "agent-1",
   // api surface
+  listChannelTypes: vi.fn(),
+  listChannelSchemas: vi.fn(),
   getSkill: vi.fn(),
   saveSkill: vi.fn(),
   updateSkillChannels: vi.fn(),
@@ -66,13 +69,17 @@ vi.mock("@agentscope-ai/design", () => ({
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
     t: (key: string, opts?: Record<string, unknown>) =>
-      opts ? `${key}:${JSON.stringify(opts)}` : key,
+      typeof opts?.defaultValue === "string"
+        ? opts.defaultValue
+        : opts
+        ? `${key}:${JSON.stringify(opts)}`
+        : key,
     i18n: { language: "en" },
   }),
 }));
 
 vi.mock("../../../stores/agentStore", () => ({
-  useAgentStore: () => ({ selectedAgent: "agent-1" }),
+  useAgentStore: () => ({ selectedAgent: mocks.selectedAgent }),
 }));
 
 vi.mock("../../../hooks/useAppMessage", () => ({
@@ -81,6 +88,8 @@ vi.mock("../../../hooks/useAppMessage", () => ({
 
 vi.mock("../../../api", () => ({
   default: {
+    listChannelTypes: () => mocks.listChannelTypes(),
+    listChannelSchemas: () => mocks.listChannelSchemas(),
     getSkill: (...a: unknown[]) => mocks.getSkill(...a),
     saveSkill: (...a: unknown[]) => mocks.saveSkill(...a),
     updateSkillChannels: (...a: unknown[]) => mocks.updateSkillChannels(...a),
@@ -183,6 +192,9 @@ function autoCancel() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.selectedAgent = "agent-1";
+  mocks.listChannelTypes.mockReset().mockResolvedValue([]);
+  mocks.listChannelSchemas.mockReset().mockResolvedValue({});
   mocks.refreshSkills.mockResolvedValue(undefined);
   mocks.listSkillPoolSkills.mockResolvedValue([]);
 });
@@ -264,7 +276,7 @@ describe("drawer lifecycle", () => {
     expect(result.current.editingSkillName).toBe("");
   });
 
-  it("toggles enabled and refreshes", async () => {
+  it("toggles enabled without unmounting the list for a refresh", async () => {
     const { result } = renderHook(() => useSkillsPage());
     const stopPropagation = vi.fn();
     await act(async () => {
@@ -277,7 +289,7 @@ describe("drawer lifecycle", () => {
     });
     expect(stopPropagation).toHaveBeenCalled();
     expect(mocks.toggleEnabled).toHaveBeenCalled();
-    expect(mocks.refreshSkills).toHaveBeenCalled();
+    expect(mocks.refreshSkills).not.toHaveBeenCalled();
   });
 
   it("delegates deletion to the skills hook", async () => {
@@ -368,10 +380,20 @@ describe("submit — edit path", () => {
         content: "new",
         overwrite: false,
       }),
+      "agent-1",
     );
-    expect(mocks.updateSkillChannels).toHaveBeenCalledWith("alpha", ["web"]);
-    expect(mocks.updateSkillTags).toHaveBeenCalledWith("alpha", ["x"]);
-    expect(result.current.drawerOpen).toBe(false);
+    expect(mocks.updateSkillChannels).toHaveBeenCalledWith(
+      "alpha",
+      ["web"],
+      "agent-1",
+    );
+    expect(mocks.updateSkillTags).toHaveBeenCalledWith(
+      "alpha",
+      ["x"],
+      "agent-1",
+    );
+    expect(result.current.drawerOpen).toBe(true);
+    expect(mocks.message.success).not.toHaveBeenCalled();
   });
 
   it("passes source_name on rename", async () => {
@@ -396,8 +418,21 @@ describe("submit — edit path", () => {
     });
     expect(mocks.saveSkill).toHaveBeenCalledWith(
       expect.objectContaining({ source_name: "alpha" }),
+      "agent-1",
     );
-    expect(mocks.message.success).toHaveBeenCalled();
+    expect(mocks.message.success).not.toHaveBeenCalled();
+    await act(async () => {
+      await result.current.handleSubmit({
+        name: "renamed",
+        content: "next",
+        channels: ["all"],
+        tags: [],
+      } as never);
+    });
+    expect(mocks.saveSkill).toHaveBeenLastCalledWith(
+      expect.objectContaining({ source_name: undefined, name: "renamed" }),
+      "agent-1",
+    );
   });
 
   it("confirms overwrite on conflict and retries", async () => {
@@ -426,6 +461,7 @@ describe("submit — edit path", () => {
     expect(mocks.saveSkill).toHaveBeenCalledTimes(2);
     expect(mocks.saveSkill).toHaveBeenLastCalledWith(
       expect.objectContaining({ overwrite: true }),
+      "agent-1",
     );
   });
 
@@ -455,7 +491,7 @@ describe("submit — edit path", () => {
     expect(mocks.saveSkill).toHaveBeenCalledTimes(1);
   });
 
-  it("shows an error toast for non-conflict save failures", async () => {
+  it("propagates failure to the autosave retry feedback", async () => {
     mocks.getSkill.mockResolvedValue({
       name: "alpha",
       content: "old",
@@ -468,14 +504,16 @@ describe("submit — edit path", () => {
       await result.current.handleEdit(result.current.skills[0] as never);
     });
     await act(async () => {
-      await result.current.handleSubmit({
-        name: "alpha",
-        content: "new",
-        channels: ["all"],
-        tags: [],
-      } as never);
+      await expect(
+        result.current.handleSubmit({
+          name: "alpha",
+          content: "new",
+          channels: ["all"],
+          tags: [],
+        } as never),
+      ).rejects.toThrow("disk full");
     });
-    expect(mocks.message.error).toHaveBeenCalledWith("disk full");
+    expect(result.current.drawerOpen).toBe(true);
   });
 });
 
@@ -611,7 +649,7 @@ describe("pool modal", () => {
   });
 
   it("does not load pool skills while closed", async () => {
-    const { result } = renderHook(() => useSkillsPage());
+    renderHook(() => useSkillsPage());
     await flush();
     expect(mocks.listSkillPoolSkills).not.toHaveBeenCalled();
   });
@@ -876,5 +914,99 @@ describe("batch enable/disable/delete", () => {
       await result.current.handleBatchDelete();
     });
     expect(mocks.modalConfirm).not.toHaveBeenCalled();
+  });
+});
+
+describe("useSkillsPage — channel discovery", () => {
+  beforeEach(() => {
+    mocks.listChannelTypes.mockResolvedValue([
+      "console",
+      "slack",
+      "custom_bot",
+    ]);
+    mocks.listChannelSchemas.mockResolvedValue({
+      custom_bot: {
+        label: "Internal support",
+        description: "",
+        plugin_id: "support",
+        config_fields: [],
+      },
+    });
+  });
+
+  it("shares discovered channel names across the editor and skill summaries", async () => {
+    const { result } = renderHook(() => useSkillsPage());
+    await waitFor(() =>
+      expect(result.current.getChannelName("custom_bot")).toBe(
+        "Internal support",
+      ),
+    );
+    expect(result.current.channelOptions.options).toEqual([
+      { value: "console", label: "Console" },
+      { value: "slack", label: "Slack" },
+      { value: "custom_bot", label: "Internal support" },
+    ]);
+  });
+
+  it("keeps channels selectable while optional schema loading is pending or fails", async () => {
+    let rejectSchema!: (reason: Error) => void;
+    mocks.listChannelSchemas.mockReturnValue(
+      new Promise((_, reject) => {
+        rejectSchema = reject;
+      }),
+    );
+    const { result } = renderHook(() => useSkillsPage());
+    await waitFor(() =>
+      expect(result.current.channelOptions.loading).toBe(false),
+    );
+    expect(result.current.getChannelName("custom_bot")).toBe("Custom Bot");
+    await act(async () => rejectSchema(new Error("schema unavailable")));
+    expect(result.current.channelOptions.error).toBe(false);
+    expect(result.current.channelOptions.options).toHaveLength(3);
+  });
+
+  it("retains previous channel options on failure and discovers changes on retry", async () => {
+    const { result } = renderHook(() => useSkillsPage());
+    await waitFor(() =>
+      expect(result.current.channelOptions.loading).toBe(false),
+    );
+    mocks.listChannelTypes.mockRejectedValueOnce(new Error("offline"));
+    act(() => result.current.channelOptions.onRetry());
+    await waitFor(() => expect(result.current.channelOptions.error).toBe(true));
+    expect(result.current.channelOptions.options).toHaveLength(3);
+    mocks.listChannelTypes.mockResolvedValue(["console", "new_plugin"]);
+    act(() => result.current.channelOptions.onRetry());
+    await waitFor(() =>
+      expect(result.current.channelOptions.options.map((o) => o.value)).toEqual(
+        ["console", "new_plugin"],
+      ),
+    );
+    expect(result.current.channelOptions.error).toBe(false);
+  });
+
+  it("ignores responses from the previous agent and refreshes when opening the drawer", async () => {
+    let resolveOld!: (value: string[]) => void;
+    mocks.listChannelTypes.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveOld = resolve;
+      }),
+    );
+    const { result, rerender } = renderHook(() => useSkillsPage());
+    mocks.selectedAgent = "agent-2";
+    rerender();
+    await waitFor(() =>
+      expect(result.current.channelOptions.loading).toBe(false),
+    );
+    await act(async () => resolveOld(["obsolete"]));
+    expect(
+      result.current.channelOptions.options.some((o) => o.value === "obsolete"),
+    ).toBe(false);
+    mocks.listChannelTypes.mockResolvedValue(["new_plugin"]);
+    act(() => result.current.handleCreate());
+    await waitFor(() =>
+      expect(result.current.channelOptions.options.map((o) => o.value)).toEqual(
+        ["new_plugin"],
+      ),
+    );
   });
 });

@@ -3,6 +3,7 @@ import { Layout, Spin } from "antd";
 import { Routes, Route, useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import Sidebar from "../Sidebar";
+import AmbientLight from "../AmbientLight";
 import Header from "../Header";
 import ConsolePollService from "../../components/ConsolePollService";
 import { AgentStatusPollingController } from "../../components/AgentStatusPollingController";
@@ -12,6 +13,8 @@ import styles from "../index.module.less";
 import { useRoutes } from "../../plugins/registry/hooks";
 import { Slot } from "../../plugins/registry/Slot";
 import { pickSelectedKey } from "./routeSelection";
+
+import { HubModeContext } from "../../contexts/HubModeContext";
 
 const { Content } = Layout;
 
@@ -42,40 +45,47 @@ export default function MainLayout({ hubMode = false }: { hubMode?: boolean }) {
   );
 
   return (
-    <Layout className={styles.mainLayout}>
-      {!settingsCenterActive && (
-        <Sidebar selectedKey={selectedKey} hubMode={hubMode} />
-      )}
-      <Layout className={styles.mainContentLayout}>
-        <Header showBrand={settingsCenterActive} />
-        <Content className="page-container">
-          <ConsolePollService />
-          <AgentStatusPollingController />
-          <Slot name="content.statusBar" kind="fill" />
-          <div className="page-content">
-            <ChunkErrorBoundary
-              resetKey={currentPath}
-              canRestartRuntime={hubMode}
-            >
-              <Suspense
-                fallback={
-                  <Spin
-                    tip={t("common.loading")}
-                    style={{ display: "block", margin: "20vh auto" }}
-                  />
-                }
+    <HubModeContext.Provider value={hubMode}>
+      <Layout className={styles.mainLayout}>
+        <AmbientLight />
+        {!settingsCenterActive && (
+          <Sidebar selectedKey={selectedKey} hubMode={hubMode} />
+        )}
+        <Layout className={styles.mainContentLayout}>
+          <Header showBrand={settingsCenterActive} />
+          <Content className="page-container">
+            <ConsolePollService />
+            <AgentStatusPollingController />
+            <Slot name="content.statusBar" kind="fill" />
+            <div className="page-content">
+              <ChunkErrorBoundary
+                resetKey={currentPath}
+                canRestartRuntime={hubMode}
               >
-                <Routes>
-                  {renderableRoutes.map((r) => (
-                    <Route key={r.id} path={r.path} element={<r.Component />} />
-                  ))}
-                </Routes>
-              </Suspense>
-            </ChunkErrorBoundary>
-          </div>
-        </Content>
+                <Suspense
+                  fallback={
+                    <Spin
+                      tip={t("common.loading")}
+                      style={{ display: "block", margin: "20vh auto" }}
+                    />
+                  }
+                >
+                  <Routes>
+                    {renderableRoutes.map((r) => (
+                      <Route
+                        key={r.id}
+                        path={r.path}
+                        element={<r.Component />}
+                      />
+                    ))}
+                  </Routes>
+                </Suspense>
+              </ChunkErrorBoundary>
+            </div>
+          </Content>
+        </Layout>
+        <Slot name="overlay.global" kind="fill" />
       </Layout>
-      <Slot name="overlay.global" kind="fill" />
-    </Layout>
+    </HubModeContext.Provider>
   );
 }

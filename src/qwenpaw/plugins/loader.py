@@ -1250,6 +1250,13 @@ class PluginLoader:
         Raises:
             RuntimeError: If all install attempts fail or time out
         """
+        if os.environ.get("QWENPAW_RUNTIME_PROVISIONER") == "local":
+            raise RuntimeError(
+                f"Plugin '{plugin_id}' has missing dependencies. "
+                "Local runtimes share administrator-managed Python; "
+                "ask the administrator to install the requirements, "
+                "or use Docker for independently managed dependencies.",
+            )
         logger.info(
             f"Installing dependencies for plugin '{plugin_id}'...",
         )
@@ -1528,9 +1535,11 @@ class PluginLoader:
             )
             if new_record.status == "failed":
                 raise RuntimeError(
-                    new_record.diagnostics[0]
-                    if new_record.diagnostics
-                    else f"Plugin '{plugin_id}' failed to load",
+                    (
+                        new_record.diagnostics[0]
+                        if new_record.diagnostics
+                        else f"Plugin '{plugin_id}' failed to load"
+                    ),
                 )
             activated_new = True
             cleanup_errors = await self._finish_committed_reload(
@@ -2470,8 +2479,8 @@ class PluginLoader:
         # without the plugin builtins in the window between the two.
         unregister_namespace(module_name)
 
-        # Remove tools from agents.tools + runtime registries while
-        # ownership records still exist, then drop plugin registry state.
+        # Slash commands were revoked by their ledger bindings above.
+        # Keep tool ownership available for the remaining tool cleanup.
         self._cleanup_plugin_tools(plugin_id, record)
 
         # Clear all in-memory registry entries for this plugin

@@ -92,6 +92,7 @@ const ToolCardShell: React.FC<ToolCardShellProps> = ({
   );
   const isLoading = content.status === "calling" && isStreaming;
   const isError = content.status === "error";
+  const errorText = isError ? stringifyResult(content.result) : "";
   const inputProgress = content.inputProgress;
   const inputPreview = inputProgress
     ? `${inputProgress.truncated ? "…\n" : ""}${inputProgress.preview}`
@@ -103,7 +104,12 @@ const ToolCardShell: React.FC<ToolCardShellProps> = ({
     }
   }, [initiallyExpanded]);
 
-  const isExecuting = content.status === "calling" && !inputProgress;
+  // Before executionStarted the backend has no coordinator entry yet,
+  // so lifecycle queries and offload controls must stay off.
+  const isExecuting =
+    content.status === "calling" &&
+    !inputProgress &&
+    !!content.executionStarted;
   const showGear = isExecuting && !!sessionId;
 
   const control = useToolCallControl(
@@ -226,10 +232,13 @@ const ToolCardShell: React.FC<ToolCardShellProps> = ({
                 title="Input"
                 content={JSON.stringify(content.params, null, 2)}
               />
-              <DefaultBlock
-                title="Error"
-                content={stringifyResult(content.result)}
-              />
+              {content.interrupted && (
+                <DefaultBlock
+                  title={t("tool.interruptedTitle")}
+                  content={t("tool.interrupted")}
+                />
+              )}
+              {errorText && <DefaultBlock title="Error" content={errorText} />}
             </>
           ) : (
             <>
