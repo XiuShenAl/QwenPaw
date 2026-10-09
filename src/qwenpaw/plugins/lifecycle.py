@@ -113,6 +113,7 @@ class ConfigUpdateReport:
     unchanged: bool = False
     errors: list[str] = field(default_factory=list)
     requires_confirmation: bool = False
+    conflict: bool = False
     legacy_hooks: list[str] = field(default_factory=list)
     needs_restart: bool = False
     quiescent: bool = True
@@ -604,14 +605,19 @@ class PluginLifecycle:
         confirm_legacy: bool = False,
     ) -> ConfigUpdateReport:
         """Rebuild contributions from *new_config* without reimporting."""
-        async with self._loader.plugin_lifecycle(plugin_id):
-            return await self._update_config_unlocked(
-                plugin_id,
-                new_config,
-                confirm_legacy=confirm_legacy,
-            )
+        from qwenpaw.memory import memory_registry
 
-    # pylint: disable=too-many-return-statements
+        async with self._loader.plugin_lifecycle(plugin_id):
+            try:
+                return await self._update_config_unlocked(
+                    plugin_id,
+                    new_config,
+                    confirm_legacy=confirm_legacy,
+                )
+            finally:
+                memory_registry.cancel_owner_unload(plugin_id)
+
+    # pylint: disable=too-many-return-statements,too-many-statements
     async def _update_config_unlocked(
         self,
         plugin_id: str,
@@ -650,10 +656,24 @@ class PluginLifecycle:
                     "confirm to continue",
                 ],
             )
+        from .registry import MemoryBackendInUseError
+
+        try:
+            self._loader.registry.assert_memory_backends_not_in_use(plugin_id)
+        except MemoryBackendInUseError as exc:
+            return ConfigUpdateReport(
+                plugin_id=plugin_id,
+                ok=False,
+                unchanged=True,
+                conflict=True,
+                errors=[str(exc)],
+            )
         incoming = runtime_config(new_config)
         previous = dict(inst.config or {})
         teardown_report = await inst.teardown_runtime()
         if not teardown_report.quiescent:
+            record.status = "failed"
+            record.diagnostics = list(inst.diagnostics)
             return ConfigUpdateReport(
                 plugin_id=plugin_id,
                 ok=False,
@@ -662,8 +682,8 @@ class PluginLifecycle:
                 errors=list(teardown_report.errors)
                 or ["hosted resources did not go quiescent"],
             )
-        self._loader.registry.unregister_plugin(plugin_id)
         try:
+            self._loader.registry.unregister_plugin(plugin_id)
             await self._loader.reregister_unlocked(plugin_id, incoming)
             await self._loader.activate_plugin_unlocked(plugin_id)
         except BaseException as exc:
@@ -687,13 +707,16 @@ class PluginLifecycle:
                         or ["hosted resources did not go quiescent"],
                     ),
                 )
-            self._loader.registry.unregister_plugin(plugin_id)
             restore_error = ""
             try:
+                self._loader.registry.unregister_plugin(plugin_id)
                 await self._loader.reregister_unlocked(plugin_id, previous)
                 await self._loader.activate_plugin_unlocked(plugin_id)
                 inst.config = previous
             except BaseException as restore_exc:
+                inst.mark_failed(str(restore_exc) or "config restore failed")
+                record.status = "failed"
+                record.diagnostics = list(inst.diagnostics)
                 restore_error = str(restore_exc)
                 logger.exception(
                     "Failed to restore config for plugin '%s'",

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import hashlib
 import importlib
 import importlib.util
@@ -13,7 +15,7 @@ import shutil
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable
 
 from ..utils.io_utils import write_json_atomic
 from .safe_fs import ensure_deletable, parse_optional_absolute, safe_remove
@@ -105,11 +107,16 @@ def record_escape_provision(
 ) -> None:
     data = load_inventory(plugin_id)
     rows = data["provisions"]
-    if not any(row.get("desc") == desc for row in rows):
-        row: dict[str, Any] = {"desc": desc, "kind": kind or "escape"}
-        if teardown_ref:
-            row["teardown_ref"] = teardown_ref
+    row = next((item for item in rows if item.get("desc") == desc), None)
+    if row is None:
+        row = {"desc": desc, "kind": kind or "escape"}
         rows.append(row)
+    # A plugin upgrade can add restartable cleanup for an existing provision.
+    # Keep its ownership and do not rerun setup or erase an existing locator.
+    if teardown_ref:
+        row["teardown_ref"] = teardown_ref
+    if kind and kind != "escape":
+        row["kind"] = kind
     save_inventory(plugin_id, data)
 
 
@@ -151,9 +158,10 @@ def undo_this_txn_escapes(
 def replay_persisted_provisions(
     plugin_id: str,
     source_path: Path | None,
-) -> None:
-    """Rebuild official install-layer teardowns after the process restarts."""
+) -> list[str]:
+    """Replay persisted cleanup, retaining unresolved rows for retry."""
     data = load_inventory(plugin_id)
+    errors: list[str] = []
     for row in data.get("provisions") or []:
         if not isinstance(row, dict):
             continue
@@ -161,15 +169,23 @@ def replay_persisted_provisions(
         kind = str(row.get("kind") or "")
         if kind == "cloudpaw_agents" and not ref:
             ref = "agents_setup:uninstall_agents"
+        desc = str(row.get("desc") or kind or "unknown provision")
         if not ref:
+            errors.append(f"candidate: {desc}: no restartable teardown")
             continue
-        _call_teardown_ref(source_path, ref)
+        try:
+            _call_teardown_ref(source_path, ref)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"provision {desc}: {exc}")
+            continue
+        drop_escape_provision(plugin_id, str(row.get("desc") or ""))
+    return errors
 
 
 def _call_teardown_ref(source_path: Path | None, ref: str) -> None:
     module_name, _, func_name = ref.partition(":")
     if not module_name or not func_name:
-        return
+        raise ValueError(f"Invalid teardown reference: {ref}")
     module = None
     if source_path is not None:
         module_file = Path(source_path) / f"{module_name.replace('.', '/')}.py"
@@ -184,14 +200,19 @@ def _call_teardown_ref(source_path: Path | None, ref: str) -> None:
     if module is None:
         try:
             module = importlib.import_module(module_name)
-        except ImportError:
-            logger.warning("Cannot import teardown %s", ref)
-            return
+        except ImportError as exc:
+            raise RuntimeError(f"Cannot import teardown {ref}") from exc
     callback = getattr(module, func_name, None)
     if not callable(callback):
-        logger.warning("Teardown %s is not callable", ref)
-        return
-    callback()
+        raise RuntimeError(f"Teardown {ref} is not callable")
+    result = callback()
+    if inspect.isawaitable(result):
+        asyncio.run(_await_teardown(result))
+
+
+async def _await_teardown(result: Awaitable[Any]) -> None:
+    """Adapt any awaitable cleanup result to asyncio.run's coroutine input."""
+    await result
 
 
 def _iter_files(root: Path) -> list[Path]:

@@ -935,13 +935,13 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         already = any(
             row.get("desc") == desc for row in existing.get("provisions") or []
         )
+        record_escape_provision(
+            self.plugin_id,
+            desc,
+            kind=kind if kind != "provision" else "escape",
+            teardown_ref=teardown_ref,
+        )
         if not already:
-            record_escape_provision(
-                self.plugin_id,
-                desc,
-                kind=kind if kind != "provision" else "escape",
-                teardown_ref=teardown_ref,
-            )
             if setup is not None:
                 if self._instance is not None:
                     self._instance.note_txn_escape(desc, teardown)

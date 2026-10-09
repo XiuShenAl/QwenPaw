@@ -2770,11 +2770,17 @@ class PluginLoader:
         from ..utils.io_utils import run_sync_io
         from .provision import replay_persisted_provisions
 
-        await run_sync_io(
+        replay_errors = await run_sync_io(
             replay_persisted_provisions,
             plugin_id,
             source_path,
         )
+        if replay_errors:
+            report.clean = False
+            report.quiescent = False
+            report.needs_restart = True
+            report.errors.extend(replay_errors)
+            return report
         await self._drop_uninstalled_settings(plugin_id, tool_names)
         await run_sync_io(teardown_created_locations, plugin_id)
         if candidate:

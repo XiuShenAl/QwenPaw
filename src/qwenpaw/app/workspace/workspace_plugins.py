@@ -15,7 +15,6 @@ limited to its three coordinators (see ``app/app_services/``).
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -30,8 +29,6 @@ if TYPE_CHECKING:
     from ...modes.base import AgentMode
     from ...runtime.hooks import HookContext
 
-logger = logging.getLogger(__name__)
-
 
 @dataclass
 class WorkspacePlugins:
@@ -44,6 +41,7 @@ class WorkspacePlugins:
     tool_registry: ToolRegistry = field(default_factory=ToolRegistry)
     prompt_manager: PromptManager = field(default_factory=PromptManager)
     modes: list["AgentMode"] = field(default_factory=list)
+    _pending_modes: list["AgentMode"] = field(default_factory=list, repr=False)
     stop_handlers: list["StopHandlerRegistration"] = field(
         default_factory=list,
     )
@@ -58,7 +56,11 @@ class WorkspacePlugins:
         leave the mode in the table.
         """
         occupant = next(
-            (m for m in self.modes if m.name == mode.name),
+            (
+                m
+                for m in (*self.modes, *self._pending_modes)
+                if m.name == mode.name
+            ),
             None,
         )
         if occupant is not None:
@@ -72,7 +74,16 @@ class WorkspacePlugins:
         try:
             mode.setup(workspace)
         except Exception:
-            _safe_mode_teardown(mode, workspace)
+            try:
+                teardown = getattr(mode, "teardown", None)
+                if callable(teardown):
+                    teardown(workspace)
+            except Exception as cleanup_exc:
+                # Setup may already have opened a resource. Retain the mode
+                # for rollback instead of claiming the failed setup is clean.
+                self._pending_modes.append(mode)
+                cleanup_exc.binding = mode
+                raise
             raise
         self.modes.append(mode)
 
@@ -83,14 +94,17 @@ class WorkspacePlugins:
         expected: object | None = None,
     ) -> bool:
         """Remove a mode only if *expected* still occupies the row."""
-        for index, mode in enumerate(self.modes):
-            if mode.name != name:
-                continue
-            if expected is not None and mode is not expected:
-                continue
-            self.modes.pop(index)
-            _safe_mode_teardown(mode, workspace)
-            return True
+        for modes in (self.modes, self._pending_modes):
+            for index, mode in enumerate(modes):
+                if mode.name != name:
+                    continue
+                if expected is not None and mode is not expected:
+                    continue
+                teardown = getattr(mode, "teardown", None)
+                if callable(teardown):
+                    teardown(workspace)
+                modes.pop(index)
+                return True
         return False
 
     def register_stop_handler(self, reg: "StopHandlerRegistration") -> None:
@@ -131,19 +145,6 @@ class WorkspacePlugins:
         into cross-workspace containers.
         """
         return {m.name for m in self.modes if m.is_active(ctx)}
-
-
-def _safe_mode_teardown(mode: "AgentMode", workspace: object) -> None:
-    teardown = getattr(mode, "teardown", None)
-    if not callable(teardown):
-        return
-    try:
-        teardown(workspace)
-    except Exception:  # noqa: BLE001
-        logger.exception(
-            "AgentMode %r teardown failed",
-            getattr(mode, "name", mode),
-        )
 
 
 __all__ = ["WorkspacePlugins"]

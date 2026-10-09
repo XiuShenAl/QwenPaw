@@ -127,6 +127,10 @@ class PromptSectionRegistration:
     provider: Callable[[Any], str]
 
 
+class MemoryBackendInUseError(RuntimeError):
+    """A live or selected memory backend prevents a lifecycle change."""
+
+
 class PluginRegistry:  # pylint:disable=too-many-public-methods
     """Central plugin registry (Singleton).
 
@@ -1330,7 +1334,7 @@ class PluginRegistry:  # pylint:disable=too-many-public-methods
             tuple(selected_agent_ids),
         )
         if in_use:
-            raise RuntimeError(
+            raise MemoryBackendInUseError(
                 f"Cannot unload plugin '{plugin_id}'; memory backend is "
                 f"in use by agents: {', '.join(sorted(in_use))}",
             )

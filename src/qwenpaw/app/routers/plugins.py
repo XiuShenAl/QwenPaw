@@ -916,7 +916,7 @@ async def update_plugin_config(
             },
         )
     if not report.ok:
-        if report.needs_restart:
+        if report.needs_restart or report.conflict:
             status = 409
         elif report.unchanged:
             status = 404

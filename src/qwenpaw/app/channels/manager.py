@@ -169,6 +169,8 @@ class ChannelManager:
     def __init__(self, channels: List[BaseChannel]):
         self.channels = channels
         self._lock = asyncio.Lock()
+        self._channel_lifecycle_locks: dict[str, asyncio.Lock] = {}
+        self._failed_channels: set[str] = set()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._process: ProcessHandler | None = None
         self._on_last_dispatch: OnLastDispatch = None
@@ -647,8 +649,21 @@ class ChannelManager:
         The returned handle is not guaranteed to be a local
         ``BaseChannel`` — callers must treat it as opaque.
         """
+        lock = self._channel_lifecycle_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            return await self._start_one_unlocked(key, workspace_config)
+
+    async def _start_one_unlocked(
+        self,
+        key: str,
+        workspace_config: Any,
+    ) -> ChannelHandle:
         existing = self._find_channel(key)
         if existing is not None:
+            if key in self._failed_channels:
+                exc = RuntimeError(f"Channel '{key}' has not stopped")
+                exc.binding = ChannelHandle(key=key, channel=existing)
+                raise exc
             return ChannelHandle(key=key, channel=existing)
 
         process = self._process
@@ -673,51 +688,51 @@ class ChannelManager:
             channel.set_workspace(self._workspace, self._command_registry)
         if getattr(channel, "uses_manager_queue", True):
             channel.set_enqueue(self._make_enqueue_cb(key))
+        # Retain the handle before start can establish an external connection.
+        async with self._lock:
+            self.channels.append(channel)
+        self._failed_channels.add(key)
         try:
             await channel.start()
-        except Exception:
-            logger.exception("Failed to start channel '%s'", key)
+        except BaseException as exc:
+            from ...utils.io_utils import run_async_to_completion
+
             try:
-                await channel.stop()
-            except Exception:  # noqa: BLE001
-                pass
+                receipt = await run_async_to_completion(
+                    self._stop_one_unlocked(key),
+                )
+            except BaseException as cleanup_exc:
+                exc.binding = ChannelHandle(key=key, channel=channel)
+                raise exc from cleanup_exc
+            if not receipt.stopped:
+                exc.binding = ChannelHandle(key=key, channel=channel)
             raise
-        async with self._lock:
-            if self._find_channel(key) is None:
-                self.channels.append(channel)
-            else:
-                try:
-                    await channel.stop()
-                except Exception:  # noqa: BLE001
-                    pass
-                existing = self._find_channel(key)
-                return ChannelHandle(key=key, channel=existing)
+        self._failed_channels.discard(key)
         return ChannelHandle(key=key, channel=channel)
 
     async def stop_one(self, key: str) -> StopReceipt:
-        """Stop one channel on this manager. Other channels are untouched."""
+        """Stop one channel, retaining its handle until stop succeeds."""
+        lock = self._channel_lifecycle_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            return await self._stop_one_unlocked(key)
+
+    async def _stop_one_unlocked(self, key: str) -> StopReceipt:
         async with self._lock:
-            channel = None
-            for item in self.channels:
-                if item.channel == key:
-                    channel = item
-                    break
+            channel = self._find_channel(key)
         if channel is None:
-            return StopReceipt(
-                key=key,
-                stopped=False,
-                detail="not running",
-            )
+            return StopReceipt(key=key, stopped=False, detail="not running")
         channel.set_enqueue(None)
         try:
             await channel.stop()
         except Exception as exc:  # noqa: BLE001
             logger.exception("Failed to stop channel '%s'", key)
+            self._failed_channels.add(key)
             return StopReceipt(key=key, stopped=False, detail=str(exc))
         async with self._lock:
             self.channels = [
-                item for item in self.channels if item.channel != key
+                item for item in self.channels if item is not channel
             ]
+        self._failed_channels.discard(key)
         return StopReceipt(key=key, stopped=True)
 
     async def get_channel(self, channel: str) -> Optional[BaseChannel]:

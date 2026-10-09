@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import weakref
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -36,6 +37,7 @@ class WorkspaceIntent:
     apply: ApplyFn
     revoke: RevokeFn
     bindings: dict[str, Any] = field(default_factory=dict)
+    workspaces: dict[str, Callable[[], Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -49,8 +51,8 @@ class OwnerScan:
 class WorkspaceProjector:
     """Store intents; apply/revoke against the *current* live workspace set.
 
-    Do not keep Workspace object pointers for revoke — ``reload_agent``
-    replaces those objects.
+    Resolve current workspaces at revoke time. Weak references also keep
+    bindings reachable while replaced workspaces drain in-flight requests.
     """
 
     def __init__(
@@ -100,15 +102,15 @@ class WorkspaceProjector:
         errors: list[str] = []
         for workspace in self._live():
             key = _workspace_key(workspace)
-            if key in intent.bindings:
+            if self._has_binding(intent, workspace):
                 continue
             try:
-                token = await _run(intent.apply, workspace)
+                token = await self._apply(intent, workspace)
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"{key}:{exc}")
                 continue
             if token is not None:
-                intent.bindings[key] = token
+                self._remember(intent, workspace, token)
         if errors:
             raise ProjectionError(
                 f"{kind} {name!r} failed: {'; '.join(errors)}",
@@ -124,12 +126,11 @@ class WorkspaceProjector:
         intent = self._find(kind, name, plugin_id)
         if intent is None:
             return
-        key = _workspace_key(workspace)
-        if key in intent.bindings:
+        if self._has_binding(intent, workspace):
             return
-        token = await _run(intent.apply, workspace)
+        token = await self._apply(intent, workspace)
         if token is not None:
-            intent.bindings[key] = token
+            self._remember(intent, workspace, token)
 
     async def revoke(self, kind: str, name: str, plugin_id: str) -> None:
         intent = self._find(kind, name, plugin_id)
@@ -137,24 +138,39 @@ class WorkspaceProjector:
             return
         errors: list[str] = []
         failed_stop: StopReceipt | None = None
-        for workspace in self._live():
-            key = _workspace_key(workspace)
+        workspaces = {_workspace_key(ws): ws for ws in self._live()}
+        for key, resolve in intent.workspaces.items():
+            workspace = resolve()
+            if workspace is not None:
+                workspaces.setdefault(key, workspace)
+        for key in list(intent.bindings):
+            workspace = workspaces.get(key)
+            if workspace is None:
+                # The replaced workspace is gone; never use its token on
+                # another instance with the same agent id.
+                intent.bindings.pop(key, None)
+                intent.workspaces.pop(key, None)
+                continue
             if key not in intent.bindings:
                 continue
             token = intent.bindings[key]
             try:
                 result = await _run_revoke(intent.revoke, workspace, token)
             except Exception as exc:  # noqa: BLE001
+                intent.workspaces[key] = _hold_workspace(workspace)
                 errors.append(f"{key}:{exc}")
                 continue
             if isinstance(result, StopReceipt) and not result.stopped:
                 if result.detail == "not running":
                     intent.bindings.pop(key, None)
+                    intent.workspaces.pop(key, None)
                     continue
                 failed_stop = result
+                intent.workspaces[key] = _hold_workspace(workspace)
                 errors.append(f"{key}:{result.detail or 'stop failed'}")
                 continue
             intent.bindings.pop(key, None)
+            intent.workspaces.pop(key, None)
         if not intent.bindings:
             self._intents.remove(intent)
         if failed_stop is not None:
@@ -166,6 +182,78 @@ class WorkspaceProjector:
             raise RuntimeError(
                 f"Revoke {kind} {name!r} failed: {'; '.join(errors)}",
             )
+
+    async def revoke_workspace(self, workspace: Any) -> None:
+        """Release one retiring workspace without dropping future intents."""
+        key = _workspace_key(workspace)
+        errors: list[str] = []
+        for intent in reversed(self._intents):
+            if not self._has_binding(intent, workspace):
+                continue
+            try:
+                result = await _run_revoke(
+                    intent.revoke,
+                    workspace,
+                    intent.bindings[key],
+                )
+                if (
+                    isinstance(result, StopReceipt)
+                    and not result.stopped
+                    and result.detail != "not running"
+                ):
+                    raise QuiescenceError(result.detail, receipt=result)
+            except BaseException as exc:
+                # Keep the retiring object reachable if resource stop fails.
+                intent.workspaces[key] = _hold_workspace(workspace)
+                if not isinstance(exc, Exception):
+                    raise
+                errors.append(
+                    f"{intent.plugin_id}:{intent.kind}:{intent.name}: {exc}",
+                )
+                continue
+            intent.bindings.pop(key, None)
+            intent.workspaces.pop(key, None)
+        if errors:
+            raise QuiescenceError(
+                "Workspace plugin cleanup failed: " + "; ".join(errors),
+            )
+
+    @staticmethod
+    def _has_binding(intent: WorkspaceIntent, workspace: Any) -> bool:
+        key = _workspace_key(workspace)
+        if key not in intent.bindings:
+            return False
+        if intent.workspaces[key]() is workspace:
+            return True
+        # Object ids can be reused after a workspace has been collected.
+        intent.bindings.pop(key, None)
+        intent.workspaces.pop(key, None)
+        return False
+
+    @staticmethod
+    def _remember(intent: WorkspaceIntent, workspace: Any, token: Any) -> None:
+        key = _workspace_key(workspace)
+        intent.bindings[key] = token
+        try:
+            intent.workspaces[key] = weakref.ref(workspace)
+        except TypeError:
+            # Lightweight adapters may not support weak references.
+            intent.workspaces[key] = _hold_workspace(workspace)
+
+    async def _apply(self, intent: WorkspaceIntent, workspace: Any) -> Any:
+        try:
+            return await _run(intent.apply, workspace)
+        except BaseException as exc:
+            # Partial channel/mode startup can fail while cleanup also fails.
+            # Such failures carry the actual handle so rollback can retry.
+            cause = exc
+            while cause is not None:
+                token = getattr(cause, "binding", None)
+                if token is not None:
+                    self._remember(intent, workspace, token)
+                    break
+                cause = cause.__cause__
+            raise
 
     def drop_plugin(self, plugin_id: str) -> None:
         self._intents = [
@@ -224,8 +312,17 @@ def scan_owner_rows(plugin_id: str, workspaces: list[Any]) -> OwnerScan:
     return report
 
 
+def _hold_workspace(workspace: Any) -> Callable[[], Any]:
+    """Retain one workspace for cleanup retries with a typed resolver."""
+
+    def resolve() -> Any:
+        return workspace
+
+    return resolve
+
+
 def _workspace_key(workspace: Any) -> str:
-    return str(getattr(workspace, "agent_id", None) or id(workspace))
+    return f"{getattr(workspace, 'agent_id', '?')}@{id(workspace)}"
 
 
 def _scan_one_workspace(
@@ -375,9 +472,11 @@ async def _run_revoke(
     token: Any,
 ) -> Any:
     try:
-        result = fn(workspace, token)
+        inspect.signature(fn).bind(workspace, token)
     except TypeError:
         result = fn(workspace)
+    else:
+        result = fn(workspace, token)
     if inspect.isawaitable(result):
         return await result
     return result
