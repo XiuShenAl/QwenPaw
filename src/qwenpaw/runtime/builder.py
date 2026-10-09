@@ -1450,6 +1450,12 @@ class AgentBuilder:
 def _wrap_plugin_middleware(mw: Any, plugin_id: str) -> Any:
     """Keep plugin middleware faults in the plugin, not the request loop."""
 
+    from agentscope.middleware import MiddlewareBase
+    from .plugin_middleware import PluginMiddlewareGuard
+
+    if isinstance(mw, MiddlewareBase):
+        return PluginMiddlewareGuard(mw, plugin_id)
+
     if callable(mw) and not hasattr(mw, "wrap"):
 
         def _guarded(*args: Any, **kwargs: Any) -> Any:

@@ -507,3 +507,126 @@ async def test_restart_cleanup_awaits_result(
     assert report.clean
     assert flag.read_text() == "done"
     assert not root.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", list(UnloadMode))
+async def test_stubborn_hosted_task_returns_failure_and_keeps_retry_handle(
+    tmp_path,
+    registry,
+    monkeypatch,
+    mode,
+):
+    from qwenpaw.plugins import custody
+
+    monkeypatch.setattr(custody, "TASK_STOP_SECONDS", 0.01)
+    loader = PluginLoader([])
+    inst = loader.lifecycle.ensure_instance("stubborn-task")
+    api = PluginApi("stubborn-task", {}, {"id": "stubborn-task"})
+    api.set_registry(registry)
+    api.bind_instance(inst)
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def work():
+        started.set()
+        while not finish.is_set():
+            try:
+                await finish.wait()
+            except asyncio.CancelledError:
+                pass
+
+    hosted = api.spawn_task(work(), "stubborn")
+    await started.wait()
+    manifest = PluginManifest.from_dict(
+        {"id": "stubborn-task", "name": "Stubborn", "version": "1.0.0"},
+    )
+    loader._loaded_plugins["stubborn-task"] = PluginRecord(
+        manifest=manifest,
+        source_path=tmp_path / "plugin",
+        enabled=True,
+        status="active",
+        instance=object(),
+    )
+    monkeypatch.setattr(loader, "_drop_uninstalled_settings", AsyncMock())
+    retry = None
+    operation = asyncio.create_task(
+        loader.lifecycle.unload("stubborn-task", mode),
+    )
+    try:
+        done, _ = await asyncio.wait({operation}, timeout=0.3)
+        assert operation in done, "unload waited beyond its task stop budget"
+        report = operation.result()
+        assert not report.clean
+        assert not report.quiescent
+        assert report.needs_restart
+        assert not hosted.done()
+        assert inst.state is PluginState.FAILED
+        assert inst.has_runtime_ledger()
+        assert loader.get_loaded_plugin("stubborn-task") is not None
+        with pytest.raises(RuntimeError, match="not quiescent"):
+            inst.refuse_unquiescent_reregister()
+        # The first unload must also release the facade's same-plugin lock.
+        retry = asyncio.create_task(
+            loader.lifecycle.unload("stubborn-task", mode),
+        )
+        done, _ = await asyncio.wait({retry}, timeout=0.3)
+        assert retry in done, "the same-plugin lifecycle lock was not released"
+        assert not retry.result().quiescent
+    finally:
+        finish.set()
+        await hosted
+        await operation
+        if retry is not None:
+            await retry
+    report = await loader.lifecycle.unload("stubborn-task", mode)
+    assert report.quiescent
+
+
+@pytest.mark.asyncio
+async def test_stop_task_accepts_normal_cancellation():
+    from qwenpaw.plugins.custody import stop_task
+
+    started = asyncio.Event()
+
+    async def work():
+        started.set()
+        await asyncio.Event().wait()
+
+    hosted = asyncio.create_task(work())
+    await started.wait()
+    await stop_task(hosted, "normal")
+    assert hosted.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_stop_request_cancellation_does_not_wait_for_stubborn_task():
+    from qwenpaw.plugins.custody import stop_task
+
+    started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def work():
+        started.set()
+        while not finish.is_set():
+            try:
+                await finish.wait()
+            except asyncio.CancelledError:
+                cancellation_seen.set()
+
+    hosted = asyncio.create_task(work())
+    await started.wait()
+    stopper = asyncio.create_task(stop_task(hosted, "stubborn"))
+    try:
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=1)
+        stopper.cancel()
+        done, _ = await asyncio.wait({stopper}, timeout=0.3)
+        assert stopper in done
+        with pytest.raises(asyncio.CancelledError):
+            stopper.result()
+        assert not hosted.done()
+    finally:
+        finish.set()
+        await hosted
+        await asyncio.gather(stopper, return_exceptions=True)

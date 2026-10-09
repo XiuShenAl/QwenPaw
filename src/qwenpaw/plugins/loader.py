@@ -2747,7 +2747,8 @@ class PluginLoader:
         created = snapshot_created_dests(plugin_id)
         declared: list[str] = []
         candidate = False
-        if not created and source_path is not None:
+        # An inventory with no owned paths still records user ownership.
+        if not has_inventory and source_path is not None:
             try:
                 _path, manifest = await asyncio.to_thread(
                     self._read_source_manifest,

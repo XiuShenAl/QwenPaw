@@ -22,17 +22,6 @@ WATCH_STOP_SECONDS = 5.0
 CONNECTION_STOP_SECONDS = 5.0
 
 
-def _current_task_is_cancelling() -> bool:
-    """Whether the caller itself is being cancelled."""
-    current = asyncio.current_task()
-    if current is None:
-        return False
-    cancelling = getattr(current, "cancelling", None)
-    if callable(cancelling):
-        return cancelling() > 0
-    return current.cancelled()
-
-
 async def stop_task(task: asyncio.Task[Any], desc: str) -> None:
     """Cancel *task* and wait until it finishes or the budget expires.
 
@@ -42,16 +31,18 @@ async def stop_task(task: asyncio.Task[Any], desc: str) -> None:
     if task.done():
         return
     task.cancel()
-    try:
-        await asyncio.wait_for(task, timeout=TASK_STOP_SECONDS)
-    except asyncio.TimeoutError as exc:
+    # wait_for waits for cancellation acknowledgement after its deadline.
+    # Observe completion without cancelling again or awaiting a stubborn task.
+    _, pending = await asyncio.wait({task}, timeout=TASK_STOP_SECONDS)
+    if pending:
         raise TimeoutError(
-            f"task {desc!r} did not stop in {TASK_STOP_SECONDS:.0f}s "
-            "(wait_for waited for cancellation to complete)",
-        ) from exc
+            f"task {desc!r} did not stop in {TASK_STOP_SECONDS:g}s",
+        )
+    try:
+        task.result()
     except asyncio.CancelledError:
-        if _current_task_is_cancelling():
-            raise
+        # Only the hosted task's cancellation is consumed. Cancellation of
+        # this stop operation propagates directly from asyncio.wait above.
         return
 
 

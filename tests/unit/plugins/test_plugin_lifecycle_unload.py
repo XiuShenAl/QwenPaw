@@ -567,3 +567,47 @@ def test_projection_failed_records_diagnostic(fresh_registry):
         api._projection_failed("slash_command", ValueError("taken"))
     assert inst.diagnostics
     assert "slash_command" in inst.diagnostics[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("record_user_location", [True, False])
+async def test_uninstall_with_inventory_preserves_declared_user_directory(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+    record_user_location: bool,
+):
+    """An empty owned-path list must not trigger manifest-based deletion."""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    root = _write_plugin(tmp_path / "disk-user", "disk-user")
+    dest = tmp_path / "user-directory"
+    dest.mkdir()
+    original = b"user content\n\x00\xff"
+    user_file = dest / "user.dat"
+    user_file.write_bytes(original)
+    manifest_path = root / "plugin.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["meta"] = {"provisions": [{"dest": str(dest)}]}
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    if record_user_location:
+        factory = root / "factory"
+        factory.mkdir()
+        (factory / "default.txt").write_text("default", encoding="utf-8")
+        provision_files("disk-user", factory, dest, "1.0.0")
+        assert (
+            load_inventory("disk-user")["locations"][str(dest)]["owned"]
+            is False
+        )
+    else:
+        save_inventory("disk-user", {"locations": {}, "provisions": []})
+    loader = PluginLoader(plugin_dirs=[tmp_path])
+    loader.registry = fresh_registry
+    monkeypatch.setattr(loader, "_drop_uninstalled_settings", AsyncMock())
+    report = await loader.unload_plugin("disk-user", mode=UnloadMode.UNINSTALL)
+    assert dest.is_dir()
+    assert user_file.read_bytes() == original
+    assert report.clean
+    assert not any("candidate:" in error for error in report.errors)
+    assert not root.exists()

@@ -25,6 +25,10 @@ HOST_PACKAGE_NAMES: frozenset[str] = frozenset(
         "uvicorn",
         "starlette",
         "anyio",
+        "openai",
+        "agentscope",
+        "reme-ai",
+        "apscheduler",
     },
 )
 
@@ -36,6 +40,7 @@ _IMPORT_NAME_OVERRIDES = {
     "opencv-python": "cv2",
     "scikit-learn": "sklearn",
     "protobuf": "google.protobuf",
+    "reme-ai": "reme",
 }
 
 
