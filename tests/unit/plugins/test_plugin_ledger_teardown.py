@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from qwenpaw.plugins.architecture import (
 from qwenpaw.plugins.lifecycle import (
     LifecycleDelegate,
     PluginInstance,
+    PluginState,
     UnloadMode,
 )
 from qwenpaw.plugins.loader import PluginLoader
@@ -65,6 +67,91 @@ def _write_plugin(root: Path, plugin_id: str, body: str = "pass") -> Path:
         encoding="utf-8",
     )
     return root
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_fails", [False, True])
+async def test_uninstall_waits_for_runtime_before_deleting_files(
+    tmp_path: Path,
+    stop_fails: bool,
+):
+    inst = PluginInstance("two-phase")
+    dest = tmp_path / "installed-data"
+    dest.mkdir()
+    file = dest / "important.txt"
+    file.write_text("still needed", encoding="utf-8")
+    calls = []
+    allow_stop = not stop_fails
+
+    async def stop():
+        calls.append("stop")
+        assert file.read_text(encoding="utf-8") == "still needed"
+        await asyncio.sleep(0)
+        if not allow_stop:
+            raise RuntimeError("resource still running")
+
+    def delete():
+        calls.append("delete")
+        file.unlink()
+        dest.rmdir()
+
+    inst.record_runtime("connection", stop)
+    inst.record_install("installed data", delete)
+    report = await inst.dispose(UnloadMode.UNINSTALL)
+    if stop_fails:
+        assert calls == ["stop"]
+        assert not report.clean
+        assert not report.quiescent
+        assert report.needs_restart
+        assert dest.is_dir()
+        assert inst.state is PluginState.FAILED
+        assert inst.has_runtime_ledger()
+        assert inst._install
+        with pytest.raises(RuntimeError, match="not quiescent"):
+            inst.refuse_unquiescent_reregister()
+        allow_stop = True
+        calls.clear()
+        report = await inst.dispose(UnloadMode.UNINSTALL)
+    assert calls == ["stop", "delete"]
+    assert report.clean
+    assert report.quiescent
+    assert not dest.exists()
+
+
+@pytest.mark.asyncio
+async def test_uninstall_preserves_lifo_within_each_layer():
+    inst = PluginInstance("layer-order")
+    calls = []
+    inst.record_install("install first", lambda: calls.append("install1"))
+    inst.record_runtime("runtime first", lambda: calls.append("runtime1"))
+    inst.record_install("install second", lambda: calls.append("install2"))
+    inst.record_runtime("runtime second", lambda: calls.append("runtime2"))
+    report = await inst.dispose(UnloadMode.UNINSTALL)
+    assert report.quiescent
+    assert calls == ["runtime2", "runtime1", "install2", "install1"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_runtime_stop_skips_install_cleanup():
+    inst = PluginInstance("cancel-stop")
+    started = asyncio.Event()
+    calls = []
+
+    async def stop():
+        started.set()
+        await asyncio.Event().wait()
+
+    inst.record_runtime("waiting connection", stop)
+    inst.record_install("delete files", lambda: calls.append("delete"))
+    task = asyncio.create_task(inst.dispose(UnloadMode.UNINSTALL))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not calls
+    assert inst.state is PluginState.FAILED
+    assert inst.has_runtime_ledger()
+    assert inst._install
 
 
 @pytest.mark.asyncio

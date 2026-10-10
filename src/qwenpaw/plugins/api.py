@@ -2214,9 +2214,15 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 resolved_channels,
             )
 
-        def _uninstall_skills():
+        async def _uninstall_skills():
             """Remove skills sourced from this plugin on uninstall."""
-            self._do_uninstall_skills(self.plugin_id, source_tag)
+            from ..utils.io_utils import run_sync_io
+
+            await run_sync_io(
+                self._do_uninstall_skills,
+                self.plugin_id,
+                source_tag,
+            )
 
         async def _on_workspace_created(workspace_info: dict):
             """Install plugin skills into a newly created workspace."""
@@ -2320,7 +2326,11 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 default_workspace_manifest,
                 mutate_json,
             )
-            from .provision import commit_migrations
+            from .provision import (
+                commit_migrations,
+                load_inventory,
+                location_owned,
+            )
             from ..agents.skill_system.registry import (
                 reconcile_workspace_manifest,
             )
@@ -2334,12 +2344,29 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             ws_skills_dir.mkdir(parents=True, exist_ok=True)
 
             version = str(self.manifest.get("version") or "0")
+            owned_names = []
+            created_names = []
             for skill_name in skill_names:
-                self.provision_files(
+                dest = ws_skills_dir / skill_name
+                previous = load_inventory(self.plugin_id)["locations"].get(
+                    str(dest.absolute()),
+                )
+                # A prior collision is still a user skill, not a plugin
+                # migration target. Do not merge new factory files into it.
+                if dest.exists() and previous and not location_owned(previous):
+                    continue
+                branch = self.provision_files(
                     skills_dir / skill_name,
-                    ws_skills_dir / skill_name,
+                    dest,
                     version,
                 )
+                location = load_inventory(self.plugin_id)["locations"].get(
+                    str(dest.absolute()),
+                )
+                if location_owned(location):
+                    owned_names.append(skill_name)
+                    if branch == "create":
+                        created_names.append(skill_name)
             if self._instance is not None and self._instance.activated:
                 commit_migrations(self.plugin_id)
 
@@ -2351,7 +2378,8 @@ class PluginApi:  # pylint: disable=too-many-public-methods
 
             def _apply_defaults(
                 payload,
-                _names=tuple(skill_names),
+                _names=tuple(owned_names),
+                _created=tuple(created_names),
                 _src=source_tag,
                 _enabled=enabled_by_default,
                 _channels=tuple(resolved_channels),
@@ -2361,7 +2389,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                     entry = skills.get(name)
                     if entry is None:
                         continue
-                    if entry.get("source") != _src:
+                    if name in _created:
                         entry["enabled"] = _enabled
                         entry["channels"] = list(_channels)
                     entry["source"] = _src
@@ -2432,8 +2460,9 @@ class PluginApi:  # pylint: disable=too-many-public-methods
 
     @staticmethod
     def _do_uninstall_skills(plugin_id: str, source_tag: str) -> None:
-        """Remove skills sourced from a plugin across all workspaces."""
+        """Remove sourced skills only when the inventory proves ownership."""
         try:
+            from .provision import load_inventory, location_owned
             from .safe_fs import safe_remove
             from ..agents.skill_system.store import (
                 get_workspace_skills_dir,
@@ -2445,6 +2474,13 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 list_workspaces,
             )
 
+            owned_dests = {
+                Path(key).absolute()
+                for key, loc in (
+                    load_inventory(plugin_id).get("locations") or {}
+                ).items()
+                if key and location_owned(loc)
+            }
             workspaces = list_workspaces()
             for workspace_info in workspaces:
                 workspace_dir = Path(workspace_info["workspace_dir"])
@@ -2462,12 +2498,14 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                     _ws_skills=ws_skills_dir,
                     _tag=source_tag,
                     _agent_id=workspace_info["agent_id"],
+                    _owned=owned_dests,
                 ):
                     skills = payload.setdefault("skills", {})
                     to_remove = [
                         name
                         for name, entry in skills.items()
                         if entry.get("source") == _tag
+                        and (_ws_skills / name).absolute() in _owned
                     ]
                     for name in to_remove:
                         skills.pop(name, None)

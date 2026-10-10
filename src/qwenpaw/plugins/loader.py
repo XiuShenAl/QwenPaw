@@ -2783,10 +2783,11 @@ class PluginLoader:
             report.errors.extend(replay_errors)
             return report
         await self._drop_uninstalled_settings(plugin_id, tool_names)
+        # Skill manifest cleanup needs ownership before the inventory is gone.
+        await run_sync_io(PluginApi.cleanup_sourced_skills, plugin_id)
         await run_sync_io(teardown_created_locations, plugin_id)
         if candidate:
             await run_sync_io(teardown_paths, declared)
-        PluginApi.cleanup_sourced_skills(plugin_id)
 
         leftover = leftover_dests(created or declared)
         for dest in leftover:
@@ -2910,8 +2911,13 @@ class PluginLoader:
             )
             raise
 
-    async def activate_plugin_unlocked(self, plugin_id: str) -> None:
-        """Project, start, then commit. Raises on failure."""
+    async def activate_plugin_unlocked(
+        self,
+        plugin_id: str,
+        *,
+        preserve_instance_on_failure: bool = False,
+    ) -> None:
+        """Project, start, then commit; config updates own failure recovery."""
         instance = self.lifecycle.get_instance(plugin_id)
         if instance is not None and instance.activated:
             record = self._loaded_plugins.get(plugin_id)
@@ -2969,11 +2975,22 @@ class PluginLoader:
                     )
 
                 try:
-                    await self._fail_after_startup(
-                        plugin_id,
-                        str(exc) or type(exc).__name__,
-                        undo_disk=_rollback,
-                    )
+                    if preserve_instance_on_failure:
+                        # Undo this activation's writes after quiescence,
+                        # without dropping the config transaction's instance
+                        # or evicting its modules. The caller restores config.
+                        await self._dispose_then_undo_txn_disk(
+                            plugin_id,
+                            instance,
+                            use_teardown=True,
+                            undo_disk=_rollback,
+                        )
+                    else:
+                        await self._fail_after_startup(
+                            plugin_id,
+                            str(exc) or type(exc).__name__,
+                            undo_disk=_rollback,
+                        )
                 except Exception:  # noqa: BLE001
                     logger.exception(
                         "Activate rollback failed for plugin '%s'",
@@ -3301,6 +3318,7 @@ async def _recheck_created_locations(
     )
 
     created = snapshot_created_dests(plugin_id)
+    await run_sync_io(PluginApi.cleanup_sourced_skills, plugin_id)
     await run_sync_io(teardown_created_locations, plugin_id)
     for dest in leftover_dests(created):
         report.errors.append(f"inventory leftover: {dest}")

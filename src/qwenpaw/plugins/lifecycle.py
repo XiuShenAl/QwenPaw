@@ -368,16 +368,12 @@ class PluginInstance:
         report = UnloadReport(plugin_id=self.plugin_id, mode=mode)
         interrupted = False
         try:
-            entries = _entries_for_mode(self._runtime, self._install, mode)
-            for entry in reversed(entries):
-                if entry.teardown is None:
-                    continue
-                try:
-                    result = entry.teardown()
-                    if inspect.isawaitable(result):
-                        await result
-                except Exception as exc:  # noqa: BLE001
-                    _record_teardown_failure(report, entry, exc)
+            # The install layer can delete files needed by live resources.
+            # It must not run until every runtime teardown proves quiescence.
+            entries = _runtime_entries_for_mode(self._runtime, mode)
+            await _run_ledger_teardowns(entries, report)
+            if mode is UnloadMode.UNINSTALL and report.quiescent:
+                await _run_ledger_teardowns(list(self._install), report)
         except BaseException:
             interrupted = True
             report.clean = False
@@ -390,6 +386,22 @@ class PluginInstance:
             else:
                 self.state = PluginState.DISPOSED
         return report
+
+
+async def _run_ledger_teardowns(
+    entries: list[LedgerEntry],
+    report: UnloadReport,
+) -> None:
+    """Run one ledger layer in serial LIFO order, collecting failures."""
+    for entry in reversed(entries):
+        if entry.teardown is None:
+            continue
+        try:
+            result = entry.teardown()
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:  # noqa: BLE001
+            _record_teardown_failure(report, entry, exc)
 
 
 def _record_teardown_failure(
@@ -422,12 +434,11 @@ def _record_teardown_failure(
     )
 
 
-def _entries_for_mode(
+def _runtime_entries_for_mode(
     runtime: list[LedgerEntry],
-    install: list[LedgerEntry],
     mode: UnloadMode,
 ) -> list[LedgerEntry]:
-    """Project the two-layer ledger onto one unload mode."""
+    """Select runtime entries; install cleanup has a separate barrier."""
     selected: list[LedgerEntry] = []
     if mode is UnloadMode.SHUTDOWN:
         # Hosted resources only. Table / intent / hook-row teardowns
@@ -440,8 +451,6 @@ def _entries_for_mode(
         return selected
     # unload / uninstall: all runtime, including shutdown_critical=False
     selected.extend(runtime)
-    if mode is UnloadMode.UNINSTALL:
-        selected.extend(install)
     return selected
 
 
@@ -671,6 +680,9 @@ class PluginLifecycle:
             )
         incoming = runtime_config(new_config)
         previous = dict(inst.config or {})
+        previous_state = inst.state
+        previous_status = record.status
+        previous_enabled = record.enabled
         from ..utils.io_utils import run_sync_io
 
         persisted = False
@@ -697,7 +709,10 @@ class PluginLifecycle:
         try:
             self._loader.registry.unregister_plugin(plugin_id)
             await self._loader.reregister_unlocked(plugin_id, incoming)
-            await self._loader.activate_plugin_unlocked(plugin_id)
+            await self._loader.activate_plugin_unlocked(
+                plugin_id,
+                preserve_instance_on_failure=True,
+            )
             await run_sync_io(persist_incoming)
             inst.config = incoming
         except BaseException as exc:
@@ -728,8 +743,14 @@ class PluginLifecycle:
             try:
                 self._loader.registry.unregister_plugin(plugin_id)
                 await self._loader.reregister_unlocked(plugin_id, previous)
-                await self._loader.activate_plugin_unlocked(plugin_id)
+                await self._loader.activate_plugin_unlocked(
+                    plugin_id,
+                    preserve_instance_on_failure=True,
+                )
                 inst.config = previous
+                inst.state = previous_state
+                record.status = previous_status
+                record.enabled = previous_enabled
             except BaseException as restore_exc:
                 inst.mark_failed(str(restore_exc) or "config restore failed")
                 record.status = "failed"
