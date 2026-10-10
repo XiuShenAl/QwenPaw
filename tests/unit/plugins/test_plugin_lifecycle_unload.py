@@ -496,6 +496,62 @@ async def test_uninstall_without_instance_uses_plugin_json_candidate(
 
 
 @pytest.mark.asyncio
+async def test_startup_rollback_preserves_user_directory(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "qwenpaw.constant.WORKING_DIR",
+        tmp_path / "work",
+    )
+    source = tmp_path / "factory"
+    source.mkdir()
+    (source / "factory.txt").write_text("factory\n", encoding="utf-8")
+    user_dir = tmp_path / "user-data"
+    user_dir.mkdir()
+    user_file = user_dir / "important.txt"
+    user_file.write_bytes(b"user data\x00\n")
+    owned_dir = tmp_path / "plugin-data"
+    plugin_id = "rollback-ownership"
+    assert not load_inventory(plugin_id)["locations"]
+    root = _write_plugin(
+        tmp_path / plugin_id,
+        plugin_id,
+        register_body=(
+            "def _boom():\n"
+            f"            src = {str(source)!r}\n"
+            f"            user = {str(user_dir)!r}\n"
+            f"            owned = {str(owned_dir)!r}\n"
+            "            assert api.provision_files(src, user, '1') "
+            "== 'keep'\n"
+            "            assert api.provision_files(src, owned, '1') "
+            "== 'create'\n"
+            "            raise RuntimeError('startup-rollback-boom')\n"
+            "        api.register_startup_hook('boom', _boom)"
+        ),
+    )
+    loader = PluginLoader(plugin_dirs=[tmp_path])
+    loader.registry = fresh_registry
+    manifest = PluginManifest.from_dict(
+        json.loads((root / "plugin.json").read_text(encoding="utf-8")),
+    )
+    await loader.load_plugin(manifest, root)
+    await loader.run_all_startup_hooks()
+    record = loader.get_loaded_plugin(plugin_id)
+    assert record is not None
+    assert record.status == "failed"
+    assert any("startup-rollback-boom" in d for d in record.diagnostics)
+    assert user_dir.is_dir()
+    assert user_file.read_bytes() == b"user data\x00\n"
+    assert sorted(path.name for path in user_dir.iterdir()) == [
+        "important.txt",
+    ]
+    assert not owned_dir.exists()
+    assert not load_inventory(plugin_id)["locations"]
+
+
+@pytest.mark.asyncio
 async def test_startup_failure_marks_failed_and_continues(
     tmp_path: Path,
     fresh_registry,

@@ -957,17 +957,22 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         teardown,
         shutdown_critical: bool = True,
     ) -> None:
-        """Record a process-local side effect on the runtime ledger."""
+        """Record cleanup before setting up a process-local side effect.
+
+        Teardown must be idempotent and safe after incomplete setup. If
+        setup raises, registration failure cleanup runs the recorded teardown.
+        """
         self._guard_register()
+        if self._instance is None:
+            raise RuntimeError("Plugin instance is not bound")
+        self._instance.record_runtime(
+            desc,
+            teardown,
+            shutdown_critical=shutdown_critical,
+            kind="effect",
+        )
         if setup is not None:
             setup()
-        if self._instance is not None:
-            self._instance.record_runtime(
-                desc,
-                teardown,
-                shutdown_critical=shutdown_critical,
-                kind="effect",
-            )
 
     def spawn_task(self, coro, desc: str = "task") -> Any:
         """Create an asyncio task and stop it on unload."""

@@ -618,6 +618,7 @@ class PluginLifecycle:
                 memory_registry.cancel_owner_unload(plugin_id)
 
     # pylint: disable=too-many-return-statements,too-many-statements
+    # pylint: disable=too-many-branches
     async def _update_config_unlocked(
         self,
         plugin_id: str,
@@ -670,6 +671,17 @@ class PluginLifecycle:
             )
         incoming = runtime_config(new_config)
         previous = dict(inst.config or {})
+        from ..utils.io_utils import run_sync_io
+
+        persisted = False
+
+        def persist_incoming() -> None:
+            nonlocal persisted
+            persist_plugin_settings(plugin_id, config=incoming)
+            # run_sync_io waits for the worker even when cancelled. Record
+            # its outcome so cancellation cannot undo a completed disk commit.
+            persisted = True
+
         teardown_report = await inst.teardown_runtime()
         if not teardown_report.quiescent:
             record.status = "failed"
@@ -686,7 +698,12 @@ class PluginLifecycle:
             self._loader.registry.unregister_plugin(plugin_id)
             await self._loader.reregister_unlocked(plugin_id, incoming)
             await self._loader.activate_plugin_unlocked(plugin_id)
+            await run_sync_io(persist_incoming)
+            inst.config = incoming
         except BaseException as exc:
+            if persisted:
+                inst.config = incoming
+                raise
             undo_report = await inst.teardown_runtime()
             if not undo_report.quiescent:
                 inst.mark_failed(
@@ -735,14 +752,6 @@ class PluginLifecycle:
                 needs_restart=bool(restore_error),
                 errors=errors,
             )
-        inst.config = incoming
-        from ..utils.io_utils import run_sync_io
-
-        await run_sync_io(
-            persist_plugin_settings,
-            plugin_id,
-            config=incoming,
-        )
         return ConfigUpdateReport(plugin_id=plugin_id, ok=True)
 
     async def set_enabled(

@@ -3,6 +3,7 @@
 """Plugin failure recovery and workspace replacement regressions."""
 
 import asyncio
+import builtins
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -29,6 +30,102 @@ def registry(tmp_path, monkeypatch):
 
 def workspace():
     return SimpleNamespace(agent_id="same-agent", plugins=WorkspacePlugins())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_partial_effect_setup_is_cleaned_or_retained_for_retry(
+    tmp_path,
+    registry,
+    monkeypatch,
+    cleanup_fails,
+):
+    state = {
+        "value": "old",
+        "cleanup_fails": cleanup_fails,
+        "cleanup_calls": 0,
+    }
+    monkeypatch.setattr(
+        builtins,
+        "_qwenpaw_effect_test_state",
+        state,
+        raising=False,
+    )
+    root = tmp_path / "plugins" / "partial-effect"
+    root.mkdir(parents=True)
+    manifest = PluginManifest.from_dict(
+        {
+            "id": "partial-effect",
+            "name": "Partial effect",
+            "version": "1.0.0",
+            "entry": {"backend": "main.py"},
+        },
+    )
+    (root / "plugin.json").write_text(
+        json.dumps(
+            {
+                "id": "partial-effect",
+                "name": "Partial effect",
+                "version": "1.0.0",
+                "entry": {"backend": "main.py"},
+            },
+        ),
+        encoding="utf-8",
+    )
+    (root / "main.py").write_text(
+        "import builtins\n"
+        "state = builtins._qwenpaw_effect_test_state\n"
+        "class Plugin:\n"
+        "    def register(self, api):\n"
+        "        def setup():\n"
+        "            state['value'] = 'new'\n"
+        "            raise RuntimeError('partial setup failed')\n"
+        "        def teardown():\n"
+        "            state['cleanup_calls'] += 1\n"
+        "            if state['cleanup_fails']:\n"
+        "                raise RuntimeError('effect still live')\n"
+        "            state['value'] = 'old'\n"
+        "        api.effect('partial effect', setup, teardown)\n"
+        "plugin = Plugin()\n",
+        encoding="utf-8",
+    )
+    loader = PluginLoader([tmp_path / "plugins"])
+    loader.registry = registry
+    record = await loader.load_plugin(manifest, root)
+    assert record.status == "failed"
+    assert any("partial setup failed" in d for d in record.diagnostics)
+    assert state["cleanup_calls"] == 1
+    inst = loader.lifecycle.get_instance("partial-effect")
+    if cleanup_fails:
+        assert state["value"] == "new"
+        assert inst.state is PluginState.FAILED
+        assert inst.has_runtime_ledger()
+        with pytest.raises(RuntimeError, match="not quiescent"):
+            inst.refuse_unquiescent_reregister()
+        report = await loader.unload_plugin("partial-effect")
+        assert not report.clean
+        assert not report.quiescent
+        assert report.needs_restart
+        assert state["cleanup_calls"] == 2
+        assert inst.has_runtime_ledger()
+        assert loader.get_loaded_plugin("partial-effect") is not None
+        state["cleanup_fails"] = False
+    else:
+        assert state["value"] == "old"
+    report = await loader.unload_plugin("partial-effect")
+    assert report.clean
+    assert report.quiescent
+    assert state["value"] == "old"
+    assert state["cleanup_calls"] == (3 if cleanup_fails else 1)
+    assert loader.get_loaded_plugin("partial-effect") is None
+
+
+def test_unbound_effect_refuses_setup():
+    api = PluginApi("unbound-effect", {}, {"id": "unbound-effect"})
+    calls = []
+    with pytest.raises(RuntimeError, match="Plugin instance is not bound"):
+        api.effect("unbound", lambda: calls.append("setup"), lambda: None)
+    assert not calls
 
 
 @pytest.mark.asyncio

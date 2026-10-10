@@ -710,7 +710,7 @@ def rollback_created_locations(
     plugin_id: str,
     before_keys: set[str],
 ) -> list[str]:
-    """Delete dests created after *before_keys*; leave migrate to recover."""
+    """Drop new inventory rows; delete only owned dests, not user paths."""
     data = load_inventory(plugin_id)
     locations = data.get("locations") or {}
     created = [
@@ -718,7 +718,7 @@ def rollback_created_locations(
     ]
     for dest_key in created:
         dest = parse_optional_absolute(dest_key)
-        if dest is not None:
+        if dest is not None and location_owned(locations[dest_key]):
             _remove_path(dest)
         locations.pop(dest_key, None)
     if created:
