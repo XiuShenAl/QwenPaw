@@ -620,15 +620,21 @@ def _cleanup_committed_migrations(
         raise PostCommitCleanupError(errors)
 
 
-def commit_prepared_migrations(plugin_id: str) -> None:
-    """Keep new dests and backup locators until cleanup succeeds."""
-    data = load_inventory(plugin_id, strict=True)
+def _mark_migrations_committed(data: dict[str, Any]) -> bool:
+    """Mark location migrations committed before removing their backups."""
     changed = False
     for loc in (data.get("locations") or {}).values():
         marker = (loc or {}).get("migrating")
         if marker and marker.get("status") != "committed":
             loc["migrating"] = {**marker, "status": "committed"}
             changed = True
+    return changed
+
+
+def commit_prepared_migrations(plugin_id: str) -> None:
+    """Keep new dests and backup locators until cleanup succeeds."""
+    data = load_inventory(plugin_id, strict=True)
+    changed = _mark_migrations_committed(data)
     if changed:
         save_inventory(plugin_id, data)
     _cleanup_committed_migrations(plugin_id, data)
@@ -930,12 +936,7 @@ def apply_tool_factory(
 def commit_migrations(plugin_id: str) -> bool:
     """Persist commit before cleanup; post-commit failures cannot roll back."""
     data = load_inventory(plugin_id, strict=True)
-    changed = False
-    for loc in (data.get("locations") or {}).values():
-        marker = (loc or {}).get("migrating")
-        if marker and marker.get("status") != "committed":
-            loc["migrating"] = {**marker, "status": "committed"}
-            changed = True
+    changed = _mark_migrations_committed(data)
     for row in (data.get("tools") or {}).values():
         pending = (row or {}).get("pending_factory")
         if pending is not None:

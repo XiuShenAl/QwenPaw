@@ -29,15 +29,6 @@ from qwenpaw.plugins.registry import PluginRegistry
 from qwenpaw.runtime.tool_registry import ToolDescriptor, ToolRegistry
 
 
-@pytest.fixture()
-def fresh_registry():
-    old = PluginRegistry._instance
-    PluginRegistry._instance = None
-    registry = PluginRegistry()
-    yield registry
-    PluginRegistry._instance = old
-
-
 def _api(registry: PluginRegistry, plugin_id: str = "demo") -> PluginApi:
     api = PluginApi(plugin_id, config={}, manifest={"id": plugin_id})
     api.set_registry(registry)
@@ -335,6 +326,7 @@ async def test_reload_aborts_when_not_quiescent(
     )
     report = await loader.lifecycle.reload("stuck", new_source=staging)
     assert not report.ok
+    assert report.needs_restart
     assert any("stuck" in err for err in report.errors)
     assert "stuck" in loader.get_all_loaded_plugins()
     assert "register_slash_command" not in (installed / "main.py").read_text(

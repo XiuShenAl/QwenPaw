@@ -29,20 +29,11 @@ from qwenpaw.app.routers.plugins import (
     _load_plugin_with_optional_force_reinstall,
     _extract_downloaded_plugin_zip,
     _extract_plugin_zip_bytes,
-    _post_load_setup,
-    _remove_named_tools_from_agents,
-    _remove_plugin_tools_from_agents,
     install_plugin,
     install_plugin_source,
     search_market_plugins,
     uninstall_plugin_source,
     upload_plugin,
-)
-
-# Patch targets longer than the 79-column limit are hoisted so each stays a
-# single string literal (pylint W1404 implicit-str-concat).
-_FINISH_INSTALL = (
-    "qwenpaw.app.routers.plugins._finish_plugin_install_after_load"
 )
 
 
@@ -147,182 +138,6 @@ def _loader_stub(
 
     loader.load_plugin_from_path = AsyncMock(side_effect=_load)
     return loader
-
-
-class _AgentCfg:
-    """Agent config stand-in carrying a mutable builtin_tools dict."""
-
-    def __init__(self, tools: dict[str, Any]) -> None:
-        self.tools = SimpleNamespace(builtin_tools=tools)
-
-
-class _ConfigLayer:
-    """Patch ``load_config`` / ``load_agent_config`` / ``save_agent_config``.
-
-    Records every call so assertions target observable effects (which
-    agents were read, which were written, with what payload) rather than
-    mock internals.
-    """
-
-    def __init__(
-        self,
-        profiles: dict[str, Any] | None,
-        agent_cfgs: dict[str, Any] | None = None,
-        *,
-        load_config_error: Exception | None = None,
-        failing_agents: tuple[str, ...] = (),
-    ) -> None:
-        self.profiles = profiles
-        self.agent_cfgs = dict(agent_cfgs or {})
-        self.load_config_error = load_config_error
-        self.failing_agents = set(failing_agents)
-        self.loaded_agents: list[str] = []
-        self.saved: list[tuple[str, Any]] = []
-        self._patches = (
-            patch(
-                "qwenpaw.config.utils.load_config",
-                side_effect=self._load_config,
-            ),
-            patch(
-                "qwenpaw.config.config.load_agent_config",
-                side_effect=self._load_agent_config,
-            ),
-            patch(
-                "qwenpaw.config.config.save_agent_config",
-                side_effect=self._save_agent_config,
-            ),
-        )
-
-    # -- stub behaviour ----------------------------------------------------
-    def _load_config(self):
-        if self.load_config_error is not None:
-            raise self.load_config_error
-        agents = (
-            SimpleNamespace(profiles=self.profiles)
-            if self.profiles is not None
-            else None
-        )
-        return SimpleNamespace(agents=agents)
-
-    def _load_agent_config(self, agent_id: str):
-        self.loaded_agents.append(agent_id)
-        if agent_id in self.failing_agents:
-            raise RuntimeError(f"boom-{agent_id}")
-        cfg = self.agent_cfgs.get(agent_id)
-        if cfg is None:
-            raise KeyError(agent_id)
-        return cfg
-
-    def _save_agent_config(self, agent_id: str, cfg: Any) -> None:
-        self.saved.append((agent_id, cfg))
-
-    # -- context manager ---------------------------------------------------
-    def __enter__(self) -> "_ConfigLayer":
-        for item in self._patches:
-            item.start()
-        return self
-
-    def __exit__(self, *exc: Any) -> None:
-        for item in reversed(self._patches):
-            item.stop()
-
-
-# ---------------------------------------------------------------------------
-# _remove_named_tools_from_agents / _remove_plugin_tools_from_agents
-# ---------------------------------------------------------------------------
-
-
-class TestRemoveToolsFromAgents:
-    def test_empty_tool_list_short_circuits(self):
-        with _ConfigLayer({"a": object()}) as layer:
-            _remove_named_tools_from_agents("plug", [])
-        assert layer.loaded_agents == []
-        assert layer.saved == []
-
-    def test_removes_only_the_named_tools(self):
-        cfg = _AgentCfg({"alpha": object(), "keep": object()})
-        with _ConfigLayer({"a": object()}, {"a": cfg}) as layer:
-            _remove_named_tools_from_agents("plug", ["alpha", "ghost"])
-        assert list(cfg.tools.builtin_tools) == ["keep"]
-        assert [name for name, _ in layer.saved] == ["a"]
-
-    def test_absent_tool_saves_nothing(self):
-        cfg = _AgentCfg({"keep": object()})
-        with _ConfigLayer({"a": object()}, {"a": cfg}) as layer:
-            _remove_named_tools_from_agents("plug", ["alpha"])
-        assert layer.saved == []
-        assert list(cfg.tools.builtin_tools) == ["keep"]
-
-    def test_one_bad_agent_does_not_block_the_other(self, caplog):
-        cfg_b = _AgentCfg({"alpha": object()})
-        with _ConfigLayer(
-            {"a": object(), "b": object()},
-            {"b": cfg_b},
-            failing_agents=("a",),
-        ) as layer:
-            _remove_named_tools_from_agents("plug", ["alpha"])
-        assert [name for name, _ in layer.saved] == ["b"]
-        assert cfg_b.tools.builtin_tools == {}
-        assert "boom-a" in caplog.text
-
-    def test_load_config_failure_logs_and_returns(self, caplog):
-        with _ConfigLayer(
-            None,
-            load_config_error=RuntimeError("cfg-down"),
-        ) as layer:
-            _remove_named_tools_from_agents("plug", ["alpha"])
-        assert layer.saved == []
-        assert "Tool removal from agents skipped" in caplog.text
-
-    def test_newlines_in_ids_are_stripped_from_the_log(self, caplog):
-        """``_log_safe`` must keep request-derived text out of log lines."""
-        with _ConfigLayer(
-            None,
-            load_config_error=RuntimeError("bad\nvalue"),
-        ) as layer:
-            _remove_named_tools_from_agents("plug\nid", ["alpha"])
-        assert layer.saved == []
-        assert "bad\nvalue" not in caplog.text
-        assert "badvalue" in caplog.text
-
-    def test_remove_plugin_tools_reads_the_manifest(self):
-        cfg = _AgentCfg({"alpha": object(), "legacy": object()})
-        meta = {
-            "tool_name": "legacy",
-            "tools": [{"name": "alpha"}, "not-a-dict"],
-        }
-        with _ConfigLayer({"a": object()}, {"a": cfg}) as layer:
-            _remove_plugin_tools_from_agents("plug", meta)
-        assert cfg.tools.builtin_tools == {}
-        assert [name for name, _ in layer.saved] == ["a"]
-
-    def test_remove_plugin_tools_with_empty_meta(self):
-        with _ConfigLayer({"a": object()}) as layer:
-            _remove_plugin_tools_from_agents("plug", {})
-        assert layer.loaded_agents == []
-        assert layer.saved == []
-
-
-# ---------------------------------------------------------------------------
-# _post_load_setup
-# ---------------------------------------------------------------------------
-
-
-class TestPostLoadSetup:
-    @pytest.mark.parametrize("loaded", [False, True])
-    async def test_post_load_does_not_repeat_activation_or_write_config(
-        self,
-        loaded,
-    ):
-        loader = _loader_stub([]) if loaded else None
-        request = _request(_app(loader))
-        calls_before = list(loader.mock_calls) if loaded else []
-        with _ConfigLayer({"a": object()}, {"a": _AgentCfg({})}) as layer:
-            await _post_load_setup(request, "plug")
-        assert layer.loaded_agents == []
-        assert layer.saved == []
-        if loader is not None:
-            assert loader.mock_calls == calls_before
 
 
 class TestZipExtractionHelpers:
@@ -622,13 +437,12 @@ class TestLoadPluginWithOptionalForceReinstall:
         log = []
         loader = _loader_stub(log)
         record = _record()
-        finish = AsyncMock()
 
         async def load(**kwargs):
             if force:
                 kwargs["before_force_unload"]("plug")
             assert "after_force_unload" not in kwargs
-            await kwargs["after_load"](record)
+            assert "after_load" not in kwargs
             return record
 
         loader.load_plugin_from_path.side_effect = load
@@ -637,7 +451,6 @@ class TestLoadPluginWithOptionalForceReinstall:
                 "qwenpaw.config.utils.get_plugins_dir",
                 return_value=tmp_path,
             ),
-            patch(_FINISH_INSTALL, new=finish),
         ):
             result = await _load_plugin_with_optional_force_reinstall(
                 loader,
@@ -656,34 +469,7 @@ class TestLoadPluginWithOptionalForceReinstall:
         assert (kwargs["before_force_unload"] is not None) is force
         assert kwargs["pawport_owner"] == {"owner": "pawport"}
         assert kwargs["recover_incomplete"] is True
-        finish.assert_awaited_once()
-        assert finish.call_args.args[1] is record
-        assert finish.call_args.kwargs == {"reload_agents": False}
         loader.unload_plugin.assert_not_awaited()
-
-    async def test_finish_install_does_not_clean_tools_or_reload_agents(self):
-        request = _request(_app(_loader_stub([])))
-        record = _record(meta={"tool_name": "new"})
-        with (
-            patch.object(
-                plugins_module,
-                "_post_load_setup",
-                new=AsyncMock(),
-            ) as post,
-            patch.object(
-                plugins_module,
-                "_remove_named_tools_from_agents",
-            ) as remove,
-        ):
-            await plugins_module._finish_plugin_install_after_load(
-                request,
-                record,
-                force=True,
-                old_tools={"old"},
-                reload_agents=True,
-            )
-        post.assert_awaited_once_with(request, "plug")
-        remove.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -700,10 +486,6 @@ class TestInstallPluginSource:
             patch(
                 "qwenpaw.config.utils.get_plugins_dir",
                 return_value=tmp_path,
-            ),
-            patch(
-                _FINISH_INSTALL,
-                new=AsyncMock(),
             ),
         ):
             result = await install_plugin_source(
@@ -845,15 +627,11 @@ class TestUninstallPluginSource:
 
         loader.unload_plugin.side_effect = unload
         app = _app(loader)
-        with patch.object(
-            plugins_module,
-            "_remove_plugin_tools_from_agents",
-        ) as remove:
-            await uninstall_plugin_source(
-                "plug",
-                app=app,
-                reload_agents=reload_agents,
-            )
+        await uninstall_plugin_source(
+            "plug",
+            app=app,
+            reload_agents=reload_agents,
+        )
         loader.unload_plugin.assert_awaited_once_with(
             "plug",
             delete_files=True,
@@ -864,7 +642,6 @@ class TestUninstallPluginSource:
             "unload_plugin",
             "lifecycle(plug):exit",
         ]
-        remove.assert_not_called()
         assert not app.state.multi_agent_manager.mock_calls
 
     async def test_unknown_plugin_error_comes_from_lifecycle(self):
@@ -1379,12 +1156,6 @@ class TestSearchMarketPlugins:
 
 
 class TestResidualBranches:
-    def test_remove_tools_without_profiles_saves_nothing(self):
-        with _ConfigLayer({}) as layer:
-            _remove_named_tools_from_agents("plug", ["alpha"])
-        assert layer.loaded_agents == []
-        assert layer.saved == []
-
     async def test_catalog_route_proxies_the_fetcher(self):
         with patch(
             "qwenpaw.plugins.download_catalog.fetch_plugin_catalog_async",

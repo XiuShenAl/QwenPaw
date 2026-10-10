@@ -21,7 +21,6 @@ from qwenpaw.plugins.api import PluginApi
 from qwenpaw.plugins.architecture import PluginManifest
 from qwenpaw.plugins.lifecycle import PluginInstance, PluginState, UnloadMode
 from qwenpaw.plugins.loader import PluginLoader
-from qwenpaw.plugins.registry import PluginRegistry
 from qwenpaw.plugins.workspace_projector import (
     WorkspaceProjector,
     scan_owner_rows,
@@ -30,15 +29,6 @@ from qwenpaw.runtime.hooks import HookBase
 from qwenpaw.runtime.phases import Phase
 from qwenpaw.runtime.slash_command_registry import CommandSpec
 from qwenpaw.runtime.tool_registry import ToolDescriptor
-
-
-@pytest.fixture()
-def fresh_registry():
-    old = PluginRegistry._instance
-    PluginRegistry._instance = None
-    registry = PluginRegistry()
-    yield registry
-    PluginRegistry._instance = old
 
 
 class FakeWorkspace:
@@ -400,6 +390,98 @@ async def test_failed_channel_stop_is_not_quiescent(fresh_registry):
         assert workspace.channel_manager.channels
         leftover = await workspace.channel_manager.stop_one("stuck-ch")
         assert leftover.stopped is False
+
+
+class _BootChannel(BaseChannel):
+    channel = "boot-race"
+    uses_manager_queue = False
+
+    def __init__(self, ignore_cancel):
+        self.entered, self.release = asyncio.Event(), asyncio.Event()
+        self.ignore_cancel = ignore_cancel
+        self.alive = False
+        self.stops = 0
+
+    async def start(self):
+        self.entered.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            if not self.ignore_cancel:
+                raise
+            await self.release.wait()
+        self.alive = True
+
+    async def stop(self):
+        self.stops += 1
+        self.alive = False
+
+    def set_enqueue(self, _callback):
+        return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ignore_cancel", [False, True])
+async def test_unload_drains_boot_channel_start(
+    fresh_registry,
+    monkeypatch,
+    ignore_cancel,
+):
+    workspace = FakeWorkspace("boot", config=_enabled_config("boot-race"))
+    channel = _BootChannel(ignore_cancel)
+    manager = workspace.channel_manager
+    manager.channels.append(channel)
+    fresh_registry.projector = WorkspaceProjector(
+        live_workspaces=lambda: [workspace],
+    )
+    monkeypatch.setattr(
+        "qwenpaw.plugins.workspace_projector.get_available_channels",
+        lambda: ("boot-race",),
+    )
+    monkeypatch.setattr(
+        "qwenpaw.app.channels.manager._CHANNEL_START_STOP_TIMEOUT",
+        0.01,
+    )
+    api = PluginApi("boot-plugin", {}, {"id": "boot-plugin"})
+    api.set_registry(fresh_registry)
+    instance = PluginInstance("boot-plugin")
+    api.bind_instance(instance)
+    api.register_channel(_BootChannel)
+    await manager.start_all()
+    await channel.entered.wait()
+    start_tasks = set(manager._start_tasks)
+    try:
+        await fresh_registry.projector.project(
+            "channel",
+            "boot-race",
+            "boot-plugin",
+        )
+        report = await instance.dispose(UnloadMode.UNLOAD)
+        if ignore_cancel:
+            assert not report.quiescent
+            assert not report.clean
+            assert report.needs_restart
+            assert any("startup is still pending" in e for e in report.errors)
+            assert manager.channels == [channel]
+            assert start_tasks <= manager._start_tasks
+            assert instance._runtime
+            assert channel.stops == 0
+        else:
+            assert report.clean and report.quiescent
+            assert all(task.done() for task in start_tasks)
+            assert not manager.channels
+            assert channel.stops == 1
+        channel.release.set()
+        await asyncio.gather(*start_tasks, return_exceptions=True)
+        if ignore_cancel:
+            report = await instance.dispose(UnloadMode.UNLOAD)
+            assert report.clean and report.quiescent
+            assert not manager.channels
+        assert not channel.alive
+    finally:
+        channel.release.set()
+        await asyncio.gather(*start_tasks, return_exceptions=True)
+        await manager.stop_all()
 
 
 @pytest.mark.asyncio

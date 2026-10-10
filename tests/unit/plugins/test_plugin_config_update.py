@@ -16,7 +16,6 @@ import pytest
 from qwenpaw.plugins.architecture import PluginManifest
 from qwenpaw.plugins.lifecycle import PluginState, UnloadMode
 from qwenpaw.plugins.loader import PluginLoader
-from qwenpaw.plugins.registry import PluginRegistry
 from qwenpaw.plugins.settings import (
     is_plugin_enabled,
     persist_plugin_settings,
@@ -24,15 +23,6 @@ from qwenpaw.plugins.settings import (
 )
 from qwenpaw.plugins.workspace_projector import WorkspaceProjector
 from qwenpaw.runtime.slash_command_registry import SlashCommandRegistry
-
-
-@pytest.fixture()
-def fresh_registry():
-    old = PluginRegistry._instance
-    PluginRegistry._instance = None
-    registry = PluginRegistry()
-    yield registry
-    PluginRegistry._instance = old
 
 
 def _write_plugin(

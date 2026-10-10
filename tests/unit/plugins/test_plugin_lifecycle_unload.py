@@ -36,17 +36,7 @@ from qwenpaw.plugins.provision import (
     save_inventory,
     teardown_created_locations,
 )
-from qwenpaw.plugins.registry import PluginRegistry
 from qwenpaw.plugins.safe_fs import safe_remove
-
-
-@pytest.fixture()
-def fresh_registry():
-    old = PluginRegistry._instance
-    PluginRegistry._instance = None
-    registry = PluginRegistry()
-    yield registry
-    PluginRegistry._instance = old
 
 
 @pytest.fixture()
@@ -574,7 +564,7 @@ async def test_cloudpaw_uninstall_replays_relative_import_cleanup(
 
 
 @pytest.mark.asyncio
-async def test_uninstall_without_instance_uses_plugin_json_candidate(
+async def test_uninstall_never_enabled_preserves_declared_user_directory(
     tmp_path: Path,
     fresh_registry,
     monkeypatch,
@@ -585,7 +575,8 @@ async def test_uninstall_without_instance_uses_plugin_json_candidate(
     )
     dest = tmp_path / "declared-dest"
     dest.mkdir()
-    (dest / "file.txt").write_text("x\n", encoding="utf-8")
+    user_file = dest / "user.txt"
+    user_file.write_text("user content\n", encoding="utf-8")
     root = tmp_path / "disk-only"
     root.mkdir()
     (root / "plugin.json").write_text(
@@ -609,13 +600,15 @@ async def test_uninstall_without_instance_uses_plugin_json_candidate(
     )
     loader = PluginLoader(plugin_dirs=[tmp_path])
     loader.registry = fresh_registry
-    report = await loader.unload_plugin(
+    report = await loader.lifecycle.unload(
         "disk-only",
+        UnloadMode.UNINSTALL,
         delete_files=True,
-        mode=UnloadMode.UNINSTALL,
     )
+    assert not report.clean
+    assert report.quiescent and not report.needs_restart
     assert any("candidate:" in err for err in report.errors)
-    assert not dest.exists()
+    assert user_file.read_text(encoding="utf-8") == "user content\n"
     assert not root.exists()
 
 

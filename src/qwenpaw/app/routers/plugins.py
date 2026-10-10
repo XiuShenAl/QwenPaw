@@ -191,99 +191,6 @@ def _find_plugin_dir(base: Path) -> Path:
     )
 
 
-async def _post_load_setup(
-    request: Request,
-    plugin_id: str,
-) -> None:
-    """No-op after lifecycle activate.
-
-    Tools are written only by ``register_tool`` into the provision
-    inventory. Manifest ``meta.tools`` is not write authority.
-    Force-reinstall obsolete-tool cleanup still happens in the caller.
-    """
-    del request, plugin_id
-
-
-def _tool_names_from_meta(meta: dict) -> list[str]:
-    """Extract tool names from plugin manifest ``meta`` (legacy + multi).
-
-    Malformed ``meta.tools`` (``null``, non-list, non-dict entries) must
-    never raise — callers run this after the plugin is already loaded.
-    """
-    tool_names: list[str] = []
-    seen: set[str] = set()
-
-    def _add(name: object) -> None:
-        if not isinstance(name, str):
-            return
-        stripped = name.strip()
-        if not stripped or stripped in seen:
-            return
-        seen.add(stripped)
-        tool_names.append(stripped)
-
-    _add(meta.get("tool_name"))
-    raw_tools = meta.get("tools")
-    if not isinstance(raw_tools, list):
-        raw_tools = []
-    for tool in raw_tools:
-        if not isinstance(tool, dict):
-            continue
-        _add(tool.get("name"))
-    return tool_names
-
-
-def _remove_named_tools_from_agents(
-    plugin_id: str,
-    tool_names: list[str],
-) -> None:
-    """Remove the given tool names from all agents' builtin_tools config."""
-    if not tool_names:
-        return
-
-    try:
-        from ...config.utils import load_config
-        from ...config.config import load_agent_config, save_agent_config
-
-        config = load_config()
-        if not config.agents or not config.agents.profiles:
-            return
-
-        for agent_id in config.agents.profiles:
-            try:
-                agent_cfg = load_agent_config(agent_id)
-                changed = False
-                for tool_name in tool_names:
-                    if tool_name in agent_cfg.tools.builtin_tools:
-                        del agent_cfg.tools.builtin_tools[tool_name]
-                        changed = True
-                if changed:
-                    save_agent_config(agent_id, agent_cfg)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to remove tools from agent "
-                    f"'{_log_safe(agent_id)}': {_log_safe(exc)}",
-                )
-    except Exception as exc:
-        logger.warning(
-            "Tool removal from agents skipped for "
-            f"'{_log_safe(plugin_id)}': {_log_safe(exc)}",
-        )
-
-
-def _remove_plugin_tools_from_agents(plugin_id: str, meta: dict) -> None:
-    """Remove plugin tool entries from all agents.
-
-    Args:
-        plugin_id: Plugin being uninstalled (for logging)
-        meta: Plugin manifest ``meta`` section
-    """
-    _remove_named_tools_from_agents(
-        plugin_id,
-        _tool_names_from_meta(meta),
-    )
-
-
 async def _load_plugin_with_optional_force_reinstall(
     loader,
     request: Request,
@@ -300,14 +207,16 @@ async def _load_plugin_with_optional_force_reinstall(
     :meth:`PluginLoader.load_plugin_from_path` so this router never reads
     ``plugin.json`` from a user-supplied path (CodeQL path-injection).
 
-    The full install transaction — unload (if force), load, and
-    :func:`_post_load_setup` — runs under one
+    The full install transaction — unload (if force), load, and activate —
+    runs under one
     :meth:`PluginLoader.plugin_lifecycle` critical section.
 
     Dropped tools are removed at the activate commit point from the
     provision inventory, not from ``plugin.json`` meta.
     """
     from ...config.utils import get_plugins_dir
+
+    del request, reload_agents
 
     def _before_force_unload(plugin_id: str) -> None:
         logger.info(
@@ -316,35 +225,14 @@ async def _load_plugin_with_optional_force_reinstall(
         )
         del plugin_id
 
-    async def _after_load(record) -> None:
-        await _finish_plugin_install_after_load(
-            request,
-            record,
-            reload_agents=reload_agents,
-        )
-
     return await loader.load_plugin_from_path(
         source_path=source_path,
         install_dir=get_plugins_dir(),
         force=force,
         before_force_unload=_before_force_unload if force else None,
-        after_load=_after_load,
         pawport_owner=pawport_owner,
         recover_incomplete=recover_incomplete,
     )
-
-
-async def _finish_plugin_install_after_load(
-    request: Request,
-    record,
-    *,
-    force: bool = False,
-    old_tools: set | None = None,
-    reload_agents: bool = True,
-) -> None:
-    """Post-load hook. Tool cleanup belongs to activate commit."""
-    del force, old_tools, reload_agents
-    await _post_load_setup(request, record.manifest.id)
 
 
 def _extract_plugin_zip_bytes(content: bytes, temp_dir: Path) -> Path:

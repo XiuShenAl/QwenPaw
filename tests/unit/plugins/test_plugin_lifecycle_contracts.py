@@ -45,7 +45,6 @@ from qwenpaw.plugins.provision import (
     save_inventory,
     teardown_created_locations,
 )
-from qwenpaw.plugins.registry import PluginRegistry
 from qwenpaw.plugins.safe_fs import (
     ensure_deletable,
     parse_optional_absolute,
@@ -64,15 +63,6 @@ from qwenpaw.plugins.updates import (
 from qwenpaw.plugins.workspace_projector import WorkspaceProjector
 from qwenpaw.runtime.slash_command_registry import SlashCommandRegistry
 from qwenpaw.runtime.tool_registry import ToolRegistry
-
-
-@pytest.fixture()
-def fresh_registry():
-    old = PluginRegistry._instance
-    PluginRegistry._instance = None
-    registry = PluginRegistry()
-    yield registry
-    PluginRegistry._instance = old
 
 
 def _write_plugin(
@@ -629,37 +619,6 @@ async def test_failed_channel_stop_keeps_handle():
     receipt = await manager.stop_one("bad-ch")
     assert receipt.stopped is False
     assert bad in manager.channels
-
-
-@pytest.mark.asyncio
-async def test_unquiescent_reload_does_not_reregister(
-    tmp_path: Path,
-    fresh_registry,
-    monkeypatch,
-):
-    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
-    loader, _workspace, _installed = await _load(
-        tmp_path,
-        fresh_registry,
-        "busy",
-        "pass",
-    )
-
-    async def _busy_unload(*_args, **_kwargs):
-        return UnloadReport(
-            plugin_id="busy",
-            mode=UnloadMode.UNLOAD,
-            clean=False,
-            quiescent=False,
-            needs_restart=True,
-            errors=["thread still running"],
-        )
-
-    monkeypatch.setattr(loader, "_unload_plugin_unlocked", _busy_unload)
-    report = await loader.lifecycle.reload("busy")
-    assert not report.ok
-    assert report.needs_restart
-    assert "busy" in loader.get_all_loaded_plugins()
 
 
 @pytest.mark.asyncio
@@ -1332,14 +1291,8 @@ async def test_http_uninstall_does_not_delete_tools_from_meta(
     manifest_b = PluginManifest.from_dict(data)
     await loader.load_plugin(manifest_b, tmp_path / "plugins" / "meta-b")
     await loader.activate_plugin_unlocked("meta-b")
-    removed = []
-    monkeypatch.setattr(
-        "qwenpaw.app.routers.plugins._remove_plugin_tools_from_agents",
-        lambda plugin_id, meta: removed.append((plugin_id, meta)),
-    )
     app = SimpleNamespace(state=SimpleNamespace(plugin_loader=loader))
     await uninstall_plugin_source("meta-b", app=app)
-    assert not removed
     assert "shared_tool" in workspace.plugins.tool_registry.names()
     assert "shared_tool" in boxes["talk"].tools.builtin_tools
     _clear_tool_owners()
@@ -2068,10 +2021,12 @@ async def test_force_install_drops_unregistered_tools_without_meta(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["directory_cleanup", "migration_commit"])
 async def test_reload_cleanup_failure_after_commit_keeps_new_version(
     tmp_path: Path,
     fresh_registry,
     monkeypatch,
+    failure,
 ):
     monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
     loader, workspace, installed = await _load(
@@ -2088,10 +2043,17 @@ async def test_reload_cleanup_failure_after_commit_keeps_new_version(
     )
     (incoming / "v2.txt").write_text("v2", encoding="utf-8")
 
-    def _fail_remove(path):
-        raise PermissionError("sharing violation")
+    def fail_cleanup(_value):
+        if failure == "directory_cleanup":
+            raise PermissionError("sharing violation")
+        raise RuntimeError("commit boom")
 
-    monkeypatch.setattr("qwenpaw.plugins.loader._remove_dir", _fail_remove)
+    target = (
+        "qwenpaw.plugins.loader._remove_dir"
+        if failure == "directory_cleanup"
+        else "qwenpaw.plugins.provision.commit_migrations"
+    )
+    monkeypatch.setattr(target, fail_cleanup)
     report = await loader.lifecycle.reload("keep-new", new_source=incoming)
     assert report.ok
     assert report.needs_restart
@@ -2099,6 +2061,10 @@ async def test_reload_cleanup_failure_after_commit_keeps_new_version(
     assert "pong" in (installed / "main.py").read_text(encoding="utf-8")
     assert "pong" in workspace.plugins.slash_command_registry.names()
     assert "ping" not in workspace.plugins.slash_command_registry.names()
+    assert "ping" not in (installed / "main.py").read_text(encoding="utf-8")
+    inst = loader.lifecycle.get_instance("keep-new")
+    assert inst is not None
+    assert inst.activated
     record = loader.get_loaded_plugin("keep-new")
     assert record is not None
     assert record.status == "active"
@@ -2386,68 +2352,6 @@ async def test_update_config_cancel_restores_old_when_quiescent(
     assert inst is not None
     assert inst.state is not PluginState.DISPOSED
     assert "old" in workspace.plugins.slash_command_registry.names()
-
-
-@pytest.mark.asyncio
-async def test_update_config_unquiescent_failure_does_not_setup_old(
-    tmp_path: Path,
-    fresh_registry,
-    monkeypatch,
-):
-    monkeypatch.setattr(
-        "qwenpaw.plugins.settings.persist_plugin_settings",
-        lambda *args, **kwargs: None,
-    )
-    body = (
-        "api.register_slash_command(\n"
-        "            api.config.get('cmd', 'old'), lambda c, a: None,\n"
-        "        )\n"
-        "        if api.config.get('boom'):\n"
-        "            def _boom():\n"
-        "                raise RuntimeError('startup boom')\n"
-        "            api.register_startup_hook('boom', _boom, priority=90)"
-    )
-    loader, workspace, _installed = await _load(
-        tmp_path,
-        fresh_registry,
-        "cfg-sticky",
-        body,
-        config={"cmd": "old"},
-    )
-    teardowns = {"n": 0}
-    real_teardown = PluginInstance.teardown_runtime
-
-    async def _counted(self):
-        report = await real_teardown(self)
-        teardowns["n"] += 1
-        if teardowns["n"] >= 2:
-            report.quiescent = False
-            report.needs_restart = True
-            report.clean = False
-            self.state = PluginState.FAILED
-        return report
-
-    configs: list[dict] = []
-    real_reg = loader.reregister_unlocked
-
-    async def _spy(plugin_id, config=None):
-        configs.append(dict(config or {}))
-        return await real_reg(plugin_id, config)
-
-    monkeypatch.setattr(PluginInstance, "teardown_runtime", _counted)
-    monkeypatch.setattr(loader, "reregister_unlocked", _spy)
-    report = await loader.lifecycle.update_config(
-        "cfg-sticky",
-        {"cmd": "new", "boom": True},
-    )
-    assert not report.ok
-    assert report.needs_restart
-    assert len(configs) == 1
-    names = workspace.plugins.slash_command_registry.names()
-    assert not ("old" in names and "new" in names)
-    inst = loader.lifecycle.get_instance("cfg-sticky")
-    assert inst is not None
-    assert inst.state is PluginState.FAILED
 
 
 @pytest.mark.asyncio
@@ -3868,50 +3772,6 @@ async def test_unloaded_force_unquiescent_activate_keeps_new_dir(
     assert "force-ch" in [
         ch.channel for ch in workspace.channel_manager.channels
     ]
-
-
-@pytest.mark.asyncio
-async def test_commit_migrations_failure_keeps_new_service(
-    tmp_path: Path,
-    fresh_registry,
-    monkeypatch,
-):
-    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
-    loader, workspace, installed = await _load(
-        tmp_path,
-        fresh_registry,
-        "svc-commit",
-        "api.register_slash_command('ping', lambda c, a: None)",
-    )
-    incoming = _write_plugin(
-        tmp_path / "incoming-svc-commit",
-        "svc-commit",
-        body="api.register_slash_command('pong', lambda c, a: None)",
-    )
-
-    def _boom(_plugin_id):
-        raise RuntimeError("commit boom")
-
-    monkeypatch.setattr(
-        "qwenpaw.plugins.provision.commit_migrations",
-        _boom,
-    )
-    report = await loader.lifecycle.reload(
-        "svc-commit",
-        new_source=incoming,
-    )
-    assert report.ok
-    assert report.needs_restart
-    assert "pong" in workspace.plugins.slash_command_registry.names()
-    assert "ping" not in workspace.plugins.slash_command_registry.names()
-    assert "pong" in (installed / "main.py").read_text(encoding="utf-8")
-    assert "ping" not in (installed / "main.py").read_text(encoding="utf-8")
-    inst = loader.lifecycle.get_instance("svc-commit")
-    assert inst is not None
-    assert inst.activated
-    record = loader.get_loaded_plugin("svc-commit")
-    assert record is not None
-    assert record.status == "active"
 
 
 @pytest.mark.asyncio

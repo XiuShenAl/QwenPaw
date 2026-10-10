@@ -37,6 +37,7 @@ OnLastDispatch = Optional[Callable[[str, str, str], Awaitable[None]]]
 
 # Default max size per channel queue
 _CHANNEL_QUEUE_MAXSIZE = 1000
+_CHANNEL_START_STOP_TIMEOUT = 3.0
 
 
 @dataclass
@@ -190,6 +191,7 @@ class ChannelManager:
 
         # Track channel-start tasks for graceful shutdown
         self._start_tasks: set[asyncio.Task] = set()
+        self._start_task_channels: dict[asyncio.Task, BaseChannel] = {}
 
     def register_control_command(
         self,
@@ -574,9 +576,35 @@ class ChannelManager:
                 )
 
         for g in snapshot:
-            task = asyncio.create_task(_start_channel(g))
-            self._start_tasks.add(task)
-            task.add_done_callback(self._start_tasks.discard)
+            lock = self._channel_lifecycle_locks.setdefault(
+                g.channel,
+                asyncio.Lock(),
+            )
+            async with lock, self._lock:
+                if (
+                    not any(ch is g for ch in self.channels)
+                    or self._pending_channel_starts(g)
+                    or g.channel in self._failed_channels
+                ):
+                    continue
+                task = asyncio.create_task(_start_channel(g))
+                self._start_tasks.add(task)
+                self._start_task_channels[task] = g
+                task.add_done_callback(self._forget_start_task)
+
+    def _forget_start_task(self, task: asyncio.Task) -> None:
+        self._start_tasks.discard(task)
+        self._start_task_channels.pop(task, None)
+
+    def _pending_channel_starts(
+        self,
+        channel: BaseChannel,
+    ) -> set[asyncio.Task]:
+        return {
+            task
+            for task, owner in self._start_task_channels.items()
+            if owner is channel and not task.done()
+        }
 
     async def stop_all(self) -> None:
         """Stop all channels and queue manager."""
@@ -584,11 +612,11 @@ class ChannelManager:
         if self._start_tasks:
             for task in self._start_tasks:
                 task.cancel()
-            await asyncio.wait(
+            done, _ = await asyncio.wait(
                 self._start_tasks,
-                timeout=3.0,
+                timeout=_CHANNEL_START_STOP_TIMEOUT,
             )
-            self._start_tasks.clear()
+            self._start_tasks.difference_update(done)
 
         # Cancel all pending enqueue tasks
         if self._enqueue_tasks:
@@ -625,6 +653,13 @@ class ChannelManager:
             ch.set_enqueue(None)
 
         async def _stop(ch):
+            if self._pending_channel_starts(ch):
+                self._failed_channels.add(ch.channel)
+                logger.warning(
+                    "Channel '%s' startup is still pending; retaining handle",
+                    ch.channel,
+                )
+                return
             try:
                 await ch.stop()
             except asyncio.CancelledError:
@@ -721,6 +756,21 @@ class ChannelManager:
             channel = self._find_channel(key)
         if channel is None:
             return StopReceipt(key=key, stopped=False, detail="not running")
+        tasks = self._pending_channel_starts(channel)
+        if tasks:
+            self._failed_channels.add(key)
+            for task in tasks:
+                task.cancel()
+            _, pending = await asyncio.wait(
+                tasks,
+                timeout=_CHANNEL_START_STOP_TIMEOUT,
+            )
+            if pending:
+                return StopReceipt(
+                    key=key,
+                    stopped=False,
+                    detail="channel startup is still pending",
+                )
         channel.set_enqueue(None)
         try:
             await channel.stop()

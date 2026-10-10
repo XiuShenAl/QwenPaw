@@ -27,7 +27,6 @@ from qwenpaw.plugins.provision import (
     provision_files,
     recover_migrating_inventory,
 )
-from qwenpaw.plugins.registry import PluginRegistry
 from qwenpaw.plugins.updates import (
     marker_path,
     recover_interrupted_updates,
@@ -36,15 +35,6 @@ from qwenpaw.plugins.updates import (
 )
 from qwenpaw.plugins.workspace_projector import WorkspaceProjector
 from qwenpaw.runtime.slash_command_registry import SlashCommandRegistry
-
-
-@pytest.fixture()
-def fresh_registry():
-    old = PluginRegistry._instance
-    PluginRegistry._instance = None
-    registry = PluginRegistry()
-    yield registry
-    PluginRegistry._instance = old
 
 
 def _write_plugin(

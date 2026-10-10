@@ -2738,8 +2738,7 @@ class PluginLoader:
                 manifest_candidates.append(old_name)
 
             # Multi-tool format: meta.tools[].name
-            # Tolerate malformed meta.tools (null / non-list) — same as
-            # routers.plugins._tool_names_from_meta.
+            # Tolerate malformed meta.tools (null / non-list).
             raw_tools = meta.get("tools")
             for tool in raw_tools if isinstance(raw_tools, list) else ():
                 name = tool.get("name") if isinstance(tool, dict) else None
@@ -2892,7 +2891,6 @@ class PluginLoader:
             recorded_tool_names,
             snapshot_created_dests,
             teardown_created_locations,
-            teardown_paths,
         )
 
         report = UnloadReport(
@@ -2924,7 +2922,7 @@ class PluginLoader:
                 candidate = True
                 report.errors.append(
                     "candidate: inventory missing; "
-                    "using plugin.json declarations",
+                    "cannot confirm ownership of plugin.json declarations",
                 )
 
         tool_names = recorded_tool_names(plugin_id)
@@ -2946,8 +2944,6 @@ class PluginLoader:
         # Skill manifest cleanup needs ownership before the inventory is gone.
         await run_sync_io(PluginApi.cleanup_sourced_skills, plugin_id)
         await run_sync_io(teardown_created_locations, plugin_id)
-        if candidate:
-            await run_sync_io(teardown_paths, declared)
 
         leftover = leftover_dests(created or declared)
         for dest in leftover:
