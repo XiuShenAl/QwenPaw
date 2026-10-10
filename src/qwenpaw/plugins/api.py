@@ -311,6 +311,7 @@ def _write_tool_config(
     description: str,
     icon: str,
     plugin_id: str,
+    agent_before: dict[str, dict[str, dict[str, Any] | None]] | None = None,
 ) -> None:
     """Persist BuiltinToolConfig on every agent profile this host knows."""
     from ..config.config import (
@@ -354,6 +355,11 @@ def _write_tool_config(
                 if isinstance(raw, dict):
                     current = raw
                     current.pop("name", None)
+        if agent_before is not None:
+            agent_before.setdefault(agent_id, {}).setdefault(
+                tool_name,
+                current,
+            )
         if not persisted:
             merged = apply_tool_factory(plugin_id, tool_name, factory, current)
             persisted = True
@@ -516,15 +522,9 @@ def rollback_activate_install(
         undo_this_txn_escapes,
     )
 
-    new_names = rollback_uncommitted_tools(plugin_id, tools_before)
-    for name in new_names:
-        _remove_tool_config(
-            name,
-            plugin_id,
-            owned_names=tuple(new_names),
-        )
+    rollback_uncommitted_tools(plugin_id, tools_before)
     _restore_agent_tools_from_snapshot(
-        tools_before,
+        {name for row in agent_tools_before.values() for name in row},
         agent_tools_before,
     )
     rollback_created_locations(plugin_id, location_keys_before)
@@ -532,7 +532,7 @@ def rollback_activate_install(
         undo_this_txn_escapes(plugin_id, list(txn_escapes), loop=loop)
     if created_dests:
         undo_created_locations(plugin_id, list(created_dests))
-    recover_migrating_inventory(plugin_id)
+    recover_migrating_inventory(plugin_id, raise_on_blocked=True)
 
 
 def _tool_factory(
@@ -1707,6 +1707,12 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                     description,
                     icon,
                     self.plugin_id,
+                    agent_before=(
+                        self._instance.activation_tool_configs
+                        if self._instance is not None
+                        and not self._instance.activated
+                        else None
+                    ),
                 )
 
             except Exception as exc:

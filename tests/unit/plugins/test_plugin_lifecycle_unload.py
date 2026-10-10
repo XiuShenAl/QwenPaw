@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import sys
+from importlib.machinery import SourceFileLoader
 from importlib.metadata import PackageNotFoundError
 from types import ModuleType
 from pathlib import Path
@@ -29,12 +30,14 @@ from qwenpaw.plugins.loader import PluginLoader
 from qwenpaw.plugins.provision import (
     load_inventory,
     provision_files,
+    record_escape_provision,
     recover_migrating_inventory,
     record_tool_factory,
     save_inventory,
     teardown_created_locations,
 )
 from qwenpaw.plugins.registry import PluginRegistry
+from qwenpaw.plugins.safe_fs import safe_remove
 
 
 @pytest.fixture()
@@ -526,6 +529,51 @@ async def test_uninstall_without_loaded_instance_clears_provisions(
 
 
 @pytest.mark.asyncio
+async def test_cloudpaw_uninstall_replays_relative_import_cleanup(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    source = Path(__file__).parents[3] / "plugins" / "bundle" / "cloudpaw"
+    root = tmp_path / "plugins" / "cloudpaw"
+    root.mkdir(parents=True)
+    for name in ("plugin.json", "agents_setup.py", "constants.py"):
+        (root / name).write_bytes((source / name).read_bytes())
+    calls = []
+    original_exec = SourceFileLoader.exec_module
+
+    def exec_module(loader, module):
+        original_exec(loader, module)
+        if Path(module.__file__) == root / "agents_setup.py":
+            # Execute real relative imports, but replace destructive cleanup.
+            module.uninstall_agents = lambda: calls.append(
+                module.BUILTIN_ORCHESTRATION_AGENT_ID,
+            )
+
+    monkeypatch.setattr(SourceFileLoader, "exec_module", exec_module)
+    finders = tuple(sys.meta_path)
+    import_paths = list(sys.path)
+    record_escape_provision("cloudpaw", "agents", kind="cloudpaw_agents")
+    loader = PluginLoader(plugin_dirs=[root.parent])
+    loader.registry = fresh_registry
+    report = await loader.unload_plugin("cloudpaw", mode=UnloadMode.UNINSTALL)
+
+    assert report.clean and report.quiescent
+    assert not report.errors
+    assert calls == ["cloud-orchestrator"]
+    assert not load_inventory("cloudpaw").get("provisions")
+    assert not root.exists()
+    assert tuple(sys.meta_path) == finders
+    assert sys.path == import_paths
+    assert not any(
+        str(getattr(module, "__file__", "")).startswith(str(root))
+        for module in sys.modules.values()
+    )
+
+
+@pytest.mark.asyncio
 async def test_uninstall_without_instance_uses_plugin_json_candidate(
     tmp_path: Path,
     fresh_registry,
@@ -569,6 +617,59 @@ async def test_uninstall_without_instance_uses_plugin_json_candidate(
     assert any("candidate:" in err for err in report.errors)
     assert not dest.exists()
     assert not root.exists()
+
+
+@pytest.mark.asyncio
+async def test_uninstall_unlinks_replaced_owned_directory(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    source = tmp_path / "factory"
+    source.mkdir()
+    (source / "SKILL.md").write_text("plugin", encoding="utf-8")
+    dest = tmp_path / "plugin-data"
+    plugin_id = "symlink-ownership"
+    root = _write_plugin(
+        tmp_path / plugin_id,
+        plugin_id,
+        register_body=(
+            f"assert api.provision_files({str(source)!r}, {str(dest)!r}, '1') "
+            "== 'create'"
+        ),
+    )
+    loader = PluginLoader(plugin_dirs=[tmp_path])
+    loader.registry = fresh_registry
+    manifest = PluginManifest.from_dict(
+        json.loads((root / "plugin.json").read_text(encoding="utf-8")),
+    )
+    record = await loader.load_plugin(manifest, root)
+    assert record.status == "active"
+    assert load_inventory(plugin_id)["locations"][str(dest)]["owned"]
+    moved = tmp_path / "moved-plugin-data"
+    dest.rename(moved)
+    user_dir = tmp_path / "user-data"
+    user_dir.mkdir()
+    private = user_dir / "private.txt"
+    private.write_text("private", encoding="utf-8")
+    dest.symlink_to(user_dir, target_is_directory=True)
+
+    report = await loader.unload_plugin(plugin_id, mode=UnloadMode.UNINSTALL)
+
+    assert report.clean and report.quiescent
+    assert not report.errors
+    assert private.read_text(encoding="utf-8") == "private"
+    assert (moved / "SKILL.md").read_text(encoding="utf-8") == "plugin"
+    assert not dest.is_symlink()
+    assert not load_inventory(plugin_id)["locations"]
+
+
+def test_safe_remove_unlinks_dangling_symlink(tmp_path: Path):
+    link = tmp_path / "dangling"
+    link.symlink_to(tmp_path / "missing", target_is_directory=True)
+    safe_remove(link)
+    assert not link.is_symlink()
 
 
 @pytest.mark.asyncio

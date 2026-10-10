@@ -324,6 +324,99 @@ def test_commit_migrations_clears_marker(tmp_path: Path, monkeypatch):
     assert loc.get("migrating") is None
 
 
+@pytest.mark.asyncio
+async def test_reload_restore_failure_preserves_backups_and_blocks_activation(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    from qwenpaw.plugins import provision as provision_module
+
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    plugin_id = "restore-blocked"
+    dest = tmp_path / "data"
+    trace = tmp_path / "startup"
+    for version in ("1.0.0", "2.0.0"):
+        factory = tmp_path / version
+        factory.mkdir()
+        (factory / "version.txt").write_text(version, encoding="utf-8")
+    installed = _write_plugin(
+        tmp_path / "plugins" / plugin_id,
+        plugin_id,
+        body=(
+            "from pathlib import Path\n"
+            f"        if not Path({str(dest)!r}).exists():\n"
+            f"            api.provision_files({str(tmp_path / '1.0.0')!r}, "
+            f"{str(dest)!r}, '1.0.0')\n"
+            "        api.register_startup_hook('note', "
+            f"lambda: Path({str(trace)!r}).write_text('old started'))"
+        ),
+    )
+    loader = PluginLoader(plugin_dirs=[installed.parent])
+    loader.registry = fresh_registry
+    manifest = PluginManifest.from_dict(
+        json.loads((installed / "plugin.json").read_text(encoding="utf-8")),
+    )
+    assert (await loader.load_plugin(manifest, installed)).status == "active"
+    trace.unlink()
+    staging = _write_plugin(
+        tmp_path / "staging",
+        plugin_id,
+        body=(
+            f"api.provision_files({str(tmp_path / '2.0.0')!r}, "
+            f"{str(dest)!r}, '2.0.0')\n"
+            "        raise RuntimeError('register boom')"
+        ),
+    )
+    incoming = json.loads(
+        (staging / "plugin.json").read_text(encoding="utf-8"),
+    )
+    incoming["version"] = "2.0.0"
+    (staging / "plugin.json").write_text(
+        json.dumps(incoming),
+        encoding="utf-8",
+    )
+
+    def deny_restore(_backup, _dest):
+        raise PermissionError("provision restore occupied")
+
+    restore_backup = provision_module._restore_backup
+    monkeypatch.setattr(provision_module, "_restore_backup", deny_restore)
+    report = await loader.lifecycle.reload(plugin_id, new_source=staging)
+    assert not report.ok
+    assert report.needs_restart
+    assert any("register boom" in error for error in report.errors)
+    assert any(
+        "provision restore occupied" in error for error in report.errors
+    )
+    assert not trace.exists(), "old service must wait for disk recovery"
+    record = loader.get_loaded_plugin(plugin_id)
+    assert record is not None and record.status == "failed"
+    assert any(
+        "provision restore occupied" in item for item in record.diagnostics
+    )
+    location = load_inventory(plugin_id)["locations"][str(dest)]
+    assert location["migrating"]["status"] == "prepared"
+    backup = Path(location["migrating"]["backup_path"])
+    assert (backup / "version.txt").read_text(encoding="utf-8") == "1.0.0"
+    marker = json.loads(marker_path(plugin_id).read_text(encoding="utf-8"))
+    assert marker["status"] == "prepared"
+    assert Path(marker["backup_path"]).is_dir()
+    with pytest.raises(RuntimeError):
+        await loader.lifecycle.activate(plugin_id)
+    assert not trace.exists()
+
+    monkeypatch.setattr(provision_module, "_restore_backup", restore_backup)
+    restarted = PluginLoader(plugin_dirs=[installed.parent])
+    restarted.registry = fresh_registry
+    await restarted.load_all_plugins(activate=True)
+    assert restarted.get_loaded_plugin(plugin_id).status == "active"
+    assert trace.read_text(encoding="utf-8") == "old started"
+    assert (dest / "version.txt").read_text(encoding="utf-8") == "1.0.0"
+    assert not backup.exists()
+    assert not marker_path(plugin_id).exists()
+
+
 @pytest.fixture()
 def pending_migrations(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")

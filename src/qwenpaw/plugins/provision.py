@@ -12,16 +12,28 @@ import json
 import logging
 import os
 import shutil
+import sys
 import tempfile
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Awaitable
+from types import ModuleType
+from typing import Any, Awaitable, Iterator
 
 from ..utils.io_utils import write_json_atomic
+from .module_isolation import PluginNamespaceFinder, build_plugin_builtins
 from .safe_fs import ensure_deletable, parse_optional_absolute, safe_remove
 from .updates import RecoveryResult
 
 logger = logging.getLogger(__name__)
+
+
+class MigrationRecoveryError(OSError):
+    """Uncommitted files could not be restored; keep recovery locations."""
+
+    def __init__(self, result: RecoveryResult) -> None:
+        super().__init__("; ".join(result.failures.values()))
+        self.result = result
 
 
 def provisions_dir() -> Path:
@@ -223,30 +235,75 @@ def replay_persisted_provisions(
 
 def _call_teardown_ref(source_path: Path | None, ref: str) -> None:
     module_name, _, func_name = ref.partition(":")
-    if not module_name or not func_name:
+    if not all(part.isidentifier() for part in module_name.split(".")) or not (
+        func_name.isidentifier()
+    ):
         raise ValueError(f"Invalid teardown reference: {ref}")
-    module = None
-    if source_path is not None:
-        module_file = Path(source_path) / f"{module_name.replace('.', '/')}.py"
-        if module_file.is_file():
-            spec = importlib.util.spec_from_file_location(
-                f"plugin_teardown_{module_file.stem}",
-                module_file,
+    with _teardown_module(source_path, module_name) as module:
+        callback = getattr(module, func_name, None)
+        if not callable(callback):
+            raise RuntimeError(f"Teardown {ref} is not callable")
+        result = callback()
+        if inspect.isawaitable(result):
+            asyncio.run(_await_teardown(result))
+
+
+@contextmanager
+def _teardown_module(
+    source_path: Path | None,
+    module_name: str,
+) -> Iterator[ModuleType]:
+    """Import cleanup in a fresh package without running the plugin entry."""
+    if source_path is None:
+        yield importlib.import_module(module_name)
+        return
+    root = source_path.resolve(strict=True)
+    top = root / module_name.split(".", 1)[0]
+    if not any(
+        path.exists() or path.is_symlink()
+        for path in (top, top.with_suffix(".py"))
+    ):
+        yield importlib.import_module(module_name)
+        return
+    candidate = root.joinpath(*module_name.split("."))
+    for path in (
+        candidate,
+        candidate.with_suffix(".py"),
+        candidate / "__init__.py",
+    ):
+        if not path.resolve().is_relative_to(root):
+            raise ValueError(
+                f"Teardown module is outside plugin source: {module_name}",
             )
-            if spec is not None and spec.loader is not None:
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-    if module is None:
-        try:
-            module = importlib.import_module(module_name)
-        except ImportError as exc:
-            raise RuntimeError(f"Cannot import teardown {ref}") from exc
-    callback = getattr(module, func_name, None)
-    if not callable(callback):
-        raise RuntimeError(f"Teardown {ref} is not callable")
-    result = callback()
-    if inspect.isawaitable(result):
-        asyncio.run(_await_teardown(result))
+    namespace = f"plugin_teardown_{uuid.uuid4().hex}"
+    package = ModuleType(namespace)
+    package.__path__ = [str(root)]
+    package.__package__ = namespace
+    package.__spec__ = importlib.machinery.ModuleSpec(
+        namespace,
+        loader=None,
+        is_package=True,
+    )
+    finder = PluginNamespaceFinder()
+    finder.register(namespace, build_plugin_builtins(namespace, [str(root)]))
+    previous_paths = set(sys.path)
+    sys.modules[namespace] = package
+    sys.meta_path.insert(0, finder)
+    try:
+        yield importlib.import_module(f"{namespace}.{module_name}")
+    finally:
+        sys.meta_path.remove(finder)
+        finder.unregister(namespace)
+        for name in list(sys.modules):
+            if name == namespace or name.startswith(namespace + "."):
+                sys.modules.pop(name, None)
+        sys.path[:] = [
+            entry
+            for entry in sys.path
+            if entry in previous_paths
+            or not os.path.isabs(entry)
+            or not Path(entry).resolve().is_relative_to(root)
+        ]
 
 
 async def _await_teardown(result: Awaitable[Any]) -> None:
@@ -677,8 +734,9 @@ def recover_migrating_inventory(
     plugin_id: str | None = None,
     *,
     owns_commit=None,
+    raise_on_blocked: bool = False,
 ) -> RecoveryResult:
-    """Restore any location still marked migrating. Returns plugin ids."""
+    """Restore migrations; transactions must stop on blocked recovery."""
     from .updates import update_is_committed
 
     recovered = RecoveryResult()
@@ -699,6 +757,8 @@ def recover_migrating_inventory(
                 "continuing",
                 item_id,
             )
+    if raise_on_blocked and recovered.blocked:
+        raise MigrationRecoveryError(recovered)
     return recovered
 
 
@@ -706,15 +766,14 @@ def _restore_backup(backup: Path, dest: Path) -> None:
     """Replace *dest* with *backup* if the backup still exists."""
     if not backup.exists():
         return
-    dest_resolved = ensure_deletable(dest, purpose="restore provision dest")
-    if dest_resolved.exists():
-        _remove_path(dest_resolved)
+    dest = ensure_deletable(dest, purpose="restore provision dest")
+    _remove_path(dest)
     if backup.is_dir():
-        shutil.copytree(backup, dest_resolved)
+        shutil.copytree(backup, dest)
         _remove_path(backup)
         return
-    dest_resolved.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(backup, dest_resolved)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(backup, dest)
     _remove_path(backup)
 
 

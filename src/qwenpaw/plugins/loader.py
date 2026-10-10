@@ -312,12 +312,26 @@ class PluginLoader:
         error = self._recovery_errors.get(plugin_id)
         if error is None:
             return
-        instance = self.lifecycle.ensure_instance(plugin_id)
+        instance = self.lifecycle.get_instance(plugin_id)
+        if instance is None:
+            instance = self.lifecycle.ensure_instance(plugin_id)
         instance.add_diagnostic(f"Recovery failed: {error}")
         instance.add_diagnostic("needs_restart")
         record = self._loaded_plugins.get(plugin_id)
         if record is not None:
             record.diagnostics = list(instance.diagnostics)
+
+    def _note_disk_recovery_failure(self, exc: BaseException) -> bool:
+        """Block activation and commit until unfinished files are restored."""
+        from .provision import MigrationRecoveryError
+
+        if not isinstance(exc, MigrationRecoveryError):
+            return False
+        self._recovery_blocked.update(exc.result.blocked)
+        self._recovery_errors.update(exc.result.failures)
+        for plugin_id in exc.result.blocked:
+            self._add_recovery_diagnostics(plugin_id)
+        return True
 
     def _lifecycle_lock_for(self, plugin_id: str) -> asyncio.Lock:
         """Return the asyncio lock that serializes *plugin_id* lifecycle."""
@@ -797,6 +811,8 @@ class PluginLoader:
             instance.clear_created_dests()
         except (Exception, asyncio.CancelledError) as undo_exc:  # noqa: BLE001
             report.clean = False
+            if self._note_disk_recovery_failure(undo_exc):
+                report.needs_restart = True
             report.errors.append(str(undo_exc) or type(undo_exc).__name__)
             instance.add_diagnostic(
                 str(undo_exc) or type(undo_exc).__name__,
@@ -826,7 +842,7 @@ class PluginLoader:
         def _undo() -> None:
             undo_this_txn_escapes(plugin_id, escapes, loop=loop)
             undo_created_locations(plugin_id, dests)
-            recover_migrating_inventory(plugin_id)
+            recover_migrating_inventory(plugin_id, raise_on_blocked=True)
 
         await run_sync_io(_undo)
 
@@ -843,11 +859,13 @@ class PluginLoader:
         live.source_path = source_path
         if isinstance(exc, asyncio.CancelledError):
             live.add_diagnostic("needs_restart")
+        reason = str(exc) or type(exc).__name__
         record = PluginRecord(
             manifest=manifest,
             source_path=source_path,
             enabled=False,
-            diagnostics=list(live.diagnostics),
+            diagnostics=[reason]
+            + [item for item in live.diagnostics if item != reason],
             status="failed",
         )
         self._loaded_plugins[plugin_id] = record
@@ -1893,6 +1911,9 @@ class PluginLoader:
             needs_restart=True,
             generation=generation,
         )
+        if plugin_id in self._recovery_blocked:
+            failed.errors.append(self._recovery_errors[plugin_id])
+            return failed
         leftover = self.lifecycle.get_instance(plugin_id)
         if (
             plugin_id not in self._loaded_plugins
@@ -1927,7 +1948,16 @@ class PluginLoader:
                     or ["rollback unload did not go quiescent"],
                 )
                 return failed
-        await run_sync_io(recover_migrating_inventory, plugin_id)
+        try:
+            await run_sync_io(
+                recover_migrating_inventory,
+                plugin_id,
+                raise_on_blocked=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._note_disk_recovery_failure(exc)
+            failed.errors.append(f"provision recovery failed: {exc}")
+            return failed
         if backup is not None and backup.exists():
 
             def _restore_dir() -> None:
@@ -2067,15 +2097,25 @@ class PluginLoader:
                     )
                 return record
             record = None
+            from ..config.utils import load_config
+            from .settings import is_plugin_enabled, runtime_config
+
+            saved = await asyncio.to_thread(load_config)
+            settings = (saved.plugins or {}).get(plugin_id)
+            enabled = is_plugin_enabled(settings)
+            incoming = runtime_config(
+                config if config is not None else settings,
+            )
             try:
                 record = await self._load_plugin_from_path_unlocked(
                     source_path,
                     manifest,
-                    config,
+                    incoming,
                     install_dir,
                     replace_files=force,
                     pawport_owner=pawport_owner,
                     recover_incomplete=recover_incomplete,
+                    enabled=enabled,
                 )
                 if record.status in {"active", "registered"}:
                     await self.activate_plugin_unlocked(plugin_id)
@@ -2123,6 +2163,7 @@ class PluginLoader:
         replace_files: bool = False,
         pawport_owner: Optional[dict[str, Any]] = None,
         recover_incomplete: bool = False,
+        enabled: bool = True,
     ) -> PluginRecord:
         """Install+load from path; caller must hold lifecycle for id."""
         # pylint: disable=too-many-statements,too-many-branches
@@ -2268,12 +2309,20 @@ class PluginLoader:
                 target_dir,
             )
             del _installed_path
-            record = await self.load_plugin(
-                installed_manifest,
-                target_dir,
-                config,
-                allow_install=True,
-            )
+            if enabled:
+                record = await self.load_plugin(
+                    installed_manifest,
+                    target_dir,
+                    config,
+                    allow_install=True,
+                )
+            else:
+                record = PluginRecord(
+                    manifest=installed_manifest,
+                    source_path=target_dir,
+                    enabled=False,
+                    status="inactive",
+                )
             if record.status == "failed":
                 reason = (
                     record.diagnostics[0]
@@ -2291,8 +2340,14 @@ class PluginLoader:
                 current is not None and current.status == "active"
             ) or (instance is not None and instance.activated)
             live = instance is not None and instance.has_runtime_ledger()
-            if swapped is not None and not committed and live:
-                instance.add_diagnostic("needs_restart")
+            if (
+                swapped is not None
+                and not committed
+                and (live or plugin_id in self._recovery_blocked)
+            ):
+                self.lifecycle.ensure_instance(plugin_id).add_diagnostic(
+                    "needs_restart",
+                )
             elif swapped is not None and not committed:
                 try:
                     await self._restore_failed_swap(
@@ -2522,6 +2577,8 @@ class PluginLoader:
                 asyncio.CancelledError,
             ) as undo_exc:  # noqa: BLE001
                 report.clean = False
+                if self._note_disk_recovery_failure(undo_exc):
+                    report.needs_restart = True
                 report.errors.append(
                     str(undo_exc) or type(undo_exc).__name__,
                 )
@@ -2963,6 +3020,7 @@ class PluginLoader:
         config: Optional[Dict] = None,
     ) -> None:
         """Call ``register()`` again on the already-imported plugin object."""
+        self._require_recovered(plugin_id)
         record = self._loaded_plugins.get(plugin_id)
         if record is None or record.instance is None:
             raise RuntimeError(f"Plugin '{plugin_id}' is not loaded")
@@ -3034,6 +3092,8 @@ class PluginLoader:
 
         tools_before = snapshot_tool_inventory(plugin_id)
         agent_tools_before = snapshot_agent_tool_configs(tools_before)
+        if instance is not None:
+            instance.activation_tool_configs = agent_tools_before
         location_keys_before = snapshot_location_keys(plugin_id)
         committed: list[list[str] | None] = [None]
         cancelled = False
@@ -3108,6 +3168,7 @@ class PluginLoader:
                 raise
         if instance is not None:
             instance.activated = True
+            instance.activation_tool_configs.clear()
             instance.clear_created_dests()
             instance.clear_txn_escapes()
             for item in cleanup_errors:
@@ -3120,16 +3181,23 @@ class PluginLoader:
 
     async def activate_all_loaded(self) -> None:
         """Activate every registered plugin that has not been activated yet."""
-        for plugin_id, record in list(self._loaded_plugins.items()):
-            if record.status not in {"registered", "active"}:
-                continue
-            instance = self.lifecycle.get_instance(plugin_id)
-            if instance is not None and instance.activated:
-                if record.status == "registered":
-                    record.status = "active"
-                continue
+        for plugin_id in list(self._loaded_plugins):
             try:
-                await self.activate_plugin_unlocked(plugin_id)
+                async with self.plugin_lifecycle(plugin_id):
+                    # Unload or reload may finish while we wait for the lock.
+                    record = self._loaded_plugins.get(plugin_id)
+                    instance = self.lifecycle.get_instance(plugin_id)
+                    if (
+                        record is None
+                        or record.status not in {"registered", "active"}
+                        or instance is None
+                    ):
+                        continue
+                    if instance.activated:
+                        if record.status == "registered":
+                            record.status = "active"
+                        continue
+                    await self.lifecycle.activate(plugin_id)
             except Exception as exc:  # noqa: BLE001
                 logger.error(
                     "Failed to activate plugin '%s': %s",
@@ -3355,6 +3423,7 @@ class PluginLoader:
             instance.clear_txn_escapes()
             instance.clear_created_dests()
         except (Exception, asyncio.CancelledError) as undo_exc:  # noqa: BLE001
+            self._note_disk_recovery_failure(undo_exc)
             instance.add_diagnostic(
                 str(undo_exc) or type(undo_exc).__name__,
             )

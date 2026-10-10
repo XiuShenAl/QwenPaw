@@ -47,7 +47,7 @@ def parse_optional_absolute(raw: object) -> Path | None:
 
 
 def ensure_deletable(path: Path, *, purpose: str = "delete") -> Path:
-    """Refuse cwd, repo root, home, ``/``, relatives, and empty paths."""
+    """Validate protected roots without changing the deletion target."""
     raw = str(path).strip() if path is not None else ""
     if not raw:
         raise ValueError(f"refusing to {purpose} an empty path")
@@ -59,27 +59,27 @@ def ensure_deletable(path: Path, *, purpose: str = "delete") -> Path:
     cwd = Path.cwd().resolve()
     if resolved == cwd or resolved in cwd.parents:
         raise ValueError(f"refusing to {purpose} ancestor {path}")
-    return resolved
+    return path
 
 
 def safe_remove(path: Path | None, *, purpose: str = "delete") -> None:
     """Remove a file or directory after :func:`ensure_deletable`.
 
-    Missing paths and ``None`` are no-ops. Empty / relative values raise
-    rather than falling through to cwd.
+    Delete a final symlink itself, including a dangling link. Missing paths
+    and ``None`` are no-ops. Empty / relative values raise.
     """
     if path is None:
         return
     raw = str(path).strip()
     if not raw:
         raise ValueError(f"refusing to {purpose} an empty path")
-    if not path.exists():
-        return
-    resolved = ensure_deletable(path, purpose=purpose)
-    if resolved.is_dir():
-        shutil.rmtree(resolved)
-        return
-    resolved.unlink()
+    target = ensure_deletable(path, purpose=purpose)
+    if target.is_symlink():
+        target.unlink()
+    elif target.is_dir():
+        shutil.rmtree(target)
+    elif target.exists():
+        target.unlink()
 
 
 def same_location(left: Path, right: Path) -> bool:

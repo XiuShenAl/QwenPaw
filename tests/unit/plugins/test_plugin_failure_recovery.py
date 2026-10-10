@@ -45,6 +45,79 @@ def workspace():
 
 
 @pytest.mark.asyncio
+async def test_boot_activation_finishes_before_unload(
+    tmp_path,
+    registry,
+    monkeypatch,
+):
+    state = {
+        "entered": asyncio.Event(),
+        "release": asyncio.Event(),
+        "alive": False,
+        "calls": [],
+    }
+    monkeypatch.setattr(
+        builtins,
+        "_qwenpaw_boot_activation_state",
+        state,
+        raising=False,
+    )
+    root = tmp_path / "plugins" / "boot-activation"
+    root.mkdir(parents=True)
+    manifest = PluginManifest.from_dict(
+        {
+            "id": "boot-activation",
+            "name": "Boot activation",
+            "version": "1.0.0",
+            "entry": {"backend": "main.py"},
+        },
+    )
+    (root / "main.py").write_text(
+        "import builtins\n"
+        "state = builtins._qwenpaw_boot_activation_state\n"
+        "class Plugin:\n"
+        "    def register(self, api):\n"
+        "        async def start():\n"
+        "            state['calls'].append('starting')\n"
+        "            state['entered'].set()\n"
+        "            await state['release'].wait()\n"
+        "            state['alive'] = True\n"
+        "            state['calls'].append('started')\n"
+        "        def stop():\n"
+        "            state['alive'] = False\n"
+        "            state['calls'].append('stopped')\n"
+        "        api.effect('connection', None, stop)\n"
+        "        api.register_startup_hook('connection', start)\n"
+        "plugin = Plugin()\n",
+        encoding="utf-8",
+    )
+    loader = PluginLoader([root.parent])
+    loader.registry = registry
+    record = await loader.load_plugin(manifest, root, activate=False)
+    assert record.status == "registered"
+    activation = asyncio.create_task(loader.activate_all_loaded())
+    unload = None
+    try:
+        await asyncio.wait_for(state["entered"].wait(), timeout=2)
+        unload = asyncio.create_task(loader.unload_plugin(manifest.id))
+        done, _ = await asyncio.wait({unload}, timeout=0.05)
+        assert not done
+        assert state["calls"] == ["starting"]
+    finally:
+        state["release"].set()
+        await activation
+        if unload is not None:
+            report = await unload
+        else:
+            report = await loader.unload_plugin(manifest.id)
+    assert report.clean and report.quiescent
+    assert state["calls"] == ["starting", "started", "stopped"]
+    assert not state["alive"]
+    assert loader.get_loaded_plugin(manifest.id) is None
+    assert loader.lifecycle.get_instance(manifest.id) is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cleanup_fails", [False, True])
 async def test_partial_effect_setup_is_cleaned_or_retained_for_retry(
     tmp_path,

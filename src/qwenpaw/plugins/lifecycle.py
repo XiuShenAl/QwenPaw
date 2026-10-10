@@ -166,6 +166,10 @@ class PluginInstance:
         self.diagnostics: list[str] = []
         self.source_path: Any = None
         self.config: dict[str, Any] = {}
+        self.activation_tool_configs: dict[
+            str,
+            dict[str, dict[str, Any] | None],
+        ] = {}
         self._runtime: list[LedgerEntry] = []
         self._install: list[LedgerEntry] = []
         self._created_dests: list[str] = []

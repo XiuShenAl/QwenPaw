@@ -1733,6 +1733,113 @@ async def test_meta_only_tool_is_not_written_to_agents(
 
 
 @pytest.mark.asyncio
+async def test_first_tool_inventory_failed_startup_preserves_user_rows(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    from qwenpaw.config.config import (
+        BuiltinToolConfig,
+        load_agent_config,
+        save_agent_config,
+    )
+
+    _seed_two_agents(tmp_path, monkeypatch)
+    _clear_tool_owners()
+    before = {}
+    for agent_id in ("talk", "other"):
+        cfg = load_agent_config(agent_id)
+        cfg.tools.builtin_tools["legacy_demo"] = BuiltinToolConfig(
+            name="legacy_demo",
+            enabled=False,
+            description=f"User description: {agent_id}",
+            config={"custom": agent_id},
+        )
+        save_agent_config(agent_id, cfg)
+        before[agent_id] = cfg.tools.builtin_tools["legacy_demo"].model_dump()
+    assert not load_inventory("legacy-tools").get("tools")
+    loader, _workspace, _installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "legacy-tools",
+        _tool_body("legacy_demo", "Factory") + "\n"
+        "        def _start():\n"
+        "            from qwenpaw.plugins.provision import load_inventory\n"
+        "            assert 'legacy_demo' in load_inventory(\n"
+        "                'legacy-tools',\n"
+        "            )['tools']\n"
+        "            raise RuntimeError('startup failed')\n"
+        "        api.register_startup_hook('start', _start, priority=90)",
+    )
+    record = loader.get_loaded_plugin("legacy-tools")
+    assert record.status == "failed"
+    assert any("startup failed" in error for error in record.diagnostics)
+    for agent_id, old_row in before.items():
+        cfg = load_agent_config(agent_id)
+        assert cfg.tools.builtin_tools["legacy_demo"].model_dump() == old_row
+    assert not load_inventory("legacy-tools").get("tools")
+    _clear_tool_owners()
+
+
+@pytest.mark.asyncio
+async def test_disabled_force_install_preserves_settings_until_enabled(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+):
+    from qwenpaw.config.utils import load_config
+    from qwenpaw.plugins.settings import persist_plugin_settings
+
+    _isolate_working_dir(tmp_path, monkeypatch)
+    config = {"endpoint": "https://user.example", "limit": 9}
+    persist_plugin_settings("disabled-force", config=config)
+    starts = tmp_path / "starts.jsonl"
+    body = (
+        "import json\n"
+        "        from pathlib import Path\n"
+        "        def _start():\n"
+        f"            with Path({str(starts)!r}).open('a') as stream:\n"
+        "                stream.write(json.dumps(api.config) + '\\n')\n"
+        "        api.register_startup_hook('start', _start)"
+    )
+    loader, _workspace, _installed = await _load(
+        tmp_path,
+        fresh_registry,
+        "disabled-force",
+        body,
+        config=config,
+    )
+    stopped = await loader.lifecycle.set_enabled("disabled-force", False)
+    assert stopped.clean and stopped.quiescent
+    incoming = _write_plugin(
+        tmp_path / "incoming-disabled-force",
+        "disabled-force",
+        body=body,
+    )
+    record = await loader.load_plugin_from_path(incoming, force=True)
+    assert not record.enabled
+    assert record.status != "active"
+    assert starts.read_text(encoding="utf-8").splitlines() == [
+        json.dumps(config),
+    ]
+    assert load_config().plugins["disabled-force"] == {
+        **config,
+        "enabled": False,
+    }
+    enabled = await loader.lifecycle.set_enabled("disabled-force", True)
+    assert enabled.status == "active"
+    assert [
+        json.loads(line)
+        for line in starts.read_text(encoding="utf-8").splitlines()
+    ] == [config, config]
+    assert load_config().plugins["disabled-force"] == {
+        **config,
+        "enabled": True,
+    }
+    await loader.unload_plugin("disabled-force", delete_files=False)
+
+
+@pytest.mark.asyncio
 async def test_register_tool_writes_all_agents_and_uninstall_clears(
     tmp_path: Path,
     fresh_registry,
