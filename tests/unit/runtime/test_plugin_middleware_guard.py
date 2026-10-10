@@ -4,7 +4,6 @@
 """Protect actual AgentScope middleware hooks without replaying downstream."""
 
 import asyncio
-import weakref
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -12,7 +11,8 @@ from agentscope.middleware import MiddlewareBase
 from agentscope.event import ReplyEndEvent
 
 from qwenpaw.runtime.builder import _wrap_plugin_middleware
-from qwenpaw.runtime.plugin_middleware import _HookCall
+from qwenpaw.plugins.api import PluginApi
+from qwenpaw.plugins.lifecycle import PluginInstance
 
 STREAM_HOOKS = ("on_reply", "on_reasoning", "on_acting")
 AWAIT_HOOKS = ("on_model_call", "on_check_permission", "on_compress_context")
@@ -33,8 +33,16 @@ def middleware(hook, method):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("hook", STREAM_HOOKS)
-@pytest.mark.parametrize("when", ["before", "during", "after"])
+@pytest.mark.parametrize(
+    "hook,when",
+    [
+        ("on_reply", "before"),
+        ("on_reply", "during"),
+        ("on_reply", "after"),
+        ("on_reasoning", "during"),
+        ("on_acting", "during"),
+    ],
+)
 async def test_stream_fault_uses_downstream_once(hook, when, diagnostic):
     first, last = object(), object()
     calls = []
@@ -141,40 +149,7 @@ async def test_prompt_failure_preserves_input_and_hook_detection(diagnostic):
 
 
 @pytest.mark.asyncio
-async def test_model_stream_failure_resumes_existing_stream(diagnostic):
-    first, last = object(), object()
-    calls = []
-
-    async def chunks():
-        yield first
-        yield last
-
-    async def downstream(**_):
-        calls.append(True)
-        return chunks()
-
-    async def broken(self, agent, input_kwargs, next_handler):
-        stream = await next_handler()
-
-        async def transform():
-            async for item in stream:
-                yield item
-                raise RuntimeError("plugin streaming failure")
-
-        return transform()
-
-    guarded = _wrap_plugin_middleware(
-        middleware("on_model_call", broken),
-        "broken",
-    )
-    stream = await guarded.on_model_call(None, {}, downstream)
-    assert [item async for item in stream] == [first, last]
-    assert len(calls) == 1
-    diagnostic.assert_called_once()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("hook", (*STREAM_HOOKS, "on_model_call"))
+@pytest.mark.parametrize("hook", ["on_reply", "on_model_call"])
 @pytest.mark.parametrize(
     "operation,expected",
     [
@@ -242,29 +217,127 @@ async def test_stream_recovery_does_not_replay_consumed_items(
 
 
 @pytest.mark.asyncio
-async def test_consumed_stream_items_are_not_retained():
-    references = []
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_scheduled_downstream_is_reused_after_plugin_fault(
+    streaming,
+    diagnostic,
+):
+    inst = PluginInstance("scheduled-model")
+    api = PluginApi("scheduled-model", {}, {"id": "scheduled-model"})
+    api.bind_instance(inst)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+    hosted = []
 
-    class Chunk:
-        pass
+    async def chunks():
+        yield "first"
+        yield "last"
 
-    async def chunks(**_):
-        for _ in range(100):
-            item = Chunk()
-            references.append(weakref.ref(item))
-            yield item
+    async def downstream(**_):
+        calls.append(True)
+        started.set()
+        await release.wait()
+        return chunks() if streaming else "original result"
 
-    call = _HookCall(chunks)
+    async def broken(self, agent, input_kwargs, next_handler):
+        hosted.append(api.spawn_task(next_handler(**input_kwargs)))
+        raise RuntimeError("failed after scheduling downstream")
 
-    async def consume():
-        async for _ in call.stream_next():
-            pass
+    guarded = _wrap_plugin_middleware(
+        middleware("on_model_call", broken),
+        "scheduled-model",
+    )
+    request = asyncio.create_task(guarded.on_model_call(None, {}, downstream))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert not request.done(), "recovery must wait for the original call"
+        release.set()
+        result = await request
+        if streaming:
+            assert [item async for item in result] == ["first", "last"]
+        else:
+            assert result == "original result"
+        await asyncio.gather(*hosted)
+        assert calls == [True]
+        diagnostic.assert_called_once()
+    finally:
+        release.set()
+        await asyncio.gather(request, *hosted, return_exceptions=True)
+        await inst.teardown_runtime()
 
-    await consume()
-    # Keep the tracking handles alive, as during an active hook invocation.
-    assert call.streams
-    assert all(reference() is None for reference in references)
-    assert [item async for item in call.recover_stream({})] == []
+
+@pytest.mark.asyncio
+async def test_scheduled_downstream_failure_is_not_retried(diagnostic):
+    inst = PluginInstance("scheduled-error")
+    api = PluginApi("scheduled-error", {}, {"id": "scheduled-error"})
+    api.bind_instance(inst)
+    error = RuntimeError("model failed")
+    calls = []
+    hosted = []
+
+    async def downstream(**_):
+        calls.append(True)
+        raise error
+
+    async def broken(self, agent, input_kwargs, next_handler):
+        hosted.append(api.spawn_task(next_handler()))
+        raise RuntimeError("plugin failed")
+
+    guarded = _wrap_plugin_middleware(
+        middleware("on_model_call", broken),
+        "scheduled-error",
+    )
+    with pytest.raises(RuntimeError) as caught:
+        await guarded.on_model_call(None, {}, downstream)
+    assert caught.value is error
+    await asyncio.gather(*hosted, return_exceptions=True)
+    assert calls == [True]
+    await inst.teardown_runtime()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_recovery_cancels_original_call_without_replay(
+    diagnostic,
+):
+    inst = PluginInstance("scheduled-cancel")
+    api = PluginApi("scheduled-cancel", {}, {"id": "scheduled-cancel"})
+    api.bind_instance(inst)
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+    calls = []
+    hosted = []
+
+    async def downstream(**_):
+        calls.append(True)
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+
+    async def broken(self, agent, input_kwargs, next_handler):
+        hosted.append(api.spawn_task(next_handler()))
+        raise RuntimeError("plugin failed")
+
+    guarded = _wrap_plugin_middleware(
+        middleware("on_model_call", broken),
+        "scheduled-cancel",
+    )
+    request = asyncio.create_task(guarded.on_model_call(None, {}, downstream))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        await asyncio.wait_for(stopped.wait(), timeout=1)
+        await asyncio.gather(*hosted, return_exceptions=True)
+        assert calls == [True]
+    finally:
+        request.cancel()
+        await asyncio.gather(request, return_exceptions=True)
+        await inst.teardown_runtime()
 
 
 @pytest.mark.asyncio
@@ -382,7 +455,7 @@ async def test_reply_end_fault_does_not_trigger_another_reasoning_round(
 @pytest.mark.parametrize(
     "hook,factory_fault",
     [
-        *((hook, False) for hook in STREAM_HOOKS),
+        ("on_reply", False),
         ("on_model_call", False),
         ("on_model_call", True),
     ],

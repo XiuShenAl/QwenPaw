@@ -981,7 +981,7 @@ async def set_plugin_enabled(
             still_loaded = loader.get_loaded_plugin(plugin_id) is not None
             payload = {
                 "id": plugin_id,
-                "enabled": not still_loaded,
+                "enabled": False,
                 "loaded": still_loaded,
                 "clean": clean,
                 "quiescent": quiescent,
@@ -989,11 +989,15 @@ async def set_plugin_enabled(
                 "errors": list(getattr(result, "errors", []) or []),
             }
             if not quiescent or still_loaded:
+                from ...plugins.settings import is_plugin_enabled
+
                 raise HTTPException(
                     status_code=409,
                     detail={
                         **payload,
-                        "enabled": True,
+                        "enabled": is_plugin_enabled(
+                            _plugin_config_row(plugin_id),
+                        ),
                         "message": (
                             f"Plugin '{plugin_id}' did not go quiescent."
                         ),

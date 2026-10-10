@@ -11,6 +11,7 @@ from collections.abc import (
     AsyncIterable,
     AsyncIterator,
     Callable,
+    Coroutine,
 )
 from typing import Any
 
@@ -79,7 +80,9 @@ class _HookCall:
         self.streams.append(tracked)
         return tracked.relay()
 
-    async def await_next(self, **kwargs: Any) -> Any:
+    def await_next(self, **kwargs: Any) -> Coroutine[Any, Any, Any]:
+        """Register immediately, returning a coroutine for hosted-task APIs."""
+
         async def run() -> Any:
             try:
                 result = await self.next_handler(**kwargs)
@@ -94,7 +97,11 @@ class _HookCall:
 
         task = asyncio.create_task(run())
         self.tasks.append(task)
-        return await task
+
+        async def wait() -> Any:
+            return await task
+
+        return wait()
 
     def delivered(self, item: Any) -> None:
         """Acknowledge end events, including copies made by a plugin."""

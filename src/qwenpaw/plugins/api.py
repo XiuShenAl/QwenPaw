@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Plugin API for plugin developers."""
 
+import asyncio
 import inspect
 import logging
 import threading
@@ -504,6 +505,7 @@ def rollback_activate_install(
     location_keys_before: set[str],
     created_dests: Collection[str] | None = None,
     txn_escapes: Collection[tuple[str, Any]] | None = None,
+    loop: asyncio.AbstractEventLoop | None = None,
 ) -> None:
     """Undo install-layer writes from a failed activate transaction."""
     from .provision import (
@@ -527,7 +529,7 @@ def rollback_activate_install(
     )
     rollback_created_locations(plugin_id, location_keys_before)
     if txn_escapes:
-        undo_this_txn_escapes(plugin_id, list(txn_escapes))
+        undo_this_txn_escapes(plugin_id, list(txn_escapes), loop=loop)
     if created_dests:
         undo_created_locations(plugin_id, list(created_dests))
     recover_migrating_inventory(plugin_id)
@@ -835,7 +837,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             return
         self._guard_register()
         projector = self._registry.projector
-        projector.intend(kind, name, self.plugin_id, apply, revoke)
+        intent = projector.intend(kind, name, self.plugin_id, apply, revoke)
 
         def _startup():
             return projector.project(kind, name, self.plugin_id)
@@ -849,6 +851,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 kind,
                 name,
                 self.plugin_id,
+                expected=intent,
             )
 
         async def _teardown():
@@ -976,8 +979,6 @@ class PluginApi:  # pylint: disable=too-many-public-methods
 
     def spawn_task(self, coro, desc: str = "task") -> Any:
         """Create an asyncio task and stop it on unload."""
-        import asyncio
-
         from . import custody
 
         self._guard_register()

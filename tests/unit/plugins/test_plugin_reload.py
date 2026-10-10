@@ -29,7 +29,9 @@ from qwenpaw.plugins.provision import (
 )
 from qwenpaw.plugins.registry import PluginRegistry
 from qwenpaw.plugins.updates import (
+    marker_path,
     recover_interrupted_updates,
+    update_marker_status,
     write_updating_marker,
 )
 from qwenpaw.plugins.workspace_projector import WorkspaceProjector
@@ -320,6 +322,104 @@ def test_commit_migrations_clears_marker(tmp_path: Path, monkeypatch):
     commit_migrations("cid")
     loc = load_inventory("cid")["locations"][str(dest)]
     assert loc.get("migrating") is None
+
+
+@pytest.fixture()
+def pending_migrations(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    plugin_id = "cleanup"
+    dests = []
+    backups = []
+    for name in ("occupied", "available"):
+        src = tmp_path / f"src-{name}"
+        src.mkdir()
+        (src / "version.txt").write_text("old", encoding="utf-8")
+        dest = tmp_path / name
+        provision_files(plugin_id, src, dest, "1")
+        (src / "version.txt").write_text("new", encoding="utf-8")
+        provision_files(plugin_id, src, dest, "2")
+        dests.append(dest)
+        marker = load_inventory(plugin_id)["locations"][str(dest)]["migrating"]
+        backups.append(Path(marker["backup_path"]))
+    return plugin_id, dests, backups
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["activate", "provision", "plugin"])
+async def test_committed_cleanup_failure_keeps_retry_locations(
+    tmp_path: Path,
+    monkeypatch,
+    fresh_registry,
+    pending_migrations,
+    entry: str,
+):
+    from qwenpaw.plugins import loader as loader_module
+    from qwenpaw.plugins import provision as provision_module
+
+    plugin_id, dests, backups = pending_migrations
+    loader = PluginLoader(plugin_dirs=[])
+    loader.registry = fresh_registry
+    plugin_backup = tmp_path / "plugin.bak"
+    plugin_backup.mkdir()
+    target = _write_plugin(tmp_path / "plugin", plugin_id)
+    if entry != "activate":
+        write_updating_marker(
+            plugin_id,
+            backup_path=plugin_backup,
+            target_path=target,
+        )
+    blocked = plugin_backup if entry == "plugin" else backups[0]
+    module = loader_module if entry == "plugin" else provision_module
+    attribute = "_remove_dir" if entry == "plugin" else "_remove_path"
+    remove = getattr(module, attribute)
+
+    def deny_occupied(path):
+        if path == blocked:
+            raise PermissionError("backup occupied")
+        return remove(path)
+
+    monkeypatch.setattr(module, attribute, deny_occupied)
+    committed = [None]
+    if entry == "activate":
+        errors = await loader._commit_plugin_transaction(
+            plugin_id,
+            committed=committed,
+        )
+        assert committed[0] == errors
+        assert not marker_path(plugin_id).exists()
+    else:
+        errors = await loader._finish_committed_reload(
+            plugin_id,
+            plugin_backup,
+        )
+        assert update_marker_status(plugin_id) == "committed"
+        assert plugin_backup.is_dir()
+    assert any("backup occupied" in error for error in errors)
+    locations = load_inventory(plugin_id)["locations"]
+    assert locations[str(dests[1])]["migrating"] is None
+    assert not backups[1].exists()
+    if entry != "plugin":
+        assert locations[str(dests[0])]["migrating"]["status"] == "committed"
+        assert backups[0].is_dir()
+
+    monkeypatch.setattr(module, attribute, remove)
+    if entry == "activate":
+        recovery = recover_migrating_inventory(plugin_id)
+        assert not recovery.failures
+    else:
+        assert (
+            await loader._finish_committed_reload(plugin_id, plugin_backup)
+            == []
+        )
+        assert not marker_path(plugin_id).exists()
+        assert not plugin_backup.exists()
+    for dest, backup in zip(dests, backups):
+        assert (dest / "version.txt").read_text(encoding="utf-8") == "new"
+        assert not backup.exists()
+        assert (
+            load_inventory(plugin_id)["locations"][str(dest)]["migrating"]
+            is None
+        )
 
 
 @pytest.mark.asyncio

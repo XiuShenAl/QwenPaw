@@ -19,6 +19,7 @@ from typing import Any, Awaitable
 
 from ..utils.io_utils import write_json_atomic
 from .safe_fs import ensure_deletable, parse_optional_absolute, safe_remove
+from .updates import RecoveryResult
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ def inventory_path(plugin_id: str) -> Path:
     return provisions_dir() / f"{safe}.json"
 
 
-def load_inventory(plugin_id: str) -> dict[str, Any]:
+def load_inventory(plugin_id: str, *, strict: bool = False) -> dict[str, Any]:
     path = inventory_path(plugin_id)
     if not path.is_file():
         return {
@@ -48,7 +49,12 @@ def load_inventory(plugin_id: str) -> dict[str, Any]:
         }
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as exc:
+        if strict:
+            message = (
+                f"Cannot read provision inventory for '{plugin_id}': {exc}"
+            )
+            raise OSError(message) from exc
         logger.warning("Corrupt provision inventory for '%s'", plugin_id)
         return {
             "plugin_id": plugin_id,
@@ -131,9 +137,19 @@ def drop_escape_provision(plugin_id: str, desc: str) -> None:
     save_inventory(plugin_id, data)
 
 
+class EscapeRollbackError(RuntimeError):
+    """Cleanup failed; persistent rows and callable handles must survive."""
+
+    def __init__(self, errors: list[str], failed_descs: list[str]) -> None:
+        super().__init__("; ".join(errors))
+        self.failed_descs = failed_descs
+
+
 def undo_this_txn_escapes(
     plugin_id: str,
     escapes: list[tuple[str, Any]],
+    *,
+    loop: asyncio.AbstractEventLoop | None = None,
 ) -> None:
     """Undo this-txn escape rows and drop those inventory rows.
 
@@ -142,17 +158,40 @@ def undo_this_txn_escapes(
     inventory row. Existing rows that did not run ``setup`` in this
     transaction are left alone.
     """
+    errors: list[str] = []
+    failed_descs: list[str] = []
     for desc, teardown in reversed(list(escapes)):
-        if teardown is not None:
-            try:
-                teardown()
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "This-txn escape teardown %r failed for '%s'",
-                    desc,
-                    plugin_id,
-                )
-        drop_escape_provision(plugin_id, desc)
+        try:
+            if teardown is not None:
+                if loop is not None:
+                    # Invoke on the lifecycle loop: even a sync callback
+                    # can create a Task or return a loop-bound Future.
+                    asyncio.run_coroutine_threadsafe(
+                        _invoke_teardown(teardown),
+                        loop,
+                    ).result()
+                else:
+                    result = teardown()
+                    if inspect.isawaitable(result):
+                        asyncio.run(_await_teardown(result))
+            drop_escape_provision(plugin_id, desc)
+        except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001
+            reason = str(exc) or type(exc).__name__
+            errors.append(f"provision {desc}: {reason}")
+            failed_descs.append(desc)
+            logger.exception(
+                "This-txn escape teardown %r failed for '%s'",
+                desc,
+                plugin_id,
+            )
+    if errors:
+        raise EscapeRollbackError(errors, failed_descs)
+
+
+async def _invoke_teardown(callback) -> None:
+    result = callback()
+    if inspect.isawaitable(result):
+        await result
 
 
 def replay_persisted_provisions(
@@ -490,35 +529,52 @@ def _copy_one(
         shutil.copy2(src_file, sibling)
 
 
-def commit_prepared_migrations(plugin_id: str) -> None:
-    """Keep dests and drop backups for leftover migrating locations.
+class PostCommitCleanupError(OSError):
+    """Cleanup failed after durable commit; the new version must stay."""
 
-    Call only when the plugin directory update is already committed.
-    Prepared and committed markers both finish as committed: dest stays,
-    provision backups go away, ``migrating`` is cleared.
-    """
-    data = load_inventory(plugin_id)
+    def __init__(self, errors: list[str]) -> None:
+        self.errors = errors
+        super().__init__("; ".join(errors))
+
+
+def _cleanup_committed_migrations(
+    plugin_id: str,
+    data: dict[str, Any],
+) -> None:
+    errors: list[str] = []
     changed = False
-    for loc in (data.get("locations") or {}).values():
-        if not loc:
-            continue
-        marker = loc.get("migrating")
+    for dest_key, loc in (data.get("locations") or {}).items():
+        marker = (loc or {}).get("migrating")
         if not marker:
             continue
-        backup = parse_optional_absolute(marker.get("backup_path"))
-        if backup is not None:
-            try:
-                _remove_path(backup)
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "Could not remove committed provision backup %s",
-                    backup,
-                    exc_info=True,
-                )
+        try:
+            _remove_path(parse_optional_absolute(marker.get("backup_path")))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"committed provision backup {dest_key}: {exc}")
+            continue
         loc["migrating"] = None
         changed = True
     if changed:
+        try:
+            save_inventory(plugin_id, data)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"committed provision inventory: {exc}")
+    if errors:
+        raise PostCommitCleanupError(errors)
+
+
+def commit_prepared_migrations(plugin_id: str) -> None:
+    """Keep new dests and backup locators until cleanup succeeds."""
+    data = load_inventory(plugin_id, strict=True)
+    changed = False
+    for loc in (data.get("locations") or {}).values():
+        marker = (loc or {}).get("migrating")
+        if marker and marker.get("status") != "committed":
+            loc["migrating"] = {**marker, "status": "committed"}
+            changed = True
+    if changed:
         save_inventory(plugin_id, data)
+    _cleanup_committed_migrations(plugin_id, data)
 
 
 def _recover_one_migrating_location(
@@ -563,12 +619,20 @@ def _provision_ids_to_recover(plugin_id: str | None) -> list[str]:
     return [p.stem for p in provisions_dir().glob("*.json")]
 
 
-def _recover_plugin_migrating_inventory(item_id: str) -> bool:
+def _recover_plugin_migrating_inventory(
+    item_id: str,
+    result: RecoveryResult,
+) -> bool:
     """Recover one plugin's migrating locations. True if inventory changed."""
     from .updates import update_is_committed
 
     keep_new = update_is_committed(item_id)
-    data = load_inventory(item_id)
+    data = load_inventory(item_id, strict=True)
+    committed = keep_new or all(
+        (loc.get("migrating") or {}).get("status") == "committed"
+        for loc in (data.get("locations") or {}).values()
+        if loc and loc.get("migrating")
+    )
     changed = False
     for dest_key, loc in list((data.get("locations") or {}).items()):
         if not loc:
@@ -576,7 +640,13 @@ def _recover_plugin_migrating_inventory(item_id: str) -> bool:
         try:
             if _recover_one_migrating_location(dest_key, loc, keep_new):
                 changed = True
-        except (OSError, shutil.Error):
+        except (OSError, shutil.Error) as exc:
+            result.fail(
+                item_id,
+                exc,
+                committed=keep_new
+                or (loc.get("migrating") or {}).get("status") == "committed",
+            )
             logger.exception(
                 "Could not recover provision location %s "
                 "for '%s'; leaving migrating marker",
@@ -585,7 +655,11 @@ def _recover_plugin_migrating_inventory(item_id: str) -> bool:
             )
     if not changed:
         return False
-    save_inventory(item_id, data)
+    try:
+        save_inventory(item_id, data)
+    except (OSError, shutil.Error) as exc:
+        result.fail(item_id, exc, committed=committed)
+        return False
     if keep_new:
         logger.info(
             "Finished committed provision migration for plugin '%s'",
@@ -603,16 +677,23 @@ def recover_migrating_inventory(
     plugin_id: str | None = None,
     *,
     owns_commit=None,
-) -> list[str]:
+) -> RecoveryResult:
     """Restore any location still marked migrating. Returns plugin ids."""
-    recovered: list[str] = []
+    from .updates import update_is_committed
+
+    recovered = RecoveryResult()
     for item_id in _provision_ids_to_recover(plugin_id):
         if owns_commit is not None and not owns_commit(item_id):
             continue
         try:
-            if _recover_plugin_migrating_inventory(item_id):
+            if _recover_plugin_migrating_inventory(item_id, recovered):
                 recovered.append(item_id)
-        except (OSError, shutil.Error):
+        except (OSError, shutil.Error) as exc:
+            recovered.fail(
+                item_id,
+                exc,
+                committed=update_is_committed(item_id),
+            )
             logger.exception(
                 "Could not recover provision inventory for '%s'; "
                 "continuing",
@@ -787,64 +868,24 @@ def apply_tool_factory(
     return merged
 
 
-# pylint: disable=too-many-branches
 def commit_migrations(plugin_id: str) -> bool:
-    """Persist committed state first, then delete leftover backups.
-
-    Returns True once committed has been persisted (or there was
-    nothing to persist). Exceptions after that persist are logged;
-    callers must not treat them as an uncommitted activate.
-    """
-    data = load_inventory(plugin_id)
+    """Persist commit before cleanup; post-commit failures cannot roll back."""
+    data = load_inventory(plugin_id, strict=True)
     changed = False
-    backups: list[Path] = []
     for loc in (data.get("locations") or {}).values():
-        if not loc:
-            continue
-        marker = loc.get("migrating")
-        if not marker:
-            continue
-        backup = parse_optional_absolute(marker.get("backup_path"))
-        if backup is not None:
-            backups.append(backup)
-        loc["migrating"] = {
-            **marker,
-            "status": "committed",
-        }
-        changed = True
-    for tool_name, row in list((data.get("tools") or {}).items()):
+        marker = (loc or {}).get("migrating")
+        if marker and marker.get("status") != "committed":
+            loc["migrating"] = {**marker, "status": "committed"}
+            changed = True
+    for row in (data.get("tools") or {}).values():
         pending = (row or {}).get("pending_factory")
-        if pending is None:
-            continue
-        row["factory"] = dict(pending)
-        row.pop("pending_factory", None)
-        data["tools"][tool_name] = row
-        changed = True
+        if pending is not None:
+            row["factory"] = dict(pending)
+            row.pop("pending_factory", None)
+            changed = True
     if changed:
         save_inventory(plugin_id, data)
-    try:
-        for loc in (data.get("locations") or {}).values():
-            marker = (loc or {}).get("migrating") or {}
-            if marker.get("status") != "committed":
-                continue
-            loc["migrating"] = None
-        for backup in backups:
-            try:
-                _remove_path(backup)
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "Could not remove committed provision backup %s",
-                    backup,
-                    exc_info=True,
-                )
-        if changed:
-            save_inventory(plugin_id, data)
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "Post-commit provision cleanup failed for '%s'",
-            plugin_id,
-            exc_info=True,
-        )
+    _cleanup_committed_migrations(plugin_id, data)
     return True
 
 

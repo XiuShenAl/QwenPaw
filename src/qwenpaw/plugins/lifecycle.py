@@ -206,6 +206,12 @@ class PluginInstance:
         """Drop this-txn escape list after commit or after undo."""
         self._txn_escapes.clear()
 
+    def retain_txn_escapes(self, descs: list[str]) -> None:
+        """Keep only unfinished cleanup handles after a partial rollback."""
+        self._txn_escapes[:] = [
+            row for row in self._txn_escapes if row[0] in descs
+        ]
+
     def legacy_uninstall_descs(self) -> list[str]:
         """Return runtime rows recorded as legacy uninstall hooks."""
         return [
@@ -575,7 +581,11 @@ class PluginLifecycle:
             instance=inst,
             delete_files=delete_files,
         )
-        if mode is not UnloadMode.SHUTDOWN and report.quiescent:
+        if (
+            mode is not UnloadMode.SHUTDOWN
+            and report.quiescent
+            and self._loader.get_loaded_plugin(plugin_id) is None
+        ):
             self.drop_instance(plugin_id)
         return report
 
@@ -740,6 +750,7 @@ class PluginLifecycle:
                     ),
                 )
             restore_error = ""
+            restore_cleanup: UnloadReport | None = None
             try:
                 self._loader.registry.unregister_plugin(plugin_id)
                 await self._loader.reregister_unlocked(plugin_id, previous)
@@ -752,10 +763,15 @@ class PluginLifecycle:
                 record.status = previous_status
                 record.enabled = previous_enabled
             except BaseException as restore_exc:
+                restore_cleanup = getattr(
+                    restore_exc,
+                    "plugin_cleanup_report",
+                    None,
+                )
                 inst.mark_failed(str(restore_exc) or "config restore failed")
                 record.status = "failed"
                 record.diagnostics = list(inst.diagnostics)
-                restore_error = str(restore_exc)
+                restore_error = str(restore_exc) or type(restore_exc).__name__
                 logger.exception(
                     "Failed to restore config for plugin '%s'",
                     plugin_id,
@@ -767,10 +783,17 @@ class PluginLifecycle:
             errors = [str(exc)]
             if restore_error:
                 errors.append(f"restore failed: {restore_error}")
+            if restore_cleanup is not None:
+                errors.extend(restore_cleanup.errors)
             return ConfigUpdateReport(
                 plugin_id=plugin_id,
                 ok=False,
                 needs_restart=bool(restore_error),
+                quiescent=(
+                    restore_cleanup.quiescent
+                    if restore_cleanup is not None
+                    else True
+                ),
                 errors=errors,
             )
         return ConfigUpdateReport(plugin_id=plugin_id, ok=True)

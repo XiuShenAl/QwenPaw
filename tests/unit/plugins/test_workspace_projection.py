@@ -4,13 +4,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import builtins
 import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
+from qwenpaw.app.channels.base import BaseChannel
 from qwenpaw.app.channels.manager import ChannelManager
+from qwenpaw.app.multi_agent_manager import MultiAgentManager
 from qwenpaw.app.workspace.workspace_plugins import WorkspacePlugins
 from qwenpaw.modes.base import AgentMode
 from qwenpaw.plugins.api import PluginApi
@@ -457,3 +461,273 @@ def test_hook_unregister_and_collision():
         workspace.plugins.hook_registry.register(_NamedHook())
     assert workspace.plugins.hook_registry.unregister("named-hook")
     workspace.plugins.hook_registry.register(_NamedHook())
+
+
+@pytest.fixture
+async def channel_plugin(tmp_path, monkeypatch, fresh_registry):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    registry = fresh_registry
+    live = []
+    registry.projector = WorkspaceProjector(live_workspaces=lambda: live)
+    entered, release = asyncio.Event(), asyncio.Event()
+    state = SimpleNamespace(stop_fails=False, channel=None)
+
+    class BlockingChannel(BaseChannel):
+        channel = "projection-race"
+        uses_manager_queue = False
+
+        def __init__(self):
+            self.alive = False
+            self.starts = 0
+            self.stops = 0
+            state.channel = self
+
+        @classmethod
+        def from_config(cls, **_kwargs):
+            return cls()
+
+        async def start(self):
+            self.starts += 1
+            self.alive = True
+            entered.set()
+            await release.wait()
+
+        async def stop(self):
+            self.stops += 1
+            if state.stop_fails:
+                raise RuntimeError("connection still alive")
+            self.alive = False
+
+        def set_enqueue(self, _callback):
+            return None
+
+    monkeypatch.setattr(
+        builtins,
+        "_qwenpaw_projection_race_channel",
+        BlockingChannel,
+        raising=False,
+    )
+    for module in (
+        "qwenpaw.plugins.workspace_projector",
+        "qwenpaw.app.channels.manager",
+    ):
+        monkeypatch.setattr(
+            f"{module}.get_available_channels",
+            lambda: ("projection-race",),
+        )
+    monkeypatch.setattr(
+        "qwenpaw.app.channels.manager.get_channel_registry",
+        lambda: {
+            key: row.channel_class
+            for key, row in registry.get_registered_channels().items()
+        },
+    )
+    root = tmp_path / "plugin"
+    root.mkdir()
+    data = {
+        "id": "projection-race",
+        "name": "Projection race",
+        "version": "1.0.0",
+        "entry": {"backend": "main.py"},
+    }
+    (root / "plugin.json").write_text(json.dumps(data), encoding="utf-8")
+    (root / "main.py").write_text(
+        "import builtins\n"
+        "class Plugin:\n"
+        "    def register(self, api):\n"
+        "        channel = builtins._qwenpaw_projection_race_channel\n"
+        "        api.register_channel(channel)\n"
+        "plugin = Plugin()\n",
+        encoding="utf-8",
+    )
+    loader = PluginLoader([tmp_path])
+    loader.registry = registry
+    record = await loader.load_plugin(PluginManifest.from_dict(data), root)
+    assert record.status == "active"
+    workspace = FakeWorkspace(
+        "new-workspace",
+        SimpleNamespace(
+            channels=SimpleNamespace(
+                __pydantic_extra__={
+                    "projection-race": SimpleNamespace(enabled=True),
+                },
+            ),
+        ),
+    )
+    live.append(workspace)
+    case = SimpleNamespace(
+        loader=loader,
+        registry=registry,
+        workspace=workspace,
+        entered=entered,
+        release=release,
+        state=state,
+        root=root,
+        manifest=PluginManifest.from_dict(data),
+        live=live,
+    )
+    yield case
+    release.set()
+    state.stop_fails = False
+    if loader.get_loaded_plugin("projection-race") is not None:
+        await loader.unload_plugin("projection-race")
+
+
+def _start_workspace(case):
+    return asyncio.create_task(
+        MultiAgentManager._fire_workspace_created_hooks(
+            {"agent_id": case.workspace.agent_id, "workspace": case.workspace},
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_retiring_workspace_waits_for_start_and_blocks_late_hook(
+    channel_plugin,
+):
+    case = channel_plugin
+    projection = _start_workspace(case)
+    await asyncio.wait_for(case.entered.wait(), timeout=2)
+    retiring = asyncio.create_task(
+        case.registry.projector.revoke_workspace(case.workspace),
+    )
+    try:
+        done, _pending = await asyncio.wait({retiring}, timeout=0.1)
+        assert not done, "Retiring workspace must wait for channel startup"
+        case.release.set()
+        await asyncio.wait_for(projection, timeout=2)
+        await asyncio.wait_for(retiring, timeout=2)
+        channel = case.state.channel
+        assert channel.stops == 1
+        assert not channel.alive
+        assert not case.workspace.channel_manager.channels
+        assert case.registry.projector._intents
+        assert case.loader.get_loaded_plugin("projection-race") is not None
+        await asyncio.wait_for(_start_workspace(case), timeout=2)
+        assert case.state.channel is channel
+        assert channel.starts == 1
+        assert not case.workspace.channel_manager.channels
+    finally:
+        case.release.set()
+        await asyncio.gather(projection, retiring, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_fails", [False, True])
+async def test_unload_waits_for_new_workspace_start_and_retains_failed_stop(
+    channel_plugin,
+    stop_fails,
+):
+    case = channel_plugin
+    case.state.stop_fails = stop_fails
+    projection = _start_workspace(case)
+    await asyncio.wait_for(case.entered.wait(), timeout=2)
+    unloading = asyncio.create_task(
+        case.loader.unload_plugin("projection-race"),
+    )
+    try:
+        done, _pending = await asyncio.wait({unloading}, timeout=0.1)
+        assert (
+            not done
+        ), "Unload must not report success during channel startup"
+        assert case.loader.get_loaded_plugin("projection-race") is not None
+        case.release.set()
+        await asyncio.wait_for(projection, timeout=2)
+        report = await asyncio.wait_for(unloading, timeout=2)
+        channel = case.state.channel
+        assert channel.starts == 1
+        assert channel.stops == 1
+        assert report.quiescent is not stop_fails
+        if stop_fails:
+            assert not report.clean
+            assert channel.alive
+            assert case.workspace.channel_manager.channels == [channel]
+            assert case.registry.projector._intents
+            assert (
+                case.loader.lifecycle.get_instance("projection-race")
+                is not None
+            )
+            case.state.stop_fails = False
+            report = await case.loader.unload_plugin("projection-race")
+        assert report.clean and report.quiescent
+        assert not channel.alive
+        assert not case.workspace.channel_manager.channels
+        assert not case.registry.projector._intents
+        assert case.loader.get_loaded_plugin("projection-race") is None
+    finally:
+        case.release.set()
+        await asyncio.gather(projection, unloading, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_old_hook_cannot_project_new_plugin_generation(channel_plugin):
+    case = channel_plugin
+    old_hooks = case.registry.get_workspace_created_hooks()
+    report = await case.loader.unload_plugin("projection-race")
+    assert report.clean and report.quiescent
+    case.live.clear()
+    record = await case.loader.load_plugin(case.manifest, case.root)
+    assert record.status == "active"
+    case.live.append(case.workspace)
+    await MultiAgentManager._run_workspace_hooks(
+        old_hooks,
+        {"workspace": case.workspace},
+        "workspace_created",
+    )
+    assert case.state.channel is None
+    assert not case.workspace.channel_manager.channels
+    case.release.set()
+    await asyncio.wait_for(_start_workspace(case), timeout=2)
+    assert case.state.channel.starts == 1
+    assert case.state.channel.alive
+    report = await case.loader.unload_plugin("projection-race")
+    assert report.clean and report.quiescent
+    assert not case.state.channel.alive
+    assert not case.workspace.channel_manager.channels
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_projection", [False, True])
+async def test_pending_projection_timeout_preserves_cleanup_for_retry(
+    channel_plugin,
+    monkeypatch,
+    cancel_projection,
+):
+    case = channel_plugin
+    monkeypatch.setattr(
+        "qwenpaw.plugins.workspace_projector.PROJECTION_DRAIN_TIMEOUT",
+        0.01,
+    )
+    projection = _start_workspace(case)
+    await asyncio.wait_for(case.entered.wait(), timeout=2)
+    try:
+        if cancel_projection:
+            projection.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(projection, timeout=2)
+        report = await asyncio.wait_for(
+            case.loader.unload_plugin("projection-race"),
+            timeout=2,
+        )
+        assert not report.clean and not report.quiescent
+        assert case.state.channel.alive
+        assert case.workspace.channel_manager.channels == [case.state.channel]
+        assert case.registry.projector._intents
+        assert case.loader.get_loaded_plugin("projection-race") is not None
+        assert case.loader.lifecycle.get_instance(
+            "projection-race",
+        ).has_runtime_ledger()
+        case.release.set()
+        if not cancel_projection:
+            await asyncio.wait_for(projection, timeout=2)
+        report = await asyncio.wait_for(
+            case.loader.unload_plugin("projection-race"),
+            timeout=2,
+        )
+        assert report.clean and report.quiescent
+        assert not case.state.channel.alive
+        assert not case.workspace.channel_manager.channels
+        assert not case.registry.projector._intents
+    finally:
+        case.release.set()
+        await asyncio.gather(projection, return_exceptions=True)

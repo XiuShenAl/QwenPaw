@@ -5,6 +5,7 @@
 import asyncio
 import builtins
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -16,7 +17,18 @@ from qwenpaw.plugins.api import PluginApi
 from qwenpaw.plugins.architecture import PluginManifest, PluginRecord
 from qwenpaw.plugins.lifecycle import PluginState, UnloadMode
 from qwenpaw.plugins.loader import PluginLoader
-from qwenpaw.plugins.provision import load_inventory, record_escape_provision
+from qwenpaw.plugins.provision import (
+    EscapeRollbackError,
+    load_inventory,
+    record_escape_provision,
+    save_inventory,
+    undo_this_txn_escapes,
+)
+from qwenpaw.plugins.updates import (
+    STATUS_COMMITTED,
+    marker_path,
+    write_updating_marker,
+)
 from qwenpaw.plugins.registry import PluginRegistry
 from qwenpaw.plugins.workspace_projector import WorkspaceProjector
 
@@ -129,6 +141,221 @@ def test_unbound_effect_refuses_setup():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phase,restart",
+    [("register", False), ("startup", True)],
+)
+async def test_escape_rollback_failure_keeps_cleanup_for_retry(
+    tmp_path,
+    registry,
+    phase,
+    restart,
+):
+    root = tmp_path / "plugins" / "escape-retry"
+    root.mkdir(parents=True)
+    residue = tmp_path / "external-file"
+    blocked = tmp_path / "blocked"
+    blocked.touch()
+    cleanup_module = f"cleanup_{phase}_{int(restart)}"
+    data = {
+        "id": "escape-retry",
+        "name": "Escape retry",
+        "version": "1.0.0",
+        "entry": {"backend": "main.py"},
+    }
+    (root / "plugin.json").write_text(json.dumps(data))
+    (root / f"{cleanup_module}.py").write_text(
+        "from pathlib import Path\n"
+        "def cleanup():\n"
+        f"    if Path({str(blocked)!r}).exists():\n"
+        "        raise PermissionError('file occupied')\n"
+        f"    Path({str(residue)!r}).unlink(missing_ok=True)\n",
+    )
+    invoke = (
+        "fail()"
+        if phase == "register"
+        else ("api.register_startup_hook('fail', fail)")
+    )
+    (root / "main.py").write_text(
+        "from pathlib import Path\n"
+        f"from {cleanup_module} import cleanup\n"
+        "class Plugin:\n"
+        "    def register(self, api):\n"
+        "        def fail():\n"
+        f"            def setup(): Path({str(residue)!r}).write_text('live')\n"
+        "            api.provision('external file', setup, cleanup, "
+        f"teardown_ref='{cleanup_module}:cleanup')\n"
+        "            raise RuntimeError('transaction failed')\n"
+        f"        {invoke}\n"
+        "plugin = Plugin()\n",
+    )
+    loader = PluginLoader([tmp_path / "plugins"])
+    loader.registry = registry
+    record = await loader.load_plugin(PluginManifest.from_dict(data), root)
+    assert record.status == "failed"
+    assert residue.exists()
+    assert any("file occupied" in d for d in record.diagnostics)
+    rows = load_inventory("escape-retry")["provisions"]
+    assert len(rows) == 1
+    assert rows[0]["teardown_ref"] == f"{cleanup_module}:cleanup"
+    inst = loader.lifecycle.get_instance("escape-retry")
+    assert [desc for desc, _ in inst.txn_escapes()] == ["external file"]
+    if restart:
+        # Fresh loader has no callable handles; persistent refs must suffice.
+        loader = PluginLoader([tmp_path / "plugins"])
+        loader.registry = registry
+        mode = UnloadMode.UNINSTALL
+    else:
+        mode = UnloadMode.UNLOAD
+    report = await loader.unload_plugin("escape-retry", mode=mode)
+    assert not report.clean
+    assert any("file occupied" in error for error in report.errors)
+    assert residue.exists()
+    assert root.exists()
+    assert load_inventory("escape-retry")["provisions"]
+    if not restart:
+        assert report.quiescent  # File deletion failure is not a live task.
+        assert loader.lifecycle.get_instance("escape-retry") is inst
+        assert inst.txn_escapes()
+    blocked.unlink()
+    report = await loader.unload_plugin("escape-retry", mode=mode)
+    assert report.clean
+    assert report.quiescent
+    assert not residue.exists()
+    assert not load_inventory("escape-retry")["provisions"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phase,outcome",
+    [
+        ("register", "success"),
+        ("startup", "success"),
+        ("startup", "error"),
+        ("startup", "cancel"),
+    ],
+)
+async def test_async_escape_rollback_awaits_on_owner_loop_and_keeps_retry(
+    tmp_path,
+    registry,
+    monkeypatch,
+    phase,
+    outcome,
+):
+    state = {
+        "loop": asyncio.get_running_loop(),
+        "outcome": outcome,
+        "calls": 0,
+    }
+    monkeypatch.setattr(
+        builtins,
+        "_qwenpaw_async_escape_state",
+        state,
+        raising=False,
+    )
+    plugin_id = f"async-escape-{phase}-{outcome}"
+    root = tmp_path / "plugins" / plugin_id
+    root.mkdir(parents=True)
+    residue = tmp_path / "external-file"
+    cleanup_module = f"cleanup_async_{phase}_{outcome}"
+    data = {
+        "id": plugin_id,
+        "name": "Async escape",
+        "version": "1.0.0",
+        "entry": {"backend": "main.py"},
+    }
+    (root / "plugin.json").write_text(json.dumps(data))
+    (root / f"{cleanup_module}.py").write_text(
+        "import asyncio, builtins\n"
+        "from pathlib import Path\n"
+        "async def cleanup():\n"
+        "    state = builtins._qwenpaw_async_escape_state\n"
+        "    assert asyncio.get_running_loop() is state['loop']\n"
+        "    state['calls'] += 1\n"
+        "    ready = state['loop'].create_future()\n"
+        "    state['loop'].call_soon(ready.set_result, None)\n"
+        "    await ready\n"
+        "    if state['outcome'] == 'error':\n"
+        "        raise PermissionError('async file occupied')\n"
+        "    if state['outcome'] == 'cancel':\n"
+        "        raise asyncio.CancelledError('async cleanup cancelled')\n"
+        f"    Path({str(residue)!r}).unlink(missing_ok=True)\n",
+    )
+    invoke = (
+        "fail()"
+        if phase == "register"
+        else "api.register_startup_hook('fail', fail)"
+    )
+    teardown = (
+        "lambda: asyncio.create_task(cleanup())"
+        if phase == "register"
+        else "cleanup"
+    )
+    (root / "main.py").write_text(
+        "import asyncio\n"
+        "from pathlib import Path\n"
+        f"from {cleanup_module} import cleanup\n"
+        "class Plugin:\n"
+        "    def register(self, api):\n"
+        "        def fail():\n"
+        f"            def setup(): Path({str(residue)!r}).write_text('live')\n"
+        f"            api.provision('external file', setup, {teardown}, "
+        f"teardown_ref='{cleanup_module}:cleanup')\n"
+        "            raise RuntimeError('transaction failed')\n"
+        f"        {invoke}\n"
+        "plugin = Plugin()\n",
+    )
+    loader = PluginLoader([tmp_path / "plugins"])
+    loader.registry = registry
+    record = await loader.load_plugin(PluginManifest.from_dict(data), root)
+    assert record.status == "failed"
+    assert state["calls"] == 1
+    rows = load_inventory(plugin_id)["provisions"]
+    if outcome == "success":
+        assert not residue.exists()
+        assert not rows
+        return
+
+    assert residue.exists()
+    assert rows[0]["teardown_ref"] == f"{cleanup_module}:cleanup"
+    error = "async file occupied" if outcome == "error" else "cancel"
+    assert any(
+        error in diagnostic.lower() for diagnostic in record.diagnostics
+    )
+    inst = loader.lifecycle.get_instance(plugin_id)
+    assert [desc for desc, _ in inst.txn_escapes()] == ["external file"]
+    state["outcome"] = "success"
+    report = await loader.unload_plugin(plugin_id)
+    assert report.clean and report.quiescent
+    assert state["calls"] == 2
+    assert not residue.exists()
+    assert not load_inventory(plugin_id)["provisions"]
+    assert not inst.txn_escapes()
+
+
+@pytest.mark.asyncio
+async def test_escape_rollback_drops_only_successful_rows(registry):
+    calls = []
+    record_escape_provision("partial-undo", "good", teardown_ref="m:good")
+    record_escape_provision("partial-undo", "bad", teardown_ref="m:bad")
+
+    def bad():
+        calls.append("bad")
+        raise PermissionError("file occupied")
+
+    with pytest.raises(EscapeRollbackError) as caught:
+        undo_this_txn_escapes(
+            "partial-undo",
+            [("good", lambda: calls.append("good")), ("bad", bad)],
+        )
+    assert calls == ["bad", "good"]
+    assert caught.value.failed_descs == ["bad"]
+    assert [
+        row["desc"] for row in load_inventory("partial-undo")["provisions"]
+    ] == (["bad"])
+
+
+@pytest.mark.asyncio
 async def test_replacement_workspace_gets_its_own_binding(registry):
     old, new = workspace(), workspace()
     live = [old]
@@ -234,7 +461,7 @@ async def test_partial_channel_start_keeps_handle_until_stopped(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "ref",
-    [None, "missing_module:cleanup", "cleanup:missing", "cleanup:cleanup"],
+    [None, "cleanup:cleanup"],
 )
 async def test_uninstall_unresolved_provisions_keeps_retry_information(
     tmp_path,
@@ -417,7 +644,9 @@ async def test_restart_cleanup_preserves_only_unfinished_rows(
     assert completed.read_text() == "done"
     assert [
         row["desc"] for row in load_inventory("disk-plugin")["provisions"]
-    ] == ["second"]
+    ] == [
+        "second",
+    ]
     completed.write_text("do not run first again")
     flag.unlink()
     report = await loader.unload_plugin(
@@ -727,3 +956,268 @@ async def test_stop_request_cancellation_does_not_wait_for_stubborn_task():
         finish.set()
         await hosted
         await asyncio.gather(stopper, return_exceptions=True)
+
+
+def write_plugin(root, plugin_id, trace, version):
+    root.mkdir(parents=True)
+    manifest = {
+        "id": plugin_id,
+        "version": version,
+        "entry": {"backend": f"{plugin_id}.py"},
+    }
+    (root / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (root / f"{plugin_id}.py").write_text(
+        "from pathlib import Path\n"
+        f"trace = Path({str(trace)!r})\n"
+        "def note(stage):\n"
+        "    with trace.open('a') as stream:\n"
+        f"        stream.write('{version}:' + stage + '\\n')\n"
+        "note('import')\n"
+        "class Plugin:\n"
+        "    def register(self, api):\n"
+        "        note('register')\n"
+        "        api.register_startup_hook('probe', lambda: note('startup'))\n"
+        "plugin = Plugin()\n",
+        encoding="utf-8",
+    )
+    return PluginManifest.from_dict(manifest)
+
+
+def assert_blocked(loader, plugin_id, trace):
+    record = loader.get_loaded_plugin(plugin_id)
+    assert record is not None
+    assert record.status == "failed"
+    assert not trace.exists(), "blocked plugin must not even import"
+    assert any("needs_restart" in item for item in record.diagnostics)
+    assert any("locked" in item for item in record.diagnostics)
+
+
+async def assert_direct_entries_blocked(loader, manifest, target, trace):
+    try:
+        record = await loader.lifecycle.load(manifest, target)
+    except RuntimeError:
+        pass
+    else:
+        assert record.status == "failed"
+    try:
+        await loader.lifecycle.activate(manifest.id)
+    except RuntimeError:
+        pass
+    assert not trace.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["delete", "restore"])
+async def test_prepared_update_failure_blocks_activation_and_allows_retry(
+    tmp_path,
+    registry,
+    monkeypatch,
+    failure_stage,
+):
+    from qwenpaw.plugins import updates
+
+    plugin_id = f"boot_{failure_stage}"
+    plugins = tmp_path / "plugins"
+    target = plugins / plugin_id
+    backup = tmp_path / "backup"
+    trace = tmp_path / "blocked-trace"
+    manifest = write_plugin(target, plugin_id, trace, "2.0.0")
+    write_plugin(backup, plugin_id, trace, "1.0.0")
+    healthy_trace = tmp_path / "healthy-trace"
+    healthy_id = f"healthy_{failure_stage}"
+    write_plugin(plugins / healthy_id, healthy_id, healthy_trace, "1.0.0")
+    write_updating_marker(plugin_id, backup_path=backup, target_path=target)
+    original_marker = marker_path(plugin_id).read_bytes()
+    blocked = True
+    original_remove = updates.safe_remove
+    original_move = updates.shutil.move
+
+    def remove(path, **kwargs):
+        if blocked and failure_stage == "delete" and Path(path) == target:
+            raise PermissionError("target locked")
+        return original_remove(path, **kwargs)
+
+    def move(source, destination, *args, **kwargs):
+        if blocked and failure_stage == "restore" and Path(source) == backup:
+            raise PermissionError("backup locked")
+        return original_move(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(updates, "safe_remove", remove)
+    monkeypatch.setattr(updates.shutil, "move", move)
+    loader = PluginLoader([plugins])
+    loader.registry = registry
+    await loader.load_all_plugins(activate=False)
+    await loader.activate_all_loaded()
+    assert_blocked(loader, plugin_id, trace)
+    assert loader.get_loaded_plugin(healthy_id).status == "active"
+    assert "startup" in healthy_trace.read_text(encoding="utf-8")
+    await assert_direct_entries_blocked(loader, manifest, target, trace)
+    assert marker_path(plugin_id).read_bytes() == original_marker
+    assert backup.is_dir()
+
+    blocked = False
+    await loader.load_all_plugins(activate=True)
+    assert loader.get_loaded_plugin(plugin_id).status == "active"
+    assert trace.read_text(encoding="utf-8").splitlines() == [
+        "1.0.0:import",
+        "1.0.0:register",
+        "1.0.0:startup",
+    ]
+    assert not backup.exists()
+    assert not marker_path(plugin_id).exists()
+
+
+@pytest.mark.asyncio
+async def test_committed_cleanup_failure_keeps_new_version_and_diagnostics(
+    tmp_path,
+    registry,
+    monkeypatch,
+):
+    from qwenpaw.plugins import updates
+
+    plugin_id = "boot_committed_cleanup"
+    plugins = tmp_path / "plugins"
+    target = plugins / plugin_id
+    trace = tmp_path / "new-trace"
+    backup = tmp_path / "backup"
+    write_plugin(target, plugin_id, trace, "2.0.0")
+    write_plugin(backup, plugin_id, trace, "1.0.0")
+    write_updating_marker(
+        plugin_id,
+        backup_path=backup,
+        target_path=target,
+        status=STATUS_COMMITTED,
+    )
+    original_marker = marker_path(plugin_id).read_bytes()
+    original_remove = updates.safe_remove
+
+    def remove(path, **kwargs):
+        if Path(path) == backup:
+            raise PermissionError("committed backup locked")
+        return original_remove(path, **kwargs)
+
+    monkeypatch.setattr(updates, "safe_remove", remove)
+    loader = PluginLoader([plugins])
+    loader.registry = registry
+    await loader.load_all_plugins(activate=True)
+    record = loader.get_loaded_plugin(plugin_id)
+    assert record.status == "active"
+    assert any("needs_restart" in item for item in record.diagnostics)
+    assert any(
+        "committed backup locked" in item for item in record.diagnostics
+    )
+    assert trace.read_text(encoding="utf-8").splitlines() == [
+        "2.0.0:import",
+        "2.0.0:register",
+        "2.0.0:startup",
+    ]
+    assert marker_path(plugin_id).read_bytes() == original_marker
+    assert backup.exists()
+
+
+@pytest.mark.asyncio
+async def test_failed_recovery_rescan_cannot_release_existing_barrier(
+    tmp_path,
+    registry,
+    monkeypatch,
+):
+    from qwenpaw.plugins import updates
+
+    plugin_id = "boot_failed_rescan"
+    plugins = tmp_path / "plugins"
+    target = plugins / plugin_id
+    trace = tmp_path / "blocked-trace"
+    manifest = write_plugin(target, plugin_id, trace, "2.0.0")
+    write_updating_marker(
+        plugin_id,
+        backup_path=tmp_path / "missing-backup",
+        target_path=target,
+    )
+    original_marker = marker_path(plugin_id).read_bytes()
+    loader = PluginLoader([plugins])
+    loader.registry = registry
+    await loader.load_all_plugins(activate=True)
+    assert loader.get_loaded_plugin(plugin_id).status == "failed"
+
+    def fail_scan(*_args, **_kwargs):
+        raise OSError("recovery directory unavailable")
+
+    monkeypatch.setattr(updates, "recover_interrupted_updates", fail_scan)
+    await loader.load_all_plugins(activate=True)
+    await loader.activate_all_loaded()
+    await assert_direct_entries_blocked(loader, manifest, target, trace)
+    record = loader.get_loaded_plugin(plugin_id)
+    assert record.status == "failed"
+    assert any("needs_restart" in item for item in record.diagnostics)
+    assert not trace.exists()
+    assert marker_path(plugin_id).read_bytes() == original_marker
+
+
+@pytest.mark.asyncio
+async def test_failed_provision_recovery_blocks_plugin_until_retry(
+    tmp_path,
+    registry,
+    monkeypatch,
+):
+    from qwenpaw.plugins import provision
+
+    plugin_id = "boot_provision"
+    plugins = tmp_path / "plugins"
+    trace = tmp_path / "blocked-trace"
+    target = plugins / plugin_id
+    manifest = write_plugin(target, plugin_id, trace, "1.0.0")
+    healthy_trace = tmp_path / "healthy-trace"
+    write_plugin(
+        plugins / "healthy_provision",
+        "healthy_provision",
+        healthy_trace,
+        "1.0.0",
+    )
+    dest = tmp_path / "skill"
+    backup = tmp_path / "skill.bak"
+    dest.mkdir()
+    backup.mkdir()
+    (dest / "note").write_text("new", encoding="utf-8")
+    (backup / "note").write_text("old", encoding="utf-8")
+    inventory = {
+        "plugin_id": plugin_id,
+        "locations": {
+            str(dest): {
+                "owned": True,
+                "version": "2.0.0",
+                "files": {},
+                "migrating": {
+                    "status": "prepared",
+                    "backup_path": str(backup),
+                    "prev_version": "1.0.0",
+                    "prev_factory_hashes": {},
+                },
+            },
+        },
+        "tools": {},
+        "provisions": [],
+    }
+    save_inventory(plugin_id, inventory)
+    original_remove = provision._remove_path
+    blocked = True
+
+    def remove(path):
+        if blocked and Path(path) == dest:
+            raise PermissionError("skill locked")
+        return original_remove(path)
+
+    monkeypatch.setattr(provision, "_remove_path", remove)
+    loader = PluginLoader([plugins])
+    loader.registry = registry
+    await loader.load_all_plugins(activate=False)
+    await loader.activate_all_loaded()
+    assert_blocked(loader, plugin_id, trace)
+    assert loader.get_loaded_plugin("healthy_provision").status == "active"
+    assert load_inventory(plugin_id) == inventory
+    assert backup.exists()
+    await assert_direct_entries_blocked(loader, manifest, target, trace)
+    blocked = False
+    await loader.load_all_plugins(activate=True)
+    assert loader.get_loaded_plugin(plugin_id).status == "active"
+    assert (dest / "note").read_text(encoding="utf-8") == "old"
+    assert not backup.exists()

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 import weakref
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 ApplyFn = Callable[[Any], Any]
 RevokeFn = Callable[..., Any]
+PROJECTION_DRAIN_TIMEOUT = 5.0
 
 
 class ProjectionError(RuntimeError):
@@ -38,6 +40,9 @@ class WorkspaceIntent:
     revoke: RevokeFn
     bindings: dict[str, Any] = field(default_factory=dict)
     workspaces: dict[str, Callable[[], Any]] = field(default_factory=dict)
+    pending: dict[str, asyncio.Task[None]] = field(default_factory=dict)
+    retiring: dict[str, Callable[[], Any]] = field(default_factory=dict)
+    revoking: bool = False
 
 
 @dataclass
@@ -102,15 +107,11 @@ class WorkspaceProjector:
         errors: list[str] = []
         for workspace in self._live():
             key = _workspace_key(workspace)
-            if self._has_binding(intent, workspace):
-                continue
             try:
-                token = await self._apply(intent, workspace)
+                await self._project_one(intent, workspace)
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"{key}:{exc}")
                 continue
-            if token is not None:
-                self._remember(intent, workspace, token)
         if errors:
             raise ProjectionError(
                 f"{kind} {name!r} failed: {'; '.join(errors)}",
@@ -122,20 +123,69 @@ class WorkspaceProjector:
         kind: str,
         name: str,
         plugin_id: str,
+        *,
+        expected: WorkspaceIntent | None = None,
     ) -> None:
         intent = self._find(kind, name, plugin_id)
-        if intent is None:
+        if intent is None or (expected is not None and intent is not expected):
+            return
+        await self._project_one(intent, workspace)
+
+    async def _project_one(
+        self,
+        intent: WorkspaceIntent,
+        workspace: Any,
+    ) -> None:
+        key = _workspace_key(workspace)
+        retiring = intent.retiring.get(key)
+        if intent.revoking or (
+            retiring is not None and retiring() is workspace
+        ):
             return
         if self._has_binding(intent, workspace):
             return
-        token = await self._apply(intent, workspace)
-        if token is not None:
-            self._remember(intent, workspace, token)
+        task = intent.pending.get(key)
+        if task is None:
+
+            async def apply() -> None:
+                token = await self._apply(intent, workspace)
+                if token is not None:
+                    self._remember(intent, workspace, token)
+
+            def finished(completed: asyncio.Task[None]) -> None:
+                intent.pending.pop(key, None)
+                if not completed.cancelled():
+                    completed.exception()
+
+            task = asyncio.create_task(apply())
+            intent.pending[key] = task
+            task.add_done_callback(finished)
+        # A cancelled workspace hook must not abandon a starting resource.
+        await asyncio.shield(task)
+
+    @staticmethod
+    async def _drain(intent: WorkspaceIntent, key: str | None = None) -> None:
+        tasks = [
+            task
+            for workspace_key, task in intent.pending.items()
+            if key is None or workspace_key == key
+        ]
+        if tasks:
+            _, pending = await asyncio.wait(
+                tasks,
+                timeout=PROJECTION_DRAIN_TIMEOUT,
+            )
+            if pending:
+                raise QuiescenceError(
+                    f"Projection {intent.kind} {intent.name!r} still starting",
+                )
 
     async def revoke(self, kind: str, name: str, plugin_id: str) -> None:
         intent = self._find(kind, name, plugin_id)
         if intent is None:
             return
+        intent.revoking = True
+        await self._drain(intent)
         errors: list[str] = []
         failed_stop: StopReceipt | None = None
         workspaces = {_workspace_key(ws): ws for ws in self._live()}
@@ -188,6 +238,19 @@ class WorkspaceProjector:
         key = _workspace_key(workspace)
         errors: list[str] = []
         for intent in reversed(self._intents):
+            intent.retiring = {
+                item: resolve
+                for item, resolve in intent.retiring.items()
+                if resolve() is not None
+            }
+            intent.retiring[key] = _workspace_ref(workspace)
+            try:
+                await self._drain(intent, key)
+            except QuiescenceError as exc:
+                errors.append(
+                    f"{intent.plugin_id}:{intent.kind}:{intent.name}: {exc}",
+                )
+                continue
             if not self._has_binding(intent, workspace):
                 continue
             try:
@@ -234,11 +297,10 @@ class WorkspaceProjector:
     def _remember(intent: WorkspaceIntent, workspace: Any, token: Any) -> None:
         key = _workspace_key(workspace)
         intent.bindings[key] = token
-        try:
-            intent.workspaces[key] = weakref.ref(workspace)
-        except TypeError:
-            # Lightweight adapters may not support weak references.
+        if intent.revoking or key in intent.retiring:
             intent.workspaces[key] = _hold_workspace(workspace)
+            return
+        intent.workspaces[key] = _workspace_ref(workspace)
 
     async def _apply(self, intent: WorkspaceIntent, workspace: Any) -> Any:
         try:
@@ -319,6 +381,14 @@ def _hold_workspace(workspace: Any) -> Callable[[], Any]:
         return workspace
 
     return resolve
+
+
+def _workspace_ref(workspace: Any) -> Callable[[], Any]:
+    try:
+        return weakref.ref(workspace)
+    except TypeError:
+        # Lightweight adapters may not support weak references.
+        return _hold_workspace(workspace)
 
 
 def _workspace_key(workspace: Any) -> str:

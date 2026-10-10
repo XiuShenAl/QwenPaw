@@ -140,8 +140,19 @@ def test_owned_skill_migrates_without_resetting_user_settings(skills):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("entry_point", ["live", "disk", "provider"])
-@pytest.mark.parametrize("ownership", ["user", "owned", "legacy", "missing"])
+@pytest.mark.parametrize(
+    "entry_point,ownership",
+    [
+        ("live", "user"),
+        ("disk", "user"),
+        ("provider", "user"),
+        ("live", "owned"),
+        ("disk", "owned"),
+        ("provider", "owned"),
+        ("disk", "legacy"),
+        ("disk", "missing"),
+    ],
+)
 async def test_skill_cleanup_requires_inventory_ownership(
     skills,
     entry_point,

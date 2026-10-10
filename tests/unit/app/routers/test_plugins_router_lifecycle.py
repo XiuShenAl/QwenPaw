@@ -311,7 +311,8 @@ class TestRemoveToolsFromAgents:
 class TestPostLoadSetup:
     @pytest.mark.parametrize("loaded", [False, True])
     async def test_post_load_does_not_repeat_activation_or_write_config(
-        self, loaded
+        self,
+        loaded,
     ):
         loader = _loader_stub([]) if loaded else None
         request = _request(_app(loader))
@@ -614,7 +615,9 @@ class TestLoaderNotReady:
 class TestLoadPluginWithOptionalForceReinstall:
     @pytest.mark.parametrize("force", [False, True])
     async def test_delegates_transaction_and_forwards_pawport_flags(
-        self, tmp_path, force
+        self,
+        tmp_path,
+        force,
     ):
         log = []
         loader = _loader_stub(log)
@@ -631,7 +634,8 @@ class TestLoadPluginWithOptionalForceReinstall:
         loader.load_plugin_from_path.side_effect = load
         with (
             patch(
-                "qwenpaw.config.utils.get_plugins_dir", return_value=tmp_path
+                "qwenpaw.config.utils.get_plugins_dir",
+                return_value=tmp_path,
             ),
             patch(_FINISH_INSTALL, new=finish),
         ):
@@ -662,10 +666,13 @@ class TestLoadPluginWithOptionalForceReinstall:
         record = _record(meta={"tool_name": "new"})
         with (
             patch.object(
-                plugins_module, "_post_load_setup", new=AsyncMock()
+                plugins_module,
+                "_post_load_setup",
+                new=AsyncMock(),
             ) as post,
             patch.object(
-                plugins_module, "_remove_named_tools_from_agents"
+                plugins_module,
+                "_remove_named_tools_from_agents",
             ) as remove,
         ):
             await plugins_module._finish_plugin_install_after_load(
@@ -823,7 +830,8 @@ class TestInstallPluginSource:
 class TestUninstallPluginSource:
     @pytest.mark.parametrize("reload_agents", [False, True])
     async def test_uninstall_uses_lifecycle_without_rebuilding_agents(
-        self, reload_agents
+        self,
+        reload_agents,
     ):
         from qwenpaw.plugins.lifecycle import UnloadMode, UnloadReport
 
@@ -838,13 +846,18 @@ class TestUninstallPluginSource:
         loader.unload_plugin.side_effect = unload
         app = _app(loader)
         with patch.object(
-            plugins_module, "_remove_plugin_tools_from_agents"
+            plugins_module,
+            "_remove_plugin_tools_from_agents",
         ) as remove:
             await uninstall_plugin_source(
-                "plug", app=app, reload_agents=reload_agents
+                "plug",
+                app=app,
+                reload_agents=reload_agents,
             )
         loader.unload_plugin.assert_awaited_once_with(
-            "plug", delete_files=True, mode=UnloadMode.UNINSTALL
+            "plug",
+            delete_files=True,
+            mode=UnloadMode.UNINSTALL,
         )
         assert log == [
             "lifecycle(plug):enter",
@@ -862,10 +875,13 @@ class TestUninstallPluginSource:
         loader.unload_plugin.assert_awaited_once()
 
     @pytest.mark.parametrize(
-        "quiescent,loaded", [(False, True), (False, False), (True, True)]
+        "quiescent,loaded",
+        [(False, True), (False, False), (True, True)],
     )
     async def test_incomplete_uninstall_is_not_reported_as_success(
-        self, quiescent, loaded
+        self,
+        quiescent,
+        loaded,
     ):
         from qwenpaw.plugins.lifecycle import UnloadMode, UnloadReport
 
@@ -974,6 +990,106 @@ class TestInstallPluginRoute:
         assert sorted(seen) == ["app", "force", "source"]
 
 
+class TestSetPluginEnabledRoute:
+    @staticmethod
+    def _disable_loader(
+        monkeypatch,
+        tmp_path,
+        *,
+        enabled=True,
+        loaded=True,
+        quiescent=True,
+    ):
+        from qwenpaw.plugins.lifecycle import UnloadMode, UnloadReport
+
+        plugin_dir = tmp_path / "plug"
+        plugin_dir.mkdir()
+        (plugin_dir / "plugin.json").write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(
+            "qwenpaw.config.utils.get_plugins_dir",
+            lambda: tmp_path,
+        )
+        settings = {"enabled": enabled}
+        monkeypatch.setattr(
+            plugins_module,
+            "_plugin_config_row",
+            lambda _id: settings,
+        )
+        loader = _loader_stub([], record=_record() if loaded else None)
+
+        async def disable(plugin_id, requested_enabled):
+            assert plugin_id == "plug"
+            assert requested_enabled is False
+            if quiescent:
+                settings["enabled"] = False
+                loader.get_loaded_plugin.return_value = None
+            return UnloadReport(
+                plugin_id=plugin_id,
+                mode=UnloadMode.UNLOAD,
+                clean=quiescent,
+                quiescent=quiescent,
+                needs_restart=not quiescent,
+                errors=[] if quiescent else ["connection still alive"],
+            )
+
+        loader.lifecycle.set_enabled = AsyncMock(side_effect=disable)
+        return loader, settings
+
+    def test_disable_and_repeat_report_persisted_disabled_state(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        loader, settings = self._disable_loader(
+            monkeypatch,
+            tmp_path,
+        )
+        client = _client(loader)
+        for _ in range(2):
+            response = client.post(
+                "/api/plugins/plug/enabled",
+                json={"enabled": False},
+            )
+            assert response.status_code == 200
+            assert settings["enabled"] is False
+            payload = response.json()
+            assert payload["enabled"] is False
+            assert payload["loaded"] is False
+            assert payload["clean"] and payload["quiescent"]
+        assert loader.lifecycle.set_enabled.await_count == 2
+
+    @pytest.mark.parametrize(
+        "persisted_enabled,loaded",
+        [(True, False), (False, True)],
+    )
+    def test_failed_disable_reports_settings_and_loaded_state_separately(
+        self,
+        monkeypatch,
+        tmp_path,
+        persisted_enabled,
+        loaded,
+    ):
+        loader, settings = self._disable_loader(
+            monkeypatch,
+            tmp_path,
+            enabled=persisted_enabled,
+            loaded=loaded,
+            quiescent=False,
+        )
+        response = _client(loader).post(
+            "/api/plugins/plug/enabled",
+            json={"enabled": False},
+        )
+        assert response.status_code == 409
+        assert settings["enabled"] is persisted_enabled
+        detail = response.json()["detail"]
+        assert detail["enabled"] is persisted_enabled
+        assert detail["loaded"] is loaded
+        assert not detail["quiescent"]
+        assert detail["needs_restart"]
+        loader.lifecycle.set_enabled.assert_awaited_once_with("plug", False)
+
+
 class TestUninstallPluginRoute:
     @pytest.mark.parametrize("quiescent,loaded", [(False, True), (True, True)])
     def test_incomplete_lifecycle_result_returns_structured_409(
@@ -992,7 +1108,7 @@ class TestUninstallPluginRoute:
                 quiescent=quiescent,
                 needs_restart=True,
                 errors=["connection still alive"],
-            )
+            ),
         )
         response = _client(loader).delete("/api/plugins/plug")
         assert response.status_code == 409

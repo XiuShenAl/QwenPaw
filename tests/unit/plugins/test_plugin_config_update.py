@@ -402,6 +402,70 @@ async def test_failed_startup_with_live_resource_does_not_restore_old_config(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stop_fails", [False, True])
+async def test_failed_config_restore_reports_resource_cleanup(
+    tmp_path: Path,
+    fresh_registry,
+    monkeypatch,
+    stop_fails,
+):
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path / "work")
+    body = (
+        "name = api.config['cmd']\n"
+        "        self.calls = getattr(self, 'calls', []) + [name]\n"
+        "        restoring = len(self.calls) == 3\n"
+        "        def stop():\n"
+        "            if restoring and self.stop_fails:\n"
+        "                raise RuntimeError('restored resource still live')\n"
+        "            self.alive = False\n"
+        "        api.effect('connection', None, stop)\n"
+        "        def startup():\n"
+        "            self.alive = True\n"
+        "            if len(self.calls) > 1:\n"
+        "                raise RuntimeError(name + ' startup failed')\n"
+        "        api.register_startup_hook('cfg-start', startup)"
+    )
+    plugin_id = "restore-receipt"
+    loader, _ = await _load_with_workspace(
+        tmp_path,
+        fresh_registry,
+        plugin_id,
+        body,
+        {"cmd": "old"},
+    )
+    inst = loader.lifecycle.get_instance(plugin_id)
+    record = loader.get_loaded_plugin(plugin_id)
+    plugin = record.instance
+    plugin.stop_fails = stop_fails
+    module_name = type(plugin).__module__
+    module = sys.modules[module_name]
+
+    report = await loader.lifecycle.update_config(plugin_id, {"cmd": "new"})
+
+    assert not report.ok
+    assert report.needs_restart
+    assert report.quiescent is not stop_fails
+    assert "new startup failed" in report.errors
+    assert "restore failed: old startup failed" in report.errors
+    assert any(
+        "restored resource still live" in err for err in report.errors
+    ) is (stop_fails)
+    assert plugin.calls == ["old", "new", "old"]
+    assert loader.lifecycle.get_instance(plugin_id) is inst
+    assert loader.get_loaded_plugin(plugin_id) is record
+    assert inst.state is PluginState.FAILED
+    assert sys.modules[module_name] is module
+    assert inst.has_runtime_ledger() is stop_fails
+    assert plugin.alive is stop_fails
+
+    plugin.stop_fails = False
+    retried = await loader.lifecycle.unload(plugin_id, UnloadMode.UNLOAD)
+    assert retried.clean and retried.quiescent
+    assert not plugin.alive
+    assert loader.get_loaded_plugin(plugin_id) is None
+
+
+@pytest.mark.asyncio
 async def test_update_config_partial_failure_keeps_old_only(
     tmp_path: Path,
     fresh_registry,

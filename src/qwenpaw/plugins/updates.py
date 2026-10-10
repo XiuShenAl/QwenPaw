@@ -20,6 +20,30 @@ STATUS_UPDATING = "updating"
 STATUS_COMMITTED = "committed"
 
 
+class RecoveryResult(list[str]):
+    """Recovered ids and errors; committed cleanup errors allow load."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.failures: dict[str, str] = {}
+        self.blocked: dict[str, str] = {}
+
+    def fail(
+        self,
+        plugin_id: str,
+        error: BaseException,
+        *,
+        committed: bool,
+    ) -> None:
+        message = str(error) or type(error).__name__
+        previous = self.failures.get(plugin_id)
+        self.failures[plugin_id] = (
+            f"{previous}; {message}" if previous else message
+        )
+        if not committed:
+            self.blocked[plugin_id] = message
+
+
 def updates_dir() -> Path:
     """Return the update-marker directory (created on demand)."""
     from ..constant import WORKING_DIR
@@ -138,7 +162,7 @@ def recover_one_update(plugin_id: str) -> str | None:
     return _restore_one_marker(path)
 
 
-def recover_interrupted_updates(owns_commit=None) -> list[str]:
+def recover_interrupted_updates(owns_commit=None) -> RecoveryResult:
     """Restore plugin dirs still marked updating. Returns restored ids.
 
     Each marker is isolated: an occupied target must not stop the rest.
@@ -146,11 +170,11 @@ def recover_interrupted_updates(owns_commit=None) -> list[str]:
     from ..constant import WORKING_DIR
 
     root = Path(WORKING_DIR) / "plugin_updates"
+    restored = RecoveryResult()
     if not root.is_dir():
-        return []
-    restored: list[str] = []
+        return restored
     for path in sorted(root.glob("*.json")):
-        plugin_id = _peek_marker_plugin_id(path)
+        plugin_id = _peek_marker_plugin_id(path) or path.stem
         if (
             plugin_id
             and owns_commit is not None
@@ -159,7 +183,13 @@ def recover_interrupted_updates(owns_commit=None) -> list[str]:
             continue
         try:
             restored_id = _restore_one_marker(path)
-        except (OSError, shutil.Error):
+        except (OSError, shutil.Error) as exc:
+            failed_id = plugin_id or path.stem
+            restored.fail(
+                failed_id,
+                exc,
+                committed=update_is_committed(failed_id),
+            )
             logger.exception(
                 "Could not restore update marker for '%s'; "
                 "leaving it for needs_restart",
@@ -184,9 +214,8 @@ def _restore_one_marker(path: Path) -> str | None:
         data: dict[str, Any] = json.loads(
             path.read_text(encoding="utf-8"),
         )
-    except (OSError, json.JSONDecodeError):
-        logger.warning("Corrupt update marker at %s", path)
-        return None
+    except json.JSONDecodeError as exc:
+        raise OSError(f"Corrupt update marker at {path}") from exc
     status = str(data.get("status") or "")
     plugin_id = str(data.get("plugin_id") or path.stem)
     backup = parse_optional_absolute(data.get("backup_path"))
@@ -205,17 +234,14 @@ def _restore_one_marker(path: Path) -> str | None:
         return None
     if status not in {STATUS_PREPARED, STATUS_UPDATING}:
         return None
+    if backup is None or target is None:
+        raise OSError(
+            f"Update marker for '{plugin_id}' has missing recovery paths",
+        )
+    if not backup.exists():
+        raise OSError(f"Update marker for '{plugin_id}' has no usable backup")
     if staging is not None:
         safe_remove(staging, purpose="drop prepared update staging")
-    if backup is None or target is None or not backup.exists():
-        logger.warning(
-            "Update marker for '%s' has no usable backup; leaving it",
-            plugin_id,
-        )
-        return None
-    if target.exists() and not backup.exists():
-        path.unlink(missing_ok=True)
-        return None
     if target.exists():
         safe_remove(target, purpose="remove partial update target")
     shutil.move(str(backup), str(target))
