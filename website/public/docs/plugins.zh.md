@@ -742,7 +742,7 @@ my-plugin/
 | `author`          | `string`        | 否   | 作者或组织名称。                                                                                                                                                      |
 | `entry.backend`   | `string`        | 否\* | 相对插件目录的 Python 入口文件路径，需在其中导出 `plugin`。                                                                                                           |
 | `entry.frontend`  | `string`        | 否\* | 已构建的前端 bundle 路径（如 `dist/index.js`）。                                                                                                                      |
-| `dependencies`    | `string[]`      | 否   | Python 依赖列表，安装时通过 pip / uv 自动安装。                                                                                                                       |
+| `dependencies`    | `string[]`      | 否   | Python 包依赖，与 `requirements.txt` 合并检查；显式安装、更新或修复时安装缺失项，启动时只检查。                                                                                 |
 | `qwenpaw_version` | `object`        | 否   | QwenPaw 版本约束（推荐）。包含 `min`（包含）和 `max`（不包含，可选）两个子字段，语义为 `>=min, <max`。省略 `max` 时默认取 `{major}.{minor+1}.0`。                     |
 | `min_version`     | `string`        | 否   | **遗留字段。** 需要的最低 QwenPaw 版本。当 `qwenpaw_version` 存在时被忽略，仅为兼容第三方旧插件保留。                                                                 |
 | `max_version`     | `string`        | 否   | **遗留字段。** 不兼容的第一个 QwenPaw 版本（不包含）。配合 `min_version` 使用；省略时从 `min_version` 推导。                                                          |
@@ -2471,14 +2471,27 @@ def register(self, api: PluginApi):
 
 ### 依赖管理
 
-#### 使用 requirements.txt
+#### 声明 Python 包依赖
 
-如果插件需要额外的 Python 包，创建 `requirements.txt`：
+可以在 `plugin.json` 中声明依赖，无需同时创建 `requirements.txt`：
+
+```json
+{
+  "dependencies": ["httpx>=0.24.0", "pydantic>=2.0.0"]
+}
+```
+
+也可以使用 `requirements.txt`：
 
 ```
 httpx>=0.24.0
 pydantic>=2.0.0
 ```
+
+两处声明会合并后进入同一依赖检查和安装流程，不存在覆盖优先级。例如清单声明
+`example-package>=1.0`、文件声明 `example-package<2.0`，环境必须同时满足两项约束；
+互相冲突的约束会使检查或依赖解析失败。建议只在一处维护同一项依赖，避免重复声明。
+这里的 `dependencies` 指 Python 包，不是其他插件 ID 或运行时服务依赖。
 
 显式安装、更新或修复时，框架检查并安装缺失依赖。开机只检查，不自动安装；缺失依赖会
 使该插件加载失败。可调用 `POST /api/plugins/{plugin_id}/repair-dependencies` 修复；
@@ -2494,6 +2507,8 @@ my-package>=1.0.0
 
 支持单独一行的 `--index-url URL` 或 `--index-url=URL`。源地址交给 pip / uv，
 依赖包仍接受版本和宿主包检查。其他选项、嵌套 `-r` 文件、extras 和直接 URL 依赖暂不支持。
+源配置只能写在 `requirements.txt` 中；manifest 的每个依赖项必须是一条包名及可选版本、
+环境条件声明，不能包含安装选项或多行文本。
 
 ### 最佳实践
 

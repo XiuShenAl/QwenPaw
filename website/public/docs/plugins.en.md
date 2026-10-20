@@ -373,7 +373,7 @@ my-plugin/
 | `author`          | `string`           | no       | Author or organisation name.                                                                                                                                                                         |
 | `entry.backend`   | `string`           | no\*     | Path (relative to plugin dir) of the Python entry file that exports `plugin`.                                                                                                                        |
 | `entry.frontend`  | `string`           | no\*     | Path of the built frontend bundle (e.g. `dist/index.js`).                                                                                                                                            |
-| `dependencies`    | `string[]`         | no       | Python package requirements installed via pip/uv at install time.                                                                                                                                    |
+| `dependencies`    | `string[]`         | no       | Python package requirements combined with `requirements.txt`; explicit install, update, or repair installs missing packages, while startup only checks them.                                          |
 | `qwenpaw_version` | `object`           | no       | QwenPaw version constraint (recommended). Contains `min` (inclusive) and `max` (exclusive, optional) sub-fields. Semantics: `>=min, <max`. When `max` is omitted, defaults to `{major}.{minor+1}.0`. |
 | `min_version`     | `string`           | no       | **Legacy.** Minimum QwenPaw version required. Ignored when `qwenpaw_version` is present. Retained only for backward compatibility with third-party plugins.                                          |
 | `max_version`     | `string`           | no       | **Legacy.** First incompatible QwenPaw version (exclusive). Used with `min_version`; when omitted, derived from `min_version`.                                                                       |
@@ -2149,14 +2149,29 @@ def register(self, api: PluginApi):
 
 ### Dependency Management
 
-#### Using requirements.txt
+#### Declaring Python Package Dependencies
 
-If your plugin requires additional Python packages, create `requirements.txt`:
+Declare dependencies in `plugin.json` without also creating `requirements.txt`:
+
+```json
+{
+  "dependencies": ["httpx>=0.24.0", "pydantic>=2.0.0"]
+}
+```
+
+Alternatively, use `requirements.txt`:
 
 ```
 httpx>=0.24.0
 pydantic>=2.0.0
 ```
+
+Both declarations are combined into the same dependency check and installation
+flow; neither takes precedence. For example, `example-package>=1.0` in the manifest
+and `example-package<2.0` in the file must both hold. Conflicting constraints fail
+the check or dependency resolution. Prefer maintaining each dependency in one
+place to avoid duplicate declarations. These are Python package dependencies,
+not other plugin IDs or runtime service dependencies.
 
 Explicit installation, updates, and repairs check and install missing dependencies.
 Boot only checks dependencies; it does not install them. Missing dependencies fail
@@ -2175,6 +2190,9 @@ my-package>=1.0.0
 Use `--index-url URL` or `--index-url=URL` on its own line. pip / uv receives the
 index setting; package version and host-package checks still apply. Other options,
 nested `-r` files, extras, and direct URL requirements are not supported yet.
+Index settings belong only in `requirements.txt`. Each manifest dependency must
+be a single package requirement with optional version constraints and environment
+markers; installer options and multiline strings are not allowed.
 
 ### Best Practices
 

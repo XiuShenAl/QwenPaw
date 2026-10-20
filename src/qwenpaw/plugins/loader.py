@@ -13,7 +13,7 @@ import subprocess
 import sys
 import threading
 import tempfile
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
@@ -25,6 +25,7 @@ from .api import PluginApi
 from .dependency_gate import (
     DependencyGate,
     GateDecision,
+    combined_requirements,
     is_requirement_satisfied,
 )
 from .lifecycle import (
@@ -500,15 +501,50 @@ class PluginLoader:  # pylint: disable=too-many-public-methods
         Boot paths pass ``allow_install=False`` (check only). User-facing
         install / update / repair pass ``True`` so the gate may install.
         """
+        from ..utils.io_utils import run_sync_io
+
         _ensure_plugin_site_on_path()
-        requirements_file = source_path / "requirements.txt"
         if not self.lifecycle.delegate.owns_dependency_env(plugin_id):
             return GateDecision(
                 allow_install=False,
                 already_satisfied=True,
                 reason="dependency env not owned by this process",
             )
-        decision = DependencyGate().evaluate(
+        cleanup = ExitStack()
+        try:
+            try:
+                requirements_file = await run_sync_io(
+                    cleanup.enter_context,
+                    combined_requirements(source_path),
+                )
+            except ValueError as exc:
+                return GateDecision(
+                    allow_install=False,
+                    already_satisfied=False,
+                    unsupported=[str(exc)],
+                    reason=str(exc),
+                )
+            return await self._ensure_requirements_installed(
+                requirements_file,
+                source_path,
+                plugin_id,
+                allow_install=allow_install,
+            )
+        finally:
+            await run_sync_io(cleanup.close)
+
+    async def _ensure_requirements_installed(
+        self,
+        requirements_file: Path,
+        source_path: Path,
+        plugin_id: str,
+        *,
+        allow_install: bool,
+    ) -> GateDecision:
+        from ..utils.io_utils import run_sync_io
+
+        decision = await run_sync_io(
+            DependencyGate().evaluate,
             requirements_file,
             allow_install=allow_install,
             plugin_id=plugin_id,
@@ -517,7 +553,6 @@ class PluginLoader:  # pylint: disable=too-many-public-methods
             return decision
         if decision.missing:
             from ._sdk_dependencies import loaded_sdk_conflicts
-            from ..utils.io_utils import run_sync_io
 
             conflicts = await run_sync_io(
                 loaded_sdk_conflicts,
@@ -547,14 +582,19 @@ class PluginLoader:  # pylint: disable=too-many-public-methods
             len(decision.missing),
             ", ".join(decision.missing),
         )
-        from ..utils.io_utils import run_sync_io
-
+        source = (
+            {"source_path": source_path}
+            if requirements_file.parent != source_path
+            else {}
+        )
         await run_sync_io(
             self._install_requirements_locked,
             requirements_file,
             plugin_id,
+            **source,
         )
-        recheck = DependencyGate().evaluate(
+        recheck = await run_sync_io(
+            DependencyGate().evaluate,
             requirements_file,
             allow_install=False,
             plugin_id=plugin_id,
@@ -573,6 +613,8 @@ class PluginLoader:  # pylint: disable=too-many-public-methods
         self,
         requirements_file: Path,
         plugin_id: str,
+        *,
+        source_path: Path | None = None,
     ) -> None:
         """Install deps under a per-plugin inter-process lock (blocking).
 
@@ -593,7 +635,10 @@ class PluginLoader:  # pylint: disable=too-many-public-methods
             missing = self._find_unsatisfied_dependencies(requirements_file)
             from ._sdk_dependencies import loaded_sdk_conflicts
 
-            conflicts = loaded_sdk_conflicts(requirements_file.parent, missing)
+            conflicts = loaded_sdk_conflicts(
+                source_path or requirements_file.parent,
+                missing,
+            )
             if conflicts:
                 from .errors import SDKRestartRequiredError
 
@@ -609,7 +654,14 @@ class PluginLoader:  # pylint: disable=too-many-public-methods
                     plugin_id,
                 )
                 return
-            self._install_requirements(requirements_file, plugin_id)
+            if source_path is None:
+                self._install_requirements(requirements_file, plugin_id)
+            else:
+                self._install_requirements(
+                    requirements_file,
+                    plugin_id,
+                    source_path=source_path,
+                )
 
     def _validate_entry_points(
         self,
@@ -1051,6 +1103,7 @@ class PluginLoader:  # pylint: disable=too-many-public-methods
             logger.warning(f"Plugin '{plugin_id}' already loaded")
             return self._loaded_plugins[plugin_id]
 
+        previous_instance = self.lifecycle.get_instance(plugin_id)
         instance = self.lifecycle.ensure_instance(
             plugin_id,
             generation=generation,
@@ -1084,17 +1137,27 @@ class PluginLoader:  # pylint: disable=too-many-public-methods
             self._loaded_plugins[plugin_id] = record
             return record
 
-        decision = await self._ensure_dependencies_installed(
-            source_path,
-            plugin_id,
-            allow_install=allow_install,
-        )
-        if decision.require_restart:
-            if manifest.sdk is not None:
-                from .errors import SDKRestartRequiredError
+        try:
+            decision = await self._ensure_dependencies_installed(
+                source_path,
+                plugin_id,
+                allow_install=allow_install,
+            )
+            if decision.require_restart:
+                if manifest.sdk is not None:
+                    from .errors import SDKRestartRequiredError
 
-                raise SDKRestartRequiredError(decision.reason)
-            raise RuntimeError(decision.reason)
+                    raise SDKRestartRequiredError(decision.reason)
+                raise RuntimeError(decision.reason)
+        except BaseException:
+            # No record exists yet for normal unload/repair to reclaim.
+            if (
+                instance is not previous_instance
+                and not instance.activated
+                and not instance.has_runtime_ledger()
+            ):
+                self.lifecycle.drop_instance(plugin_id)
+            raise
         if decision.unsupported or (
             decision.missing and not decision.allow_install
         ):
@@ -1436,6 +1499,8 @@ class PluginLoader:  # pylint: disable=too-many-public-methods
         self,
         requirements_file: Path,
         plugin_id: str,
+        *,
+        source_path: Path | None = None,
     ) -> None:
         """Install Python dependencies for a plugin (blocking).
 
@@ -1463,7 +1528,7 @@ class PluginLoader:  # pylint: disable=too-many-public-methods
             )
         from ._sdk_dependencies import is_sdk_source, install_sdk_requirements
 
-        if is_sdk_source(requirements_file.parent):
+        if is_sdk_source(source_path or requirements_file.parent):
             python = _desktop_python() if _is_frozen() else sys.executable
             if python is None:
                 raise RuntimeError(
