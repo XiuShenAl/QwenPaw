@@ -1,4 +1,7 @@
-"""SDK installs may add distributions, but never replace this process's code."""
+# -*- coding: utf-8 -*-
+"""
+SDK installs may add distributions, but never replace this process's code.
+"""
 
 import json
 import re
@@ -16,7 +19,9 @@ from .errors import SDKRestartRequiredError
 
 def is_sdk_source(source: Path) -> bool:
     try:
-        manifest = json.loads((source / "plugin.json").read_text(encoding="utf-8"))
+        manifest = json.loads(
+            (source / "plugin.json").read_text(encoding="utf-8"),
+        )
     except (OSError, ValueError):
         return False
     return isinstance(manifest, dict) and manifest.get("sdk") is not None
@@ -34,7 +39,7 @@ def _installed_versions() -> dict[str, str]:
     except (OSError, ValueError, TypeError, KeyError) as exc:
         raise SDKRestartRequiredError(
             "Cannot audit the installed dependency versions; restart with "
-            "a repaired dependency environment before installing SDK plugins."
+            "a repaired dependency environment before installing SDK plugins.",
         ) from exc
     return versions
 
@@ -54,7 +59,8 @@ def loaded_sdk_conflicts(source: Path, missing: list[str]) -> list[str]:
 def _uv_additions(output: str) -> set[str]:
     """Read uv's dry-run plan, refusing unknown formats instead of guessing.
 
-    Verified with uv 0.8.15: it prints ``Would install N packages`` followed by `` + name==v``;
+    Verified with uv 0.8.15: it prints ``Would install N packages``
+    followed by `` + name==v``;
     removals use `` -``. The count and every operation must agree. This is not
     a resolver: any format/version change fails closed before a real install.
     """
@@ -67,15 +73,24 @@ def _uv_additions(output: str) -> set[str]:
     ):
         return set()
     if len(counts) != 1 or int(counts[0]) != len(rows):
-        raise SDKRestartRequiredError("Unrecognized uv dry-run dependency plan.")
+        raise SDKRestartRequiredError(
+            "Unrecognized uv dry-run dependency plan.",
+        )
     names = set()
     for operation, declaration in rows:
         if operation != "+":
-            raise SDKRestartRequiredError("Dependency plan replaces installed code.")
+            raise SDKRestartRequiredError(
+                "Dependency plan replaces installed code.",
+            )
         # uv includes source provenance in parentheses, after name/version.
-        match = re.fullmatch(r"([A-Za-z0-9_.-]+)==([^\s]+)(?: \(.+\))?", declaration)
+        match = re.fullmatch(
+            r"([A-Za-z0-9_.-]+)==([^\s]+)(?: \(.+\))?",
+            declaration,
+        )
         if match is None:
-            raise SDKRestartRequiredError("Unrecognized uv dry-run package entry.")
+            raise SDKRestartRequiredError(
+                "Unrecognized uv dry-run package entry.",
+            )
         names.add(canonicalize_name(match[1]))
     if len(names) != len(rows):
         raise SDKRestartRequiredError("Ambiguous uv dry-run dependency plan.")
@@ -93,11 +108,14 @@ def install_sdk_requirements(
 ) -> None:
     """Resolve read-only, then install with the same installed-version pins."""
     installed = _installed_versions()
-    with tempfile.TemporaryDirectory(prefix="qwenpaw-sdk-dependencies-") as temp:
+    with tempfile.TemporaryDirectory(
+        prefix="qwenpaw-sdk-dependencies-",
+    ) as temp:
         constraints = Path(temp) / "constraints.txt"
         constraints.write_text(
             "".join(
-                f"{name}=={version}\n" for name, version in sorted(installed.items())
+                f"{name}=={version}\n"
+                for name, version in sorted(installed.items())
             ),
             encoding="utf-8",
         )
@@ -110,7 +128,10 @@ def install_sdk_requirements(
             "--disable-pip-version-check",
             "--no-input",
         ]
-        suffix = (["--target", target] if target else []) + ["-r", str(requirements)]
+        suffix = (["--target", target] if target else []) + [
+            "-r",
+            str(requirements),
+        ]
         pins = ["--constraint", str(constraints)]
         dry = ["--dry-run", "--report", str(report)]
 
@@ -125,7 +146,8 @@ def install_sdk_requirements(
             uv = find_uv()
             if uv is None:
                 raise RuntimeError(
-                    "Neither pip nor uv is available to resolve SDK dependencies."
+                    "Neither pip nor uv is available to resolve SDK "
+                    "dependencies.",
                 )
             command = [uv, "pip", "install", "--python", python]
             dry = ["--dry-run"]
@@ -137,19 +159,23 @@ def install_sdk_requirements(
             unconstrained = execute(command + suffix + dry)
             if unconstrained.returncode == 0:
                 raise SDKRestartRequiredError(
-                    "SDK dependencies require replacing installed distributions; "
-                    "restart with the requested dependency environment."
+                    "SDK dependencies require replacing installed "
+                    "distributions; "
+                    "restart with the requested dependency environment.",
                 )
             raise RuntimeError(
                 f"Dependency resolution failed for '{plugin_id}': "
-                f"{result.stdout}{result.stderr}"
+                f"{result.stdout}{result.stderr}",
             )
         if using_uv:
             additions = _uv_additions(result.stdout + "\n" + result.stderr)
         else:
             try:
                 plan = json.loads(report.read_text(encoding="utf-8"))
-                if plan["version"] != "1" or not isinstance(plan["install"], list):
+                if plan["version"] != "1" or not isinstance(
+                    plan["install"],
+                    list,
+                ):
                     raise ValueError("Unknown pip report format")
                 additions = {
                     canonicalize_name(item["metadata"]["name"], validate=True)
@@ -157,22 +183,23 @@ def install_sdk_requirements(
                 }
             except (OSError, ValueError, TypeError, KeyError) as exc:
                 raise SDKRestartRequiredError(
-                    "Unrecognized pip dependency plan."
+                    "Unrecognized pip dependency plan.",
                 ) from exc
         if additions & installed.keys():
             raise SDKRestartRequiredError(
                 "Dependency plan reinstalls existing distributions (including "
-                "same-version source changes); restart to apply."
+                "same-version source changes); restart to apply.",
             )
         if _installed_versions() != installed:
             raise SDKRestartRequiredError(
-                "The installed environment changed during dependency resolution; "
-                "retry in a stable process."
+                "The installed environment changed during dependency "
+                "resolution; "
+                "retry in a stable process.",
             )
         if additions:
             result = execute(command + suffix + pins)
             if result.returncode:
                 raise RuntimeError(
                     f"Dependency installation failed for '{plugin_id}': "
-                    f"{result.stdout}{result.stderr}"
+                    f"{result.stdout}{result.stderr}",
                 )
