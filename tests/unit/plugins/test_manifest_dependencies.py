@@ -13,6 +13,7 @@ from qwenpaw.plugins.loader import PluginLoader
 from qwenpaw.plugins.testing import PluginTestHost
 
 from .sdk_author_fixture import make_plugin
+from .sdk_dependency_fixture import dependency_python
 
 pytestmark = pytest.mark.p1
 
@@ -218,13 +219,10 @@ def test_manifest_dependency_installs_offline_wheel_in_isolated_python(
     tmp_path,
 ):
     """Real resolver/install/import, without touching the host environment."""
-    import ensurepip
     import os
     from pathlib import Path
-    import site
     import shutil
     import subprocess
-    import venv
     import zipfile
 
     import qwenpaw
@@ -267,32 +265,7 @@ class Plugin:
 plugin = Plugin()
 """,
     )
-    environment = tmp_path / "python"
-    venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(
-        environment,
-    )
-    python = environment / (
-        "Scripts/python.exe" if os.name == "nt" else "bin/python"
-    )
-    library = Path(
-        subprocess.check_output(
-            [
-                str(python),
-                "-I",
-                "-c",
-                "import site; print(site.getsitepackages()[0])",
-            ],
-            text=True,
-        ).strip(),
-    )
-    pip = next(
-        (Path(ensurepip.__file__).parent / "_bundled").glob("pip-*.whl"),
-    )
-    with zipfile.ZipFile(pip) as archive:
-        archive.extractall(library)
-    (library / "host_dependencies.pth").write_text(
-        f"import site; site.addsitedir({site.getsitepackages()[0]!r})\n",
-    )
+    python, _ = dependency_python(tmp_path / "python")
     # Expose current source without its unrelated editable-install metadata.
     host_source = tmp_path / "host-source"
     host_source.mkdir()

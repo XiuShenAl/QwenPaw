@@ -5,7 +5,9 @@ SDK installs may add distributions, but never replace this process's code.
 
 import json
 import re
+import sys
 import tempfile
+from importlib.machinery import all_suffixes
 from importlib.metadata import distributions
 from pathlib import Path
 from typing import Callable
@@ -27,21 +29,85 @@ def is_sdk_source(source: Path) -> bool:
     return isinstance(manifest, dict) and manifest.get("sdk") is not None
 
 
-def _installed_versions() -> dict[str, str]:
-    versions = {}
+def _public_module_loaded(package, files, loaded) -> bool:
+    """A bundled copy imported under its public name is live host code."""
+    root = Path(package.locate_file("")).resolve()
+    paths = {Path(package.locate_file(path)).resolve() for path in files}
+    for name, origin in loaded:
+        if origin not in paths or not origin.is_relative_to(root):
+            continue
+        relative = origin.relative_to(root).as_posix()
+        public = name.replace(".", "/")
+        if any(
+            relative in (public + suffix, public + "/__init__" + suffix)
+            for suffix in all_suffixes()
+        ):
+            return True
+    return False
+
+
+def _installed_snapshot() -> dict[str, tuple[str, tuple[str, ...]]]:
+    """Audit effective distributions, retaining their version and provenance.
+
+    Some tools append bundled dependencies to sys.path. A later copy is only
+    shadowed when another distribution's RECORD owns its metadata and it has
+    not been imported under its public name. Ordinary duplicates stay audited.
+    """
+    snapshot = {}
     try:
-        for package in distributions():
+        packages = [
+            (package, package.files or ()) for package in distributions()
+        ]
+        bundled_metadata = {
+            Path(package.locate_file(path)).resolve()
+            for package, files in packages
+            for path in files
+            if len(path.parts) > 2
+            and path.name == "METADATA"
+            and path.parent.name.endswith(".dist-info")
+        }
+        loaded = None
+        for package, files in packages:
             name = canonicalize_name(package.metadata["Name"], validate=True)
             version = str(Version(package.version))
-            if name in versions and versions[name] != version:
-                raise ValueError(f"Multiple installed versions of {name}")
-            versions[name] = version
+            metadata = {
+                Path(package.locate_file(path)).resolve()
+                for path in files
+                if len(path.parts) == 2
+                and path.name == "METADATA"
+                and path.parent.name.endswith(".dist-info")
+            }
+            source = str(Path(package.locate_file("")).resolve())
+            source += ":" + (package.read_text("direct_url.json") or "")
+            previous = snapshot.get(name)
+            if previous and metadata & bundled_metadata:
+                if loaded is None:
+                    loaded = [
+                        (name, Path(origin).resolve())
+                        for name, module in tuple(sys.modules.items())
+                        if (origin := getattr(module, "__file__", None))
+                    ]
+                if not _public_module_loaded(package, files, loaded):
+                    continue
+            if previous and previous[0] != version:
+                raise ValueError(
+                    f"Conflicting installed distributions for {name}: "
+                    f"{previous[0]} at {previous[1]}; {version} at {source}",
+                )
+            sources = set(previous[1] if previous else ())
+            sources.add(source)
+            snapshot[name] = (version, tuple(sorted(sources)))
     except (OSError, ValueError, TypeError, KeyError) as exc:
         raise SDKRestartRequiredError(
             "Cannot audit the installed dependency versions; restart with "
-            "a repaired dependency environment before installing SDK plugins.",
+            "a repaired dependency environment before installing SDK plugins. "
+            f"{exc}",
         ) from exc
-    return versions
+    return snapshot
+
+
+def _installed_versions() -> dict[str, str]:
+    return {name: value[0] for name, value in _installed_snapshot().items()}
 
 
 def loaded_sdk_conflicts(source: Path, missing: list[str]) -> list[str]:
@@ -107,7 +173,8 @@ def install_sdk_requirements(
     find_uv: Callable,
 ) -> None:
     """Resolve read-only, then install with the same installed-version pins."""
-    installed = _installed_versions()
+    snapshot = _installed_snapshot()
+    installed = {name: value[0] for name, value in snapshot.items()}
     with tempfile.TemporaryDirectory(
         prefix="qwenpaw-sdk-dependencies-",
     ) as temp:
@@ -190,7 +257,7 @@ def install_sdk_requirements(
                 "Dependency plan reinstalls existing distributions (including "
                 "same-version source changes); restart to apply.",
             )
-        if _installed_versions() != installed:
+        if _installed_snapshot() != snapshot:
             raise SDKRestartRequiredError(
                 "The installed environment changed during dependency "
                 "resolution; "

@@ -6,6 +6,7 @@ import json
 import pytest
 
 from .sdk_author_fixture import make_plugin
+from .sdk_dependency_fixture import dependency_python
 
 SOURCE = """
 from qwenpaw.plugins.tools import ToolSpec, ToolResult
@@ -207,10 +208,7 @@ def test_sdk_transitive_dependency_cannot_replace_an_installed_distribution(
         "child, without installation."
     )
     import os
-    from pathlib import Path
-    import site
     import subprocess
-    import venv
     import zipfile
 
     wheels = tmp_path / "wheels"
@@ -240,32 +238,12 @@ def test_sdk_transitive_dependency_cannot_replace_an_installed_distribution(
 
     child = wheel("sdk_loaded_child", "1.0")
     wheel("sdk_loaded_child", "2.0")
-    environment = tmp_path / "venv"
-    venv.EnvBuilder(with_pip=False, symlinks=True).create(environment)
-    python = environment / (
-        "Scripts/python.exe" if os.name == "nt" else "bin/python"
+    installer = (
+        "pip" if change in {"same-version-source", "pip-version"} else "uv"
     )
-    library = Path(
-        subprocess.check_output(
-            [
-                str(python),
-                "-I",
-                "-c",
-                "import site; print(site.getsitepackages()[0])",
-            ],
-            text=True,
-        ).strip(),
-    )
+    python, library = dependency_python(tmp_path / "venv", installer=installer)
     with zipfile.ZipFile(child) as archive:
         archive.extractall(library)
-    if change in {"same-version-source", "pip-version"}:
-        import ensurepip
-
-        bundled = next(
-            (Path(ensurepip.__file__).parent / "_bundled").glob("pip-*.whl"),
-        )
-        with zipfile.ZipFile(bundled) as archive:
-            archive.extractall(library)
     if change == "same-version-source":
         # Pip considers the installed same version satisfied: adding parent
         # is safe only if the differently sourced child bytes stay unchanged.
@@ -280,10 +258,6 @@ def test_sdk_transitive_dependency_cannot_replace_an_installed_distribution(
     else:
         requirement = "sdk-loaded-child>=2.0"
     wheel("sdk_new_parent", "1.0", requirement)
-    # Reuse the already installed host/dependencies, not repository fixtures.
-    (library / "host_dependencies.pth").write_text(
-        f"import site; site.addsitedir({site.getsitepackages()[0]!r})\n",
-    )
     one, two = package(tmp_path, "1.0.0"), package(tmp_path, "2.0.0")
     (two / "requirements.txt").write_text("sdk-new-parent==1.0\n")
     code = """
@@ -368,6 +342,11 @@ async def main():
         if sys.argv[4] in {"same-version-source", "pip-version"}:
             assert any(
                 "--report" in a and "--dry-run" in a
+                for a in previews
+            ), previews
+        else:
+            assert any(
+                "uv" in str(a[0]) and "--dry-run" in a
                 for a in previews
             ), previews
         assert (
