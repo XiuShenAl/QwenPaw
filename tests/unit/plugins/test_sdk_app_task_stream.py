@@ -390,12 +390,22 @@ plugin = Plugin()
                 ctx.storage.read_json("provider-stopped.json", False) is False
             )
             release.touch()
+            status_path = "/api/cancel-probe/tasks/" + started.json()["run_id"]
+            # Provider exit precedes resource cleanup and terminal persistence.
+            # Wait for the entire run without sending another cancellation.
             async with asyncio.timeout(3):
-                while not ctx.storage.read_json(
-                    "provider-stopped.json",
-                    False,
-                ):
+                while (
+                    await host.request("GET", status_path, user_id="alice")
+                ).json()["status"] == "running":
                     await asyncio.sleep(0.01)
+                while host.resource_snapshot("extension-contract")[
+                    "active_calls"
+                ]:
+                    await asyncio.sleep(0.01)
+            assert (
+                await host.request("GET", status_path, user_id="alice")
+            ).json()["status"] == "cancelled"
+            assert ctx.storage.read_json("provider-stopped.json") is True
             retry = await host.request("POST", path, user_id="alice")
             assert retry.json()["stopped"] is True
         finally:
