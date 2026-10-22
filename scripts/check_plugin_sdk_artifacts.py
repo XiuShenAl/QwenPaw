@@ -25,7 +25,25 @@ INTERNAL = {
     "test_sdk_approval_event_bridge.py",
     "test_sdk_channel_bridge.py",
     "test_sdk_channel_run_bridge.py",
+    "test_sdk_dependency_environment.py",
 }
+
+
+def prepare_author_tests(source: Path, root: Path) -> list[str]:
+    """Copy the standalone author suite and its local helpers."""
+    suite = root / "author_tests"
+    suite.mkdir()
+    (suite / "__init__.py").touch()
+    for fixture in ("sdk_author_fixture.py", "sdk_dependency_fixture.py"):
+        shutil.copy2(source / "tests/unit/plugins" / fixture, suite)
+    tests = []
+    for file in sorted((source / "tests/unit/plugins").glob("test_sdk_*.py")):
+        if file.name not in INTERNAL:
+            shutil.copy2(file, suite)
+            tests.append(file.name)
+    assert tests, "No public author tests found in build snapshot"
+    (root / "pytest.ini").write_text("[pytest]\nasyncio_mode = auto\n")
+    return tests
 
 
 # The standalone acceptance sequence shares one report and environment.
@@ -132,21 +150,12 @@ print(json.dumps({{
         "--follow-imports=silent",
         str(root / typing_source.name),
     )
-    suite = root / "author_tests"
-    suite.mkdir()
-    (suite / "__init__.py").touch()
-    shutil.copy2(source / "tests/unit/plugins/sdk_author_fixture.py", suite)
-    for file in sorted((source / "tests/unit/plugins").glob("test_sdk_*.py")):
-        if file.name not in INTERNAL:
-            shutil.copy2(file, suite)
-            report["tests"].append(file.name)
-    assert report["tests"], "No public author tests found in build snapshot"
-    (root / "pytest.ini").write_text("[pytest]\nasyncio_mode = auto\n")
+    report["tests"] = prepare_author_tests(source, root)
     run(
         "public-author-tests",
         "-m",
         "pytest",
-        str(suite),
+        str(root / "author_tests"),
         "-q",
         "--tb=short",
         "--timeout=45",

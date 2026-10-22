@@ -359,6 +359,7 @@ def test_author_checker_rejects_invalid_manifest_dependencies(
     )
 
 
+@pytest.mark.timeout(45)
 async def test_cancelled_installer_keeps_normalized_input_until_thread_stops(
     tmp_path,
     monkeypatch,
@@ -367,14 +368,15 @@ async def test_cancelled_installer_keeps_normalized_input_until_thread_stops(
     import threading
 
     source = package(tmp_path, ["b01-probe-delayed==1.0"])
-    started, release = threading.Event(), threading.Event()
+    started, release = asyncio.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
     inputs = []
 
     def install(_loader, requirements, _plugin_id, **_kwargs):
         inputs.append(requirements)
         assert "b01-probe-delayed" in requirements.read_text()
-        started.set()
-        assert release.wait(5), "Test did not release installer"
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(30), "Test did not release installer"
         assert requirements.is_file(), "Input deleted during installation"
 
     monkeypatch.setattr(PluginLoader, "_install_requirements", install)
@@ -386,8 +388,17 @@ async def test_cancelled_installer_keeps_normalized_input_until_thread_stops(
                 allow_install=True,
             ),
         )
+        startup = asyncio.create_task(started.wait())
         try:
-            assert await asyncio.to_thread(started.wait, 5)
+            done, _ = await asyncio.wait(
+                {startup, task},
+                timeout=30,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if task in done:
+                await task  # Surface dependency-audit errors immediately.
+                pytest.fail("Installer completed before the release signal")
+            assert startup in done, "Installer did not start within 30 seconds"
             assert inputs[0].parent != source
             for _ in range(2):
                 task.cancel()
@@ -396,7 +407,8 @@ async def test_cancelled_installer_keeps_normalized_input_until_thread_stops(
                 assert inputs[0].is_file()
         finally:
             release.set()
-            await asyncio.gather(task, return_exceptions=True)
+            startup.cancel()
+            await asyncio.gather(startup, task, return_exceptions=True)
         assert task.cancelled()
         assert not inputs[0].exists()
         assert not (source / "requirements.txt").exists()
