@@ -991,6 +991,7 @@ plugin = Plugin()
 
 
 @pytest.mark.parametrize("interrupt_retry", [False, True])
+@pytest.mark.usefixtures("short_stream_stop_timeout")
 async def test_interrupt_reload_retries_cleanup_after_outer_tool_exits(
     tmp_path,
     interrupt_retry,
@@ -1104,6 +1105,7 @@ async def test_open_model_stream_closes_after_profile_directory_changes(
 
 
 @pytest.mark.parametrize("entry", ["app", "channel"])
+@pytest.mark.usefixtures("short_interrupt_timeout")
 async def test_runtime_owner_retries_failed_provider_scope_via_public_reload(
     tmp_path,
     entry,

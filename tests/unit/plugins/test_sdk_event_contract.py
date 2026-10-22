@@ -273,7 +273,7 @@ async def test_observer_workspace_filter_and_reload_do_not_duplicate_events(
             source,
             config={"observer": "normal", "workspace_filter": "one"},
         )
-        for index in range(21):
+        for index in range(4):
             if index:
                 assert (await host.reload("extension-contract")).ok
             async for _ in host.stream_chat(

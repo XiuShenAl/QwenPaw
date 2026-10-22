@@ -1130,6 +1130,7 @@ async def test_official_async_template_keeps_loop_responsive(  # pylint: disable
     "owner",
     ["root-storage", "tool-storage", "root-media"],
 )
+@pytest.mark.usefixtures("short_interrupt_timeout")
 async def test_async_file_transaction_retains_owner_until_real_io_finishes(  # pylint: disable=too-many-statements  # noqa: E501
     tmp_path,
     monkeypatch,

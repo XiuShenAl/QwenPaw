@@ -4,8 +4,10 @@ coverage.
 """
 
 import json
+import os
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -74,23 +76,39 @@ def test_checker_does_not_report_aliased_dynamic_import_as_fully_checked(
     assert not report.ok or report.uncovered
 
 
-def runtime_report(plugin):
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "qwenpaw.plugins.check",
-            str(plugin),
-            "--runtime",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
+def runtime_state():
+    return (
+        sys.getprofile(),
+        threading.getprofile(),
+        os.environ.get("QWENPAW_WORKING_DIR"),
+        tuple(sys.path),
+        {k: v for k, v in sys.modules.items() if k.startswith("plugin_")},
     )
-    report = json.loads(result.stdout)
+
+
+def runtime_report(plugin, capsys=None):
+    args = [str(plugin), "--runtime"]
+    if capsys is None:
+        result = subprocess.run(
+            [sys.executable, "-m", "qwenpaw.plugins.check", *args],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        code, output = result.returncode, result.stdout
+    else:
+        from qwenpaw.plugins.check import main
+
+        # These trusted fixtures close their host; CLI process isolation is
+        # still covered by one successful and one rejected plugin below.
+        before = runtime_state()
+        code = main(args)
+        assert runtime_state() == before
+        output = capsys.readouterr().out
+    report = json.loads(output)
     assert report["runtime_checked"] is True
-    return result.returncode, report
+    return code, report
 
 
 def test_runtime_checker_accepts_public_sdk_host_delegation(tmp_path):
@@ -130,6 +148,7 @@ plugin = Plugin()
 def test_runtime_checker_detects_private_same_named_type_and_cleanup(
     tmp_path,
     cleanup,
+    capsys,
 ):
     source = """
 import importlib
@@ -165,7 +184,7 @@ plugin = Plugin()
         "call.resources.defer(private)" if cleanup else "private()",
     )
     plugin = make_plugin(tmp_path, source, ["resources"])
-    code, report = runtime_report(plugin)
+    code, report = runtime_report(plugin, capsys)
     assert code == 1 and not report["ok"]
     assert any(
         row["code"] == "runtime-private-call"
@@ -176,6 +195,7 @@ plugin = Plugin()
 
 def test_checker_report_is_bound_to_bytes_versions_and_executed_scope(
     tmp_path,
+    capsys,
 ):
     from datetime import datetime
     from qwenpaw.plugins import SDK_VERSION
@@ -201,7 +221,7 @@ def test_checker_report_is_bound_to_bytes_versions_and_executed_scope(
     entry.write_text(entry.read_text() + "\n# changed author source\n")
     after = check_plugin(plugin)
     assert after.package_hash != before.package_hash
-    code, executed = runtime_report(plugin)
+    code, executed = runtime_report(plugin, capsys)
     assert code == 0 and executed["package_hash"] == after.package_hash
     assert executed["runtime_checked"]
     assert any("uncalled" in item for item in executed["uncovered"])
@@ -249,7 +269,10 @@ plugin = Plugin()
     )
 
 
-def test_runtime_checker_accepts_public_registration_context_manager(tmp_path):
+def test_runtime_checker_accepts_public_registration_context_manager(
+    tmp_path,
+    capsys,
+):
     plugin = make_plugin(
         tmp_path,
         """
@@ -269,5 +292,5 @@ plugin = Plugin()
 """,
         ["resources", "storage"],
     )
-    code, report = runtime_report(plugin)
+    code, report = runtime_report(plugin, capsys)
     assert code == 0 and report["ok"] and not report["findings"]

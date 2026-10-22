@@ -354,12 +354,16 @@ async def test_channel_stop_closes_actual_overflow_stream_before_owner_exit(
     tmp_path,
     monkeypatch,
     boundary,
+    request,
 ):
     # Keep this ownership/cleanup scenario and its assertions together.
     # pylint: disable=too-many-statements
     from qwenpaw.agents import react_agent
     from .sdk_author_fixture import make_plugin
     from .test_sdk_channel_routing_contract import SOURCE
+
+    if boundary == "blocked-close":
+        request.getfixturevalue("short_interrupt_timeout")
 
     streams = []
     closing, release, closed = (
